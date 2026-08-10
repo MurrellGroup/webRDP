@@ -69,7 +69,11 @@ const diagnostics = message.diagnostics as {
   sampledSequences: number;
   testedSitePairs: number;
   fourGameteFraction: number;
+  proximityPermutationP: number;
+  proximityPermutationReplicates: number;
 };
 assert.equal(diagnostics.sampledSequences, 3);
 assert.ok(diagnostics.testedSitePairs > 0);
 assert.ok(diagnostics.fourGameteFraction >= 0 && diagnostics.fourGameteFraction <= 1);
+assert.ok(diagnostics.proximityPermutationP > 0 && diagnostics.proximityPermutationP <= 1);
+assert.equal(diagnostics.proximityPermutationReplicates, 199);

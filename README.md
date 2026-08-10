@@ -4,15 +4,19 @@ RDP Web is a local-first, browser-based recombination analysis workbench. It
 combines optimized WebAssembly kernels with an interactive workflow for
 alignment/project import, method-specific screening, event verification,
 breakpoint editing, matrices/topology checks, and recombination-aware exports.
-Version 0.4 adds exact bounded 3SEQ calibration, seeded p-distance
-bootstrapping, challenge diagnostics, local NJ trees, breakpoint matrices,
-reproducible hotspot tests, manual-event recalculation, undo/redo with an audit
-trail, and GFF3/GenBank/BED annotation workflows.
+Version 0.5 adds a dedicated local-tree explorer, a truth-annotated synthetic
+dataset library, explicit method-by-method result interpretation, reliable
+scrolling and responsive navigation, safe-by-default fresh/accepted exports,
+scan-scope event recalculation, and a project-level audit ledger. The exact
+bounded 3SEQ calibration, seeded p-distance bootstrapping, challenge
+diagnostics, breakpoint matrices, annotation workflows, and WebAssembly worker
+architecture remain available.
 
 The project is MIT licensed and maintains a strict clean-room boundary from
 OpenRDP (GPL-3.0) and the proprietary Windows RDP package. See
 `SCIENTIFIC_BASIS.md` for the implementation/validation ledger and
-`THIRD_PARTY_NOTICES.md` for licensing details.
+`FEATURE_AUDIT.md` for the product-level gap ledger. Licensing details are in
+`THIRD_PARTY_NOTICES.md`.
 
 ## Local development
 
@@ -54,6 +58,20 @@ npm run test:wasm
 npm run bench:wasm -- 100 10000
 npm run lint
 ```
+
+## Batch runner
+
+The same WebAssembly worker can be run without a browser and writes a
+restorable project:
+
+```sh
+npm run cli -- alignment.fasta results.rdpweb \
+  --candidate-parents 12 --bootstrap 100 --seed 1511506142
+```
+
+Use `npm run cli -- --help` for method, circular-genome, query/reference, and
+exhaustive-search options. This is a local batch interface, not a separate
+algorithm implementation.
 
 The tests cover scalar/packed distance equivalence, exact HGRW tails, seeded
 bootstraps, sampled large-dataset parent selection, windowless two-state HMM

@@ -19,11 +19,12 @@ import {
   MethodName,
   NeighborJoiningNode,
   PRIMARY_METHODS,
+  ProjectAuditEntry,
+  RdpProject,
   RdpEvent,
   alignmentStats,
   breakpointHotspotTest,
   buildLocalTree,
-  demoEvent,
   evidenceProfile,
   eventLength,
   eventSegments,
@@ -39,9 +40,12 @@ import {
   toFasta,
   toGff3,
 } from "./rdp-core";
+import { EXAMPLE_DATASETS, ExampleDataset } from "./example-datasets";
+import { AutosaveRecord, clearAutosave, loadAutosave, saveAutosave } from "./local-project-store";
 
-type Tab = "explore" | "alignment" | "matrices" | "export" | "methods";
+type Tab = "explore" | "trees" | "alignment" | "patterns" | "export" | "methods";
 type RunState = "idle" | "running" | "complete" | "error";
+type ExportScope = "accepted-fresh" | "all-fresh" | "all-retained";
 
 interface HistoryFrame {
   label: string;
@@ -59,40 +63,47 @@ interface RunMetrics {
   diagnostics?: AlignmentDiagnostics;
 }
 
-const METHOD_META: Record<MethodName, { family: string; detail: string; citation: string }> = {
+const METHOD_META: Record<MethodName, { family: string; detail: string; limit: string; citation: string }> = {
   RDP: {
     family: "Identity / triplet",
     detail: "Informative-site triplet scan with binomial assessment of identity runs.",
+    limit: "Current candidate generation is shared with the triplet CUSUM screen; numerical parity with desktop RDP is not established.",
     citation: "https://doi.org/10.1093/bioinformatics/16.6.562",
   },
   GENECONV: {
     family: "Substitution distribution",
     detail: "Unusually long fragments of pairwise identity relative to the alignment background.",
+    limit: "Uses a G-scale-0 run bound, not the complete GENECONV mismatch-penalty and permutation model.",
     citation: "https://doi.org/10.1006/viro.1999.0058",
   },
   BootScan: {
     family: "Phylogenetic / windowed",
     detail: "Windowed support for changes in the recombinant’s closest relative.",
+    limit: "Uses seeded p-distance triplet resampling, not full multi-taxon neighbor-joining bootstrap parity.",
     citation: "https://doi.org/10.1089/aid.2005.21.98",
   },
   MaxChi: {
     family: "Substitution distribution",
     detail: "Maximum chi-square contrasts across variable sites around candidate breakpoints.",
+    limit: "Evaluates shared candidate boundaries; it is not yet an independent MaxChi candidate scan.",
     citation: "https://doi.org/10.1007/BF00182389",
   },
   Chimaera: {
     family: "Substitution distribution",
     detail: "Two-state refinement of MaxChi-style breakpoint evidence in sequence triplets.",
+    limit: "Evaluates shared candidate boundaries; full Chimaera scan and calibration parity remain validation work.",
     citation: "https://doi.org/10.1073/pnas.241370698",
   },
   SiScan: {
     family: "Site-category / permutation",
     detail: "Fast oriented category-Z evidence; outgroup permutations remain on the parity track.",
+    limit: "This is a category-Z surrogate without the complete SiScan permutation and outgroup procedure.",
     citation: "https://doi.org/10.1093/bioinformatics/16.7.573",
   },
   "3Seq": {
     family: "Non-parametric triplet",
     detail: "Maximum-descent hypergeometric random walk with exact bounded dynamic-program calibration.",
+    limit: "Exact DP is operation-bounded and falls back to a conservative bound; candidates still come from the shared screen.",
     citation: "https://doi.org/10.1093/molbev/msx263",
   },
 };
@@ -180,6 +191,39 @@ function formatP(value: number): string {
     return `${coefficient}×10${Number(exponent).toString().replace("-", "⁻")}`;
   }
   return value.toPrecision(2);
+}
+
+function tutorialTruthEvent(): RdpEvent {
+  return {
+    id: "tutorial-known-truth",
+    recombinant: 0,
+    majorParent: 2,
+    minorParent: 5,
+    start: 782,
+    end: 1538,
+    wraps: false,
+    confidenceStart: [782, 782],
+    confidenceEnd: [1538, 1538],
+    breakpointModel: { method: "manual", informativeSites: 0 },
+    evidence: [],
+    chiSquare: 0,
+    informativeSites: 0,
+    decision: "unreviewed",
+    warnings: ["Known synthetic truth for orientation only; this is not a scan result. Recalculate or run a full scan before interpretation."],
+    note: "Tutorial truth: a Beta-derived tract was inserted at sites 783–1,538.",
+    source: "example",
+    groupId: "known-truth",
+    alternativeParents: [6, 7, 11],
+    hypothesisTests: 1,
+    history: [{
+      id: "tutorial-known-truth-history",
+      timestamp: "2026-01-01T00:00:00.000Z",
+      action: "Loaded known synthetic truth",
+      summary: "No method p-values were pre-authored; this event exists only to demonstrate review and tree views.",
+    }],
+    evidenceStale: true,
+    diagnostics: { tractVariableDensity: 0, backgroundVariableDensity: 0, rateRatio: 1, parentConflictRate: 0, parentDiscriminatingSites: 0, diffuseIncompatibility: false },
+  };
 }
 
 function download(filename: string, content: string, type = "text/plain"): void {
@@ -300,7 +344,12 @@ function EvidencePlot({ alignment, event, window, circular, onUpdate }: {
         }}
         onPointerUp={() => {
           if (draggingBreakpoint && preview && (preview.start !== event.start || preview.end !== event.end)) {
-            onUpdate?.({ ...preview, breakpointModel: { method: "manual", informativeSites: event.informativeSites } }, "Dragged breakpoint handle");
+            onUpdate?.({
+              ...preview,
+              confidenceStart: [preview.start, preview.start],
+              confidenceEnd: [preview.end, preview.end],
+              breakpointModel: { method: "manual", informativeSites: event.informativeSites },
+            }, "Dragged breakpoint handle");
           }
           setDraggingBreakpoint(null);
           setPreview(null);
@@ -394,30 +443,211 @@ function EventTable({ alignment, events, selectedId, onSelect }: {
   selectedId: string | null;
   onSelect: (id: string) => void;
 }) {
+  const [query, setQuery] = useState("");
+  const [method, setMethod] = useState<MethodName | "all">("all");
+  const [decision, setDecision] = useState<EventDecision | "all">("all");
+  const filtered = events.filter((event) => {
+    const names = [event.recombinant, event.majorParent, event.minorParent]
+      .map((index) => alignment.sequences[index]?.name ?? "")
+      .join(" ")
+      .toLowerCase();
+    const matchesQuery = !query || names.includes(query.toLowerCase()) || formatEventRegion(event, alignment.length).includes(query);
+    const matchesMethod = method === "all" || event.evidence.some((item) => item.method === method && item.supported);
+    const matchesDecision = decision === "all" || event.decision === decision;
+    return matchesQuery && matchesMethod && matchesDecision;
+  });
   return (
-    <div className="table-scroll">
+    <div>
+      <div className="event-filters">
+        <label><span>Find event</span><input value={query} onChange={(value) => setQuery(value.target.value)} placeholder="Sequence or coordinate…" /></label>
+        <label><span>Supported by</span><select value={method} onChange={(value) => setMethod(value.target.value as MethodName | "all")}><option value="all">Any enabled method</option>{PRIMARY_METHODS.map((item) => <option value={item} key={item}>{item}</option>)}</select></label>
+        <label><span>Review</span><select value={decision} onChange={(value) => setDecision(value.target.value as EventDecision | "all")}><option value="all">Any decision</option><option value="unreviewed">Unreviewed</option><option value="accepted">Accepted</option><option value="rejected">Rejected</option></select></label>
+        <span>{filtered.length} of {events.length} hypotheses</span>
+      </div>
+      <div className="table-scroll">
       <table className="event-table">
-        <thead><tr><th>Event</th><th>Recombinant</th><th>Minor parent</th><th>Region</th><th>Methods</th><th>Best corrected p</th><th>Review</th></tr></thead>
+        <thead><tr><th>Event</th><th>Recombinant</th><th>Parent assignment</th><th>Region</th><th>Supporting methods</th><th>Best adjusted p</th><th>Review</th></tr></thead>
         <tbody>
-          {events.length === 0 ? <tr><td colSpan={7} className="empty-cell">No events pass the current consensus threshold.</td></tr> : events.map((event, index) => {
-            const supported = event.evidence.filter((item) => item.supported).length;
-            const bestP = Math.min(...event.evidence.map((item) => item.correctedP));
+          {filtered.length === 0 ? <tr><td colSpan={7} className="empty-cell">{events.length ? "No hypotheses match these filters." : "No events pass the current consensus threshold."}</td></tr> : filtered.map((event) => {
+            const index = events.findIndex((candidate) => candidate.id === event.id);
+            const supported = event.evidence.filter((item) => item.supported);
+            const bestP = event.evidence.length ? Math.min(...event.evidence.map((item) => item.correctedP)) : Number.NaN;
             return (
-              <tr key={event.id} className={event.id === selectedId ? "selected" : ""} onClick={() => onSelect(event.id)}>
-                <td><span className="event-number" title={event.groupId ? `Grouped as ${event.groupId}` : "Ungrouped event"}>{index + 1}{event.groupId && <i/>}</span></td>
-                <td>{alignment.sequences[event.recombinant]?.name ?? "—"}</td>
-                <td>{alignment.sequences[event.minorParent]?.name ?? "—"}</td>
+              <tr key={event.id} className={event.id === selectedId ? "selected" : ""} onClick={() => onSelect(event.id)} onKeyDown={(key) => { if (key.key === "Enter" || key.key === " ") { key.preventDefault(); onSelect(event.id); } }} tabIndex={0} aria-selected={event.id === selectedId}>
+                <td><span className="event-number" title={event.groupId ? `Grouped as ${event.groupId}` : "Ungrouped event"}>{index + 1}{event.groupId && <i/>}</span><small className={`source-label ${event.source}`}>{event.source === "wasm" ? "scan" : event.source === "example" ? "known truth" : "manual"}</small></td>
+                <td><b className="primary-name">{alignment.sequences[event.recombinant]?.name ?? "—"}</b></td>
+                <td><div className="parent-pair"><span><i className="parent-role major"/>Major · {alignment.sequences[event.majorParent]?.name ?? "—"}</span><span><i className="parent-role minor"/>Minor · {alignment.sequences[event.minorParent]?.name ?? "—"}</span></div></td>
                 <td className="mono">{formatEventRegion(event, alignment.length)}</td>
-                <td><span className="method-count">{supported}/{event.evidence.length}</span></td>
+                <td><div className="method-chips">{supported.length ? supported.map((item) => <span key={item.method} title={`${item.method}: adjusted p ${formatP(item.correctedP)}`}>{item.method}</span>) : <em>{event.evidenceStale ? "needs calculation" : "none"}</em>}</div></td>
                 <td className="mono">{formatP(bestP)}</td>
-                <td><span className={`decision-label ${event.decision}`}>{event.decision}</span></td>
+                <td><span className={`decision-label ${event.decision}`}>{event.decision}</span>{event.evidenceStale && <small className="stale-label">stale</small>}</td>
               </tr>
             );
           })}
         </tbody>
       </table>
+      </div>
     </div>
   );
+}
+
+function MethodSpecificPlot({ alignment, event, method, window }: { alignment: AlignmentData; event: RdpEvent; method: MethodName; window: number }) {
+  const points = useMemo(() => {
+    const recombinant = alignment.sequences[event.recombinant].sequence;
+    const major = alignment.sequences[event.majorParent].sequence;
+    const minor = alignment.sequences[event.minorParent].sequence;
+    const canonical = (base: string) => base === "A" || base === "C" || base === "G" || base === "T";
+    const stride = Math.max(1, Math.ceil(alignment.length / 180));
+    if (method === "3Seq") {
+      const output: Array<{ position: number; value: number }> = [];
+      let walk = 0;
+      let maximum = 0;
+      for (let site = 0; site < alignment.length; site += 1) {
+        const r = recombinant[site];
+        const a = major[site];
+        const b = minor[site];
+        if (canonical(r) && canonical(a) && canonical(b) && a !== b) {
+          if (r === a) walk += 1;
+          else if (r === b) walk -= 1;
+          maximum = Math.max(maximum, walk);
+        }
+        if (site % stride === 0 || site === alignment.length - 1) output.push({ position: site, value: maximum - walk });
+      }
+      return { values: output, label: "HGRW descent from previous maximum", baseline: 0 };
+    }
+    const output: Array<{ position: number; value: number }> = [];
+    const half = Math.max(10, Math.floor(window / 2));
+    for (let center = 0; center < alignment.length; center += stride) {
+      const start = Math.max(0, center - half);
+      const end = Math.min(alignment.length, center + half);
+      let majorMatches = 0;
+      let minorMatches = 0;
+      let discriminating = 0;
+      let validSites = 0;
+      let identityMajor = 0;
+      let identityMinor = 0;
+      let run = 0;
+      let bestRun = 0;
+      const sides = [[0, 0], [0, 0]];
+      for (let site = start; site < end; site += 1) {
+        const r = recombinant[site];
+        const a = major[site];
+        const b = minor[site];
+        if (!canonical(r) || !canonical(a) || !canonical(b)) continue;
+        validSites += 1;
+        if (r === a) identityMajor += 1;
+        if (r === b) identityMinor += 1;
+        if (a === b) { run = 0; continue; }
+        discriminating += 1;
+        const side = site < center ? 0 : 1;
+        if (r === a) {
+          majorMatches += 1;
+          sides[side][0] += 1;
+          run = 0;
+        } else if (r === b) {
+          minorMatches += 1;
+          sides[side][1] += 1;
+          run += 1;
+          bestRun = Math.max(bestRun, run);
+        } else run = 0;
+      }
+      const [leftMajor, leftMinor] = sides[0];
+      const [rightMajor, rightMinor] = sides[1];
+      const total = leftMajor + leftMinor + rightMajor + rightMinor;
+      const determinant = leftMajor * rightMinor - leftMinor * rightMajor;
+      const denominator = Math.max(1, (leftMajor + leftMinor) * (rightMajor + rightMinor) * (leftMajor + rightMajor) * (leftMinor + rightMinor));
+      const chi = total * determinant * determinant / denominator;
+      const minorLeft = leftMinor / Math.max(1, leftMajor + leftMinor);
+      const minorRight = rightMinor / Math.max(1, rightMajor + rightMinor);
+      const value = method === "RDP"
+        ? (minorMatches - majorMatches) / Math.max(1, discriminating)
+        : method === "GENECONV"
+          ? bestRun
+          : method === "BootScan"
+            ? (identityMinor - identityMajor) / Math.max(1, validSites)
+            : method === "MaxChi"
+              ? chi
+              : method === "Chimaera"
+                ? Math.abs(minorLeft - minorRight)
+                : (minorMatches - majorMatches) / Math.sqrt(Math.max(1, discriminating));
+      output.push({ position: center, value });
+    }
+    const labels: Record<Exclude<MethodName, "3Seq">, string> = {
+      RDP: "Minor-minus-major match fraction at parent-discriminating sites",
+      GENECONV: "Longest local minor-parent concordant run",
+      BootScan: "Minor-minus-major window identity",
+      MaxChi: "Local 2×2 boundary χ² profile",
+      Chimaera: "Binary parent-state contrast across boundary",
+      SiScan: "Oriented parent-category Z profile",
+    };
+    return { values: output, label: labels[method], baseline: method === "RDP" || method === "BootScan" || method === "SiScan" ? 0 : undefined };
+  }, [alignment, event, method, window]);
+  const width = 900;
+  const height = 150;
+  const left = 42;
+  const right = 12;
+  const top = 12;
+  const bottom = 25;
+  const minimum = Math.min(...points.values.map((point) => point.value), points.baseline ?? Number.POSITIVE_INFINITY);
+  const maximum = Math.max(...points.values.map((point) => point.value), points.baseline ?? Number.NEGATIVE_INFINITY);
+  const padding = Math.max(0.001, (maximum - minimum) * 0.08);
+  const low = minimum - padding;
+  const high = maximum + padding;
+  const x = (position: number) => left + position / Math.max(1, alignment.length) * (width - left - right);
+  const y = (value: number) => top + (high - value) / Math.max(0.001, high - low) * (height - top - bottom);
+  const path = points.values.map((point, index) => `${index ? "L" : "M"}${x(point.position).toFixed(1)},${y(point.value).toFixed(1)}`).join(" ");
+  return <div className="method-profile">
+    <div><b>{method}-specific exploratory profile</b><span>{points.label}</span></div>
+    <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${method} profile across the alignment`}>
+      {eventSegments(event, alignment.length).map(([start, end], index) => <rect key={index} x={x(start)} y={top} width={Math.max(1, x(end) - x(start))} height={height - top - bottom} className="method-profile-tract"/>)}
+      {points.baseline !== undefined && <line x1={left} x2={width - right} y1={y(points.baseline)} y2={y(points.baseline)} className="method-profile-zero"/>}
+      <path d={path} className="method-profile-line"/>
+      <line x1={x(event.start)} x2={x(event.start)} y1={top} y2={height - bottom} className="breakpoint-line"/>
+      <line x1={x(event.end)} x2={x(event.end)} y1={top} y2={height - bottom} className="breakpoint-line"/>
+      <text x={4} y={top + 5} className="axis-label">{maximum.toPrecision(3)}</text>
+      <text x={4} y={height - bottom} className="axis-label">{minimum.toPrecision(3)}</text>
+      <text x={left} y={height - 7} className="axis-label">1</text>
+      <text x={width - right} y={height - 7} textAnchor="end" className="axis-label">{alignment.length.toLocaleString()}</text>
+    </svg>
+    <p>This bounded profile is calculated only for the selected triplet and is intended for visual review. The saved p-value above comes from the worker statistic and its documented calibration.</p>
+  </div>;
+}
+
+function MethodEvidencePanel({ alignment, event, window, selectedMethod, onSelectMethod }: {
+  alignment: AlignmentData;
+  event: RdpEvent;
+  window: number;
+  selectedMethod: MethodName;
+  onSelectMethod: (method: MethodName) => void;
+}) {
+  const evidence = event.evidence.find((item) => item.method === selectedMethod);
+  const supported = event.evidence.filter((item) => item.supported).length;
+  return <div className="method-result-explorer">
+    <div className="method-result-tabs" role="tablist" aria-label="Method results">
+      {PRIMARY_METHODS.map((method) => {
+        const item = event.evidence.find((candidate) => candidate.method === method);
+        return <button type="button" role="tab" aria-selected={selectedMethod === method} key={method} className={`${selectedMethod === method ? "active" : ""} ${item?.supported ? "supported" : item ? "not-supported" : "not-run"}`} onClick={() => onSelectMethod(method)}><span>{item?.supported ? "✓" : item ? "·" : "—"}</span><b>{method}</b><small>{item ? formatP(item.correctedP) : "not run"}</small></button>;
+      })}
+    </div>
+    <div className="method-result-detail">
+      <div className="method-summary">
+        <span className="eyebrow">{supported}/{event.evidence.length || 0} enabled methods support this hypothesis</span>
+        <h3>{selectedMethod} result</h3>
+        <p>{METHOD_META[selectedMethod].detail}</p>
+      </div>
+      {evidence ? <>
+        <div className="method-numbers">
+          <article><span>Decision at α</span><b className={evidence.supported ? "positive" : "negative"}>{evidence.supported ? "Supports" : "Does not support"}</b><small>{event.evidenceStale ? "Saved result is stale after edits" : "Current hypothesis"}</small></article>
+          <article><span>Adjusted p</span><b>{formatP(evidence.correctedP)}</b><small>{evidence.correctionScope ?? "Saved scan correction"}</small></article>
+          <article><span>Raw method p</span><b>{formatP(evidence.pValue)}</b><small>Before experiment-wide correction</small></article>
+          <article><span>{evidence.statisticLabel}</span><b>{Number.isFinite(evidence.statistic) ? evidence.statistic.toPrecision(4) : "—"}</b><small>{evidence.calibration}</small></article>
+        </div>
+        {event.recalculationNote && <div className="method-scope-note">{event.recalculationNote}</div>}
+      </> : <div className="method-not-run"><b>{selectedMethod} has no result for this hypothesis.</b><span>Enable the method and run a full scan, or recalculate the selected manual hypothesis.</span></div>}
+      <div className="method-limit"><strong>Interpretation limit</strong><span>{METHOD_META[selectedMethod].limit}</span><a href={METHOD_META[selectedMethod].citation} target="_blank" rel="noreferrer">Primary paper ↗</a></div>
+    </div>
+    <MethodSpecificPlot alignment={alignment} event={event} method={selectedMethod} window={window}/>
+  </div>;
 }
 
 function AlignmentViewer({ alignment, event }: { alignment: AlignmentData; event: RdpEvent | null }) {
@@ -533,7 +763,8 @@ function ChallengeDiagnostics({ diagnostics, event }: { diagnostics?: AlignmentD
   if (!diagnostics) return <div className="empty-state compact">Run a scan to calculate bounded four-gamete and rate-variation diagnostics.</div>;
   const values = [
     ["Four-gamete incompatible", `${(diagnostics.fourGameteFraction * 100).toFixed(1)}%`, `${diagnostics.incompatibleSitePairs.toLocaleString()} / ${diagnostics.testedSitePairs.toLocaleString()} sampled site pairs`],
-    ["Near / far contrast", diagnostics.proximityRatio.toFixed(2), "PHI-style proximity diagnostic; descriptive, not a PHI p-value"],
+    ["Proximity permutation", formatP(diagnostics.proximityPermutationP), `One-sided four-gamete distance-clustering test · Δ ${(diagnostics.proximityStatistic * 100).toFixed(2)} points · ${diagnostics.proximityPermutationReplicates} seeded permutations`],
+    ["Near / far contrast", diagnostics.proximityRatio.toFixed(2), "Incompatibility ratio; related to PHI’s question but not a PHI implementation"],
     ["Canonical coverage", `${((1 - diagnostics.ambiguityFraction) * 100).toFixed(2)}%`, `${diagnostics.sampledSequences} sequences × ${diagnostics.sampledBiallelicSites} biallelic sites sampled`],
     ["Tract rate ratio", event ? event.diagnostics.rateRatio.toFixed(2) : "—", event ? `${(event.diagnostics.tractVariableDensity * 100).toFixed(1)}% tract vs ${(event.diagnostics.backgroundVariableDensity * 100).toFixed(1)}% background variable sites` : "Select an event"],
     ["Parent-conflict rate", event ? `${(event.diagnostics.parentConflictRate * 100).toFixed(1)}%` : "—", event ? `${event.diagnostics.parentDiscriminatingSites.toLocaleString()} parent-discriminating tract sites` : "Select an event"],
@@ -541,7 +772,7 @@ function ChallengeDiagnostics({ diagnostics, event }: { diagnostics?: AlignmentD
   return <div className="diagnostic-grid">{values.map(([label, value, note]) => <article key={label}><span>{label}</span><b>{value}</b><small>{note}</small></article>)}</div>;
 }
 
-function TreeSvg({ root }: { root: NeighborJoiningNode }) {
+function TreeSvg({ root, roles = {} }: { root: NeighborJoiningNode; roles?: Record<string, "recombinant" | "major" | "minor"> }) {
   const leafCount = (node: NeighborJoiningNode): number => node.children?.length
     ? node.children.reduce((total, child) => total + leafCount(child), 0)
     : 1;
@@ -575,27 +806,63 @@ function TreeSvg({ root }: { root: NeighborJoiningNode }) {
     return { x, y };
   }
   place(root, 0);
-  return <div className="tree-svg-wrap"><svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Neighbor-joining tree">{edges.map((edge, index) => <line key={index} {...edge}/>) }{labels.map((label) => <text key={`${label.name}-${label.y}`} x={label.x} y={label.y + 3}>{label.name}</text>)}</svg></div>;
+  return <div className="tree-svg-wrap"><svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Neighbor-joining tree">{edges.map((edge, index) => <line key={index} {...edge}/>) }{labels.map((label) => <text className={roles[label.name] ? `tree-label-${roles[label.name]}` : undefined} key={`${label.name}-${label.y}`} x={label.x} y={label.y + 3}>{label.name}</text>)}</svg></div>;
 }
 
-function LocalTrees({ alignment, event }: { alignment: AlignmentData; event: RdpEvent | null }) {
+function LocalTrees({ alignment, events, event, onSelectEvent }: { alignment: AlignmentData; events: RdpEvent[]; event: RdpEvent | null; onSelectEvent: (id: string) => void }) {
+  const [cohortSize, setCohortSize] = useState(14);
+  const [cohortMode, setCohortMode] = useState<"nearest" | "first">("nearest");
   const trees = useMemo(() => {
     if (!event) return null;
-    const selected = [event.recombinant, event.majorParent, event.minorParent];
-    for (let index = 0; index < alignment.sequences.length && selected.length < 14; index += 1) {
-      if (!selected.includes(index)) selected.push(index);
-    }
-    const tract = eventSegments(event, alignment.length);
-    const background: [number, number][] = event.wraps
-      ? [[event.end, event.start]]
-      : [[0, event.start], [event.end, alignment.length]].filter(([start, end]) => end > start) as [number, number][];
-    return [
-      { label: "Recombinant tract", filename: "rdp-local-tract.nwk", tree: buildLocalTree(alignment, selected, tract) },
-      { label: "Background / flanks", filename: "rdp-local-background.nwk", tree: buildLocalTree(alignment, selected, background) },
-    ];
-  }, [alignment, event]);
-  if (!trees) return <div className="empty-state compact">Select an event to infer local trees.</div>;
-  return <div className="tree-comparison">{trees.map((item) => <article key={item.label}><div><b>{item.label}</b><button type="button" onClick={() => download(item.filename, item.tree.newick)}>Newick ↓</button></div><TreeSvg root={item.tree.root}/><code title={item.tree.newick}>{item.tree.newick}</code></article>)}</div>;
+    const triad = [event.recombinant, event.majorParent, event.minorParent];
+    const remaining = alignment.sequences.map((record, index) => ({
+      index,
+      score: cohortMode === "nearest"
+        ? triad.reduce((sum, triadIndex) => sum + pairwiseIdentitySampled(record.sequence, alignment.sequences[triadIndex].sequence), 0) / triad.length
+        : -index,
+    })).filter(({ index }) => !triad.includes(index)).sort((left, right) => right.score - left.score);
+    const selected = [...triad, ...remaining.slice(0, Math.max(0, cohortSize - triad.length)).map(({ index }) => index)];
+    const regions = event.wraps
+      ? [
+          { label: "Origin-spanning tract", slug: "tract", segments: eventSegments(event, alignment.length), highlight: true },
+          { label: "Complementary background", slug: "background", segments: [[event.end, event.start] as [number, number]], highlight: false },
+        ]
+      : [
+          ...(event.start > 1 ? [{ label: "Left flank", slug: "left-flank", segments: [[0, event.start] as [number, number]], highlight: false }] : []),
+          { label: "Recombinant tract", slug: "tract", segments: [[event.start, event.end] as [number, number]], highlight: true },
+          ...(event.end < alignment.length - 1 ? [{ label: "Right flank", slug: "right-flank", segments: [[event.end, alignment.length] as [number, number]], highlight: false }] : []),
+        ];
+    return {
+      selected,
+      regions: regions.map((region) => ({ ...region, tree: buildLocalTree(alignment, selected, region.segments) })),
+    };
+  }, [alignment, cohortMode, cohortSize, event]);
+  if (!event || !trees) return <div className="empty-state tree-empty"><span className="empty-mark">⑂</span><h2>Select an event to compare local trees</h2><p>Tree views are hypothesis-centered: choose an event in Events, or use the selector above after a scan.</p></div>;
+  const recombinant = alignment.sequences[event.recombinant].name;
+  const major = alignment.sequences[event.majorParent].name;
+  const minor = alignment.sequences[event.minorParent].name;
+  const roles: Record<string, "recombinant" | "major" | "minor"> = { [recombinant]: "recombinant", [major]: "major", [minor]: "minor" };
+  const allNewick = trees.regions.map((region) => `[${region.label}]\n${region.tree.newick}`).join("\n\n");
+  return <div className="tree-explorer">
+    <div className="tree-hero">
+      <div><span className="eyebrow">Selected recombination hypothesis</span><h1>{recombinant}</h1><p>Does the recombinant move from the major-parent neighborhood in its flanks to the minor-parent neighborhood inside the proposed tract?</p></div>
+      <div className="tree-hypothesis">
+        <span><i className="parent-role major"/>Major parent<b>{major}</b></span>
+        <span><i className="parent-role minor"/>Minor parent<b>{minor}</b></span>
+        <span><i className="parent-role recombinant"/>Region<b>{formatEventRegion(event, alignment.length)}</b></span>
+      </div>
+    </div>
+    <div className="tree-toolbar">
+      <label><span>Event hypothesis</span><select value={event.id} onChange={(value) => onSelectEvent(value.target.value)}>{events.map((candidate, index) => <option value={candidate.id} key={candidate.id}>E{index + 1} · {alignment.sequences[candidate.recombinant].name} · {formatEventRegion(candidate, alignment.length)}</option>)}</select></label>
+      <label><span>Context sequences</span><select value={cohortSize} onChange={(value) => setCohortSize(Number(value.target.value))}>{[8, 14, 20, 24].filter((count) => count <= Math.max(8, alignment.sequences.length)).map((count) => <option value={count} key={count}>Up to {count}</option>)}</select></label>
+      <label><span>Cohort strategy</span><select value={cohortMode} onChange={(value) => setCohortMode(value.target.value as "nearest" | "first")}><option value="nearest">Nearest to event triad</option><option value="first">First sequences in alignment</option></select></label>
+      <button type="button" className="small-button" onClick={() => download(`rdp-event-${event.id}-local-trees.nwk`, allNewick)}>All Newick ↓</button>
+    </div>
+    <TopologyCards alignment={alignment} event={event}/>
+    <div className={`tree-comparison regions-${trees.regions.length}`}>{trees.regions.map((item) => <article key={item.label} className={item.highlight ? "tract-tree" : ""}><div><div><b>{item.label}</b><span>{item.segments.map(([start, end]) => `${start + 1}–${end}`).join(" + ")}</span></div><button type="button" onClick={() => download(`rdp-${item.slug}.nwk`, item.tree.newick)}>Newick ↓</button></div><TreeSvg root={item.tree.root} roles={roles}/><code title={item.tree.newick}>{item.tree.newick}</code></article>)}</div>
+    <div className="tree-cohort"><strong>Tree cohort · {trees.selected.length} sequences</strong><div>{trees.selected.map((index) => <span className={index === event.recombinant ? "recombinant" : index === event.majorParent ? "major" : index === event.minorParent ? "minor" : ""} key={index}>{alignment.sequences[index].name}</span>)}</div></div>
+    <div className="tree-caveat"><strong>Exploratory local phylogenies</strong><span>Neighbor-joining on uncorrected canonical-site p-distances, with at most 8,192 sampled sites per comparison. These trees are interactive verification aids—not ML trees, topology tests, or independent proof of recombination.</span></div>
+  </div>;
 }
 
 function BreakpointMatrix({ alignment, events, onSelect }: { alignment: AlignmentData; events: RdpEvent[]; onSelect: (id: string) => void }) {
@@ -616,7 +883,26 @@ function BreakpointMatrix({ alignment, events, onSelect }: { alignment: Alignmen
   })])}</div>;
 }
 
-function Inspector({ alignment, event, onDecision, onUpdate, onNavigate, onDuplicate, onDelete, onRecalculate, recalculating, canPrevious, canNext, groupIds }: {
+function ExampleLibrary({ onClose, onLoad }: { onClose: () => void; onLoad: (example: ExampleDataset) => void }) {
+  const [filter, setFilter] = useState<"All" | ExampleDataset["complexity"]>("All");
+  const visible = EXAMPLE_DATASETS.filter((example) => filter === "All" || example.complexity === filter);
+  return <div className="modal-backdrop" role="presentation" onMouseDown={onClose}><section className="modal example-modal" role="dialog" aria-modal="true" aria-labelledby="examples-title" onMouseDown={(event) => event.stopPropagation()}>
+    <button className="modal-close" type="button" onClick={onClose} aria-label="Close"><Icon name="close"/></button>
+    <div className="example-heading"><div><span className="eyebrow">Synthetic, deterministic, truth annotated</span><h2 id="examples-title">Example dataset library</h2><p>Learn the workflow on a clean triplet, explore circular and nested events, or stress the sampled parent screen with bacterial and 500-genome panels. Examples contain no empirical sequences.</p></div><div className="example-filter">{(["All", "Starter", "Intermediate", "Advanced", "Stress test"] as const).map((item) => <button type="button" className={filter === item ? "active" : ""} onClick={() => setFilter(item)} key={item}>{item}</button>)}</div></div>
+    <div className="example-grid">{visible.map((example) => <article key={example.id} className={`complexity-${example.complexity.toLowerCase().replace(" ", "-")}`}>
+      <div className="example-card-head"><span>{example.complexity}</span><small>{example.organism}</small></div>
+      <h3>{example.title}</h3>
+      <div className="example-size"><b>{example.sequenceCount.toLocaleString()}</b><span>sequences</span><b>{example.length.toLocaleString()}</b><span>sites</span></div>
+      <p>{example.description}</p>
+      <div className="example-tags">{example.tags.map((tag) => <span key={tag}>{tag}</span>)}</div>
+      <details><summary>Known truth · {example.truth.length} item{example.truth.length === 1 ? "" : "s"}</summary><div>{example.truth.map((truth, index) => <p key={`${truth.recombinant}-${index}`}><b>{truth.recombinant}</b><span>{truth.donor} · {truth.region}</span><small>{truth.note}</small></p>)}</div></details>
+      <div className="example-challenge"><strong>Why use it</strong><span>{example.challenge}</span></div>
+      <button type="button" className="run-inline" onClick={() => onLoad(example)}>Generate and load locally <span>→</span></button>
+    </article>)}</div>
+  </section></div>;
+}
+
+function Inspector({ alignment, event, onDecision, onUpdate, onNavigate, onDuplicate, onDelete, onRecalculate, onOpenTrees, onOpenMethod, recalculating, canPrevious, canNext, groupIds }: {
   alignment: AlignmentData;
   event: RdpEvent | null;
   onDecision: (decision: EventDecision) => void;
@@ -625,6 +911,8 @@ function Inspector({ alignment, event, onDecision, onUpdate, onNavigate, onDupli
   onDuplicate: () => void;
   onDelete: () => void;
   onRecalculate: () => void;
+  onOpenTrees: () => void;
+  onOpenMethod: (method: MethodName) => void;
   recalculating: boolean;
   canPrevious: boolean;
   canNext: boolean;
@@ -644,6 +932,7 @@ function Inspector({ alignment, event, onDecision, onUpdate, onNavigate, onDupli
         <div><span className="eyebrow">Selected hypothesis</span><h2>{recombinant}</h2></div>
         <div className="event-nav"><button type="button" title="Duplicate event" onClick={onDuplicate}>⧉</button><button type="button" title="Delete event (undoable)" onClick={onDelete}>⌫</button><button type="button" disabled={!canPrevious} onClick={() => onNavigate(-1)}>←</button><button type="button" disabled={!canNext} onClick={() => onNavigate(1)}>→</button></div>
       </div>
+      <button type="button" className="inspect-trees-button" onClick={onOpenTrees}><span>⑂</span><div><b>Compare local trees</b><small>Flanks vs recombinant tract</small></div><i>→</i></button>
       <div className="parent-map assignment-map">
         <label><span>Recombinant</span><select value={event.recombinant} onChange={(value) => onUpdate({ recombinant: Number(value.target.value) }, "Reassigned recombinant")}>
           {alignment.sequences.map((record, index) => <option key={`${record.name}-${index}`} value={index} disabled={index === event.majorParent || index === event.minorParent}>{record.name}</option>)}
@@ -655,6 +944,7 @@ function Inspector({ alignment, event, onDecision, onUpdate, onNavigate, onDupli
           {alignment.sequences.map((record, index) => <option key={`${record.name}-${index}`} value={index} disabled={index === event.recombinant || index === event.majorParent}>{record.name}</option>)}
         </select></label>
       </div>
+      {(event.alternativeParents?.length ?? 0) > 0 && <div className="alternative-parents"><span>Alternative minor parents retained by deduplication</span><div>{event.alternativeParents?.map((index) => <button type="button" key={index} onClick={() => onUpdate({ minorParent: index }, `Selected alternative minor parent ${alignment.sequences[index]?.name}`)}>{alignment.sequences[index]?.name ?? `Sequence ${index + 1}`}</button>)}</div></div>}
       {event.evidenceStale && <div className="stale-box"><strong>Evidence needs recalculation</strong><span>Assignments or breakpoints changed after the scan. The saved method statistics remain visible for comparison but no longer describe this edited hypothesis.</span><button type="button" onClick={onRecalculate} disabled={recalculating}>{recalculating ? "Recalculating…" : "Recalculate this exact hypothesis"}</button></div>}
       <div className="inspector-section">
         <div className="section-heading"><h3>Breakpoint interval</h3><span className="mono">{eventLength(event, alignment.length).toLocaleString()} nt{event.wraps ? " · ↻" : ""}</span></div>
@@ -664,14 +954,14 @@ function Inspector({ alignment, event, onDecision, onUpdate, onNavigate, onDupli
             const start = event.wraps
               ? Math.max(event.end + 1, Math.min(alignment.length - 1, requested))
               : Math.max(0, Math.min(event.end - 1, requested));
-            onUpdate({ start, breakpointModel: { method: "manual", informativeSites: event.informativeSites } }, "Edited left breakpoint");
+            onUpdate({ start, confidenceStart: [start, start], breakpointModel: { method: "manual", informativeSites: event.informativeSites } }, "Edited left breakpoint");
           }}/><small>{event.confidenceStart[0] + 1}–{event.confidenceStart[1]}</small></label>
           <label>End<input type="number" min={1} max={event.wraps ? Math.max(1, event.start - 1) : alignment.length} value={event.end} onChange={(value) => {
             const requested = Number(value.target.value);
             const end = event.wraps
               ? Math.max(1, Math.min(Math.max(1, event.start - 1), requested))
               : Math.max(event.start + 1, Math.min(alignment.length, requested));
-            onUpdate({ end, breakpointModel: { method: "manual", informativeSites: event.informativeSites } }, "Edited right breakpoint");
+            onUpdate({ end, confidenceEnd: [end, end], breakpointModel: { method: "manual", informativeSites: event.informativeSites } }, "Edited right breakpoint");
           }}/><small>{event.confidenceEnd[0] + 1}–{event.confidenceEnd[1]}</small></label>
         </div>
         {event.breakpointModel && <div className="breakpoint-model"><b>{event.breakpointModel.method === "two-state-hmm" ? "Windowless two-state HMM" : event.breakpointModel.method === "manual" ? "Manually edited" : "Local χ² refinement"}</b><span>{event.breakpointModel.informativeSites.toLocaleString()} informative sites{event.breakpointModel.stateSwitches !== undefined ? ` · ${event.breakpointModel.stateSwitches} state switches` : ""}</span></div>}
@@ -682,6 +972,8 @@ function Inspector({ alignment, event, onDecision, onUpdate, onNavigate, onDupli
             start: nextStart,
             end: nextEnd,
             wraps: nextStart > nextEnd,
+            confidenceStart: [nextStart, nextStart],
+            confidenceEnd: [nextEnd, nextEnd],
             majorParent: event.minorParent,
             minorParent: event.majorParent,
             breakpointModel: { method: "manual", informativeSites: event.informativeSites },
@@ -696,7 +988,7 @@ function Inspector({ alignment, event, onDecision, onUpdate, onNavigate, onDupli
       <div className="inspector-section">
         <div className="section-heading"><h3>Method concordance</h3><span>{event.evidence.filter((item) => item.supported).length}/{event.evidence.length}</span></div>
         <div className="evidence-list">
-          {event.evidence.map((item) => <a key={item.method} href={METHOD_META[item.method].citation} target="_blank" rel="noreferrer" title={`${item.statisticLabel}: ${item.statistic.toPrecision(4)} · ${item.calibration}`}><span className={item.supported ? "support-dot" : "support-dot muted"}/><b>{item.method}</b><code>{formatP(item.correctedP)}</code></a>)}
+          {event.evidence.length ? event.evidence.map((item) => <button type="button" key={item.method} onClick={() => onOpenMethod(item.method)} title={`Open ${item.method} result · ${item.statisticLabel}: ${item.statistic.toPrecision(4)} · ${item.calibration}`}><span className={item.supported ? "support-dot" : "support-dot muted"}/><b>{item.method}</b><code>{formatP(item.correctedP)}</code><i>→</i></button>) : <p>No method evidence yet. This is a manual or known-truth hypothesis.</p>}
         </div>
         {!event.evidenceStale && <button className="text-button" type="button" onClick={onRecalculate} disabled={recalculating}>{recalculating ? "Recalculating evidence…" : "↻ Recalculate exact edited hypothesis"}</button>}
         <div className="event-diagnostics"><span><b>{event.diagnostics.rateRatio.toFixed(2)}×</b> tract/background variable-site density</span><span><b>{(event.diagnostics.parentConflictRate * 100).toFixed(1)}%</b> parent-conflict sites</span></div>
@@ -717,8 +1009,8 @@ function Inspector({ alignment, event, onDecision, onUpdate, onNavigate, onDupli
 
 export default function Home() {
   const [alignment, setAlignment] = useState<AlignmentData>(() => makeDemoAlignment());
-  const [events, setEvents] = useState<RdpEvent[]>(() => [demoEvent()]);
-  const [selectedId, setSelectedId] = useState<string | null>("example-1");
+  const [events, setEvents] = useState<RdpEvent[]>(() => [tutorialTruthEvent()]);
+  const [selectedId, setSelectedId] = useState<string | null>("tutorial-known-truth");
   const [tab, setTab] = useState<Tab>("explore");
   const [options, setOptions] = useState<AnalysisOptions>(() => ({ ...DEFAULT_OPTIONS, mode: "query-reference" }));
   const [runState, setRunState] = useState<RunState>("idle");
@@ -729,9 +1021,23 @@ export default function Home() {
   const [pasteOpen, setPasteOpen] = useState(false);
   const [pasteText, setPasteText] = useState("");
   const [tutorialOpen, setTutorialOpen] = useState(false);
+  const [examplesOpen, setExamplesOpen] = useState(false);
   const [tutorialStep, setTutorialStep] = useState(0);
   const [toast, setToast] = useState<string | null>(null);
   const [methodFilter, setMethodFilter] = useState("");
+  const [selectedMethod, setSelectedMethod] = useState<MethodName>("RDP");
+  const [exportScope, setExportScope] = useState<ExportScope>("accepted-fresh");
+  const [loadedExampleId, setLoadedExampleId] = useState<string | null>("tutorial-virus");
+  const [auditLog, setAuditLog] = useState<ProjectAuditEntry[]>([{
+    id: "project-audit-initial",
+    timestamp: "2026-01-01T00:00:00.000Z",
+    action: "Loaded tutorial dataset",
+    summary: "Loaded deterministic synthetic alignment and one explicitly labeled known-truth hypothesis.",
+    eventId: "tutorial-known-truth",
+  }]);
+  const [autosaveCandidate, setAutosaveCandidate] = useState<AutosaveRecord | null>(null);
+  const [autosaveReady, setAutosaveReady] = useState(false);
+  const [lastAutosavedAt, setLastAutosavedAt] = useState<number | null>(null);
   const [roleFilter, setRoleFilter] = useState("");
   const [dragging, setDragging] = useState(false);
   const [undoStack, setUndoStack] = useState<HistoryFrame[]>([]);
@@ -740,6 +1046,7 @@ export default function Home() {
   const fileRef = useRef<HTMLInputElement>(null);
   const annotationRef = useRef<HTMLInputElement>(null);
   const jobRef = useRef(0);
+  const partialEventsRef = useRef<RdpEvent[]>([]);
 
   const stats = useMemo(() => alignmentStats(alignment), [alignment]);
   const selectedIndex = events.findIndex((event) => event.id === selectedId);
@@ -750,10 +1057,27 @@ export default function Home() {
   const matchingRoleRows = useMemo(() => alignment.sequences
     .map((record, index) => ({ record, index }))
     .filter(({ record }) => record.name.toLowerCase().includes(roleFilter.toLowerCase())), [alignment.sequences, roleFilter]);
+  const exportableEvents = useMemo(() => events.filter((event) => {
+    if (event.decision === "rejected") return false;
+    if (exportScope === "accepted-fresh") return event.decision === "accepted" && !event.evidenceStale;
+    if (exportScope === "all-fresh") return !event.evidenceStale;
+    return true;
+  }), [events, exportScope]);
 
   const showToast = useCallback((message: string) => {
     setToast(message);
     window.setTimeout(() => setToast(null), 3200);
+  }, []);
+
+  const appendAudit = useCallback((action: string, summary: string, eventId?: string, eventSnapshot?: string) => {
+    setAuditLog((current) => [...current, {
+      id: `project-audit-${Date.now()}-${current.length + 1}`,
+      timestamp: new Date().toISOString(),
+      action,
+      summary,
+      eventId,
+      eventSnapshot,
+    }]);
   }, []);
 
   const loadAlignment = useCallback((next: AlignmentData) => {
@@ -768,6 +1092,13 @@ export default function Home() {
     setRunState("idle");
     setPhase("Ready to scan");
     setTab("explore");
+    setLoadedExampleId(null);
+    setAuditLog([{
+      id: `project-audit-load-${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      action: "Loaded alignment",
+      summary: `${next.sequences.length.toLocaleString()} sequences × ${next.length.toLocaleString()} sites loaded locally.`,
+    }]);
     showToast(`${next.sequences.length} aligned sequences loaded locally`);
   }, [showToast]);
 
@@ -781,10 +1112,54 @@ export default function Home() {
     setSelectedId(project.events[0]?.id ?? null);
     setDistanceMatrix(project.distance);
     setMetrics(project.metrics);
+    setAuditLog(project.auditLog);
+    setLoadedExampleId(null);
     setRunState(project.events.length ? "complete" : "idle");
     setPhase(project.events.length ? `Restored · ${project.events.length} event${project.events.length === 1 ? "" : "s"}` : "Ready to scan");
     setTab("explore");
     showToast(`Project restored: ${project.alignment.sequences.length} sequences and ${project.events.length} events`);
+  }, [showToast]);
+
+  const loadExample = useCallback((example: ExampleDataset) => {
+    setExamplesOpen(false);
+    setPhase(`Generating ${example.title}`);
+    setRunState("idle");
+    window.setTimeout(() => {
+      const next = example.generate();
+      loadAlignment(next);
+      setLoadedExampleId(example.id);
+      setOptions((current) => ({ ...DEFAULT_OPTIONS, ...example.recommendedOptions, methods: [...current.methods] }));
+      if (example.id === "tutorial-virus") {
+        const truth = tutorialTruthEvent();
+        setEvents([truth]);
+        setSelectedId(truth.id);
+      }
+      setAuditLog([{
+        id: `project-audit-example-${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        action: "Generated example dataset",
+        summary: `${example.title}: ${example.sequenceCount.toLocaleString()} synthetic sequences × ${example.length.toLocaleString()} sites.`,
+      }]);
+      showToast(`${example.title} generated locally · ready to scan`);
+    }, 0);
+  }, [loadAlignment, showToast]);
+
+  const restoreAutosave = useCallback(() => {
+    if (!autosaveCandidate) return;
+    try {
+      loadProject(parseProject(JSON.stringify(autosaveCandidate.project)));
+      setAutosaveCandidate(null);
+      setLastAutosavedAt(autosaveCandidate.savedAt);
+      appendAudit("Restored browser autosave", `Recovered the local project saved ${new Date(autosaveCandidate.savedAt).toLocaleString()}.`);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "The local autosave could not be restored.");
+    }
+  }, [appendAudit, autosaveCandidate, loadProject, showToast]);
+
+  const dismissAutosave = useCallback(() => {
+    setAutosaveCandidate(null);
+    void clearAutosave();
+    showToast("Previous autosave dismissed; the current project will become the new checkpoint");
   }, [showToast]);
 
   const readFile = useCallback(async (file: File) => {
@@ -810,7 +1185,7 @@ export default function Home() {
     }
   }, [alignment.length, showToast]);
 
-  const runAnalysis = useCallback(() => {
+  const launchAnalysis = useCallback((excludedTargets: number[] = [], retainedEvents: RdpEvent[] = []) => {
     workerRef.current?.terminate();
     const worker = new Worker(new URL("rdp-worker.js", document.baseURI), {
       type: "module",
@@ -820,6 +1195,7 @@ export default function Home() {
     const jobId = Date.now();
     jobRef.current = jobId;
     setRunState("running");
+    partialEventsRef.current = [];
     setProgress(0);
     setPhase("Preparing WebAssembly engine");
     setMetrics(null);
@@ -829,11 +1205,17 @@ export default function Home() {
       if (payload.type === "progress") {
         setProgress(payload.progress);
         setPhase(payload.phase);
+      } else if (payload.type === "partial") {
+        partialEventsRef.current = retainedEvents.length ? [...retainedEvents, ...payload.events] : payload.events;
       } else if (payload.type === "result") {
-        setEvents(payload.events);
+        partialEventsRef.current = [];
+        const nextEvents = retainedEvents.length
+          ? [...retainedEvents, ...payload.events]
+          : payload.events;
+        setEvents(nextEvents);
         setUndoStack([]);
         setRedoStack([]);
-        setSelectedId(payload.events[0]?.id ?? null);
+        setSelectedId(nextEvents[0]?.id ?? null);
         setDistanceMatrix(payload.distance);
         setMetrics({
           elapsedMs: payload.elapsedMs,
@@ -845,10 +1227,11 @@ export default function Home() {
           diagnostics: payload.diagnostics,
         });
         setProgress(1);
-        setPhase(`Complete · ${payload.events.length} event${payload.events.length === 1 ? "" : "s"}`);
+        setPhase(`Complete · ${nextEvents.length} event${nextEvents.length === 1 ? "" : "s"}`);
         setRunState("complete");
+        appendAudit(retainedEvents.length ? "Completed unresolved-sequence rescan" : "Completed full scan", `${payload.comparisons.toLocaleString()} triplets tested; ${payload.events.length} new consensus hypotheses retained${retainedEvents.length ? ` alongside ${retainedEvents.length} accepted hypotheses` : ""}.`);
         worker.terminate();
-        showToast(payload.events.length ? `Scan complete: ${payload.events.length} consensus event${payload.events.length === 1 ? "" : "s"}` : "Scan complete: no events passed the current filters");
+        showToast(payload.events.length ? `Scan complete: ${payload.events.length} new consensus event${payload.events.length === 1 ? "" : "s"}` : retainedEvents.length ? "Rescan complete: no additional events passed the filters" : "Scan complete: no events passed the current filters");
       } else if (payload.type === "error") {
         setRunState("error");
         setPhase(payload.message);
@@ -861,17 +1244,38 @@ export default function Home() {
       setPhase("Analysis worker failed");
       showToast("The local analysis worker stopped unexpectedly.");
     };
-    worker.postMessage({ type: "analyze", jobId, alignment, options });
-  }, [alignment, options, showToast]);
+    worker.postMessage({ type: "analyze", jobId, alignment, options, excludedTargets });
+  }, [alignment, appendAudit, options, showToast]);
+
+  const runAnalysis = useCallback(() => launchAnalysis(), [launchAnalysis]);
+
+  const runIterativeAnalysis = useCallback(() => {
+    const retained = events.filter((event) => event.decision === "accepted" && !event.evidenceStale);
+    if (!retained.length) {
+      showToast("Accept and recalculate at least one event before rescanning unresolved sequences");
+      return;
+    }
+    launchAnalysis([...new Set(retained.map((event) => event.recombinant))], retained);
+  }, [events, launchAnalysis, showToast]);
 
   const cancelAnalysis = useCallback(() => {
+    const partial = partialEventsRef.current;
     workerRef.current?.terminate();
     workerRef.current = null;
     jobRef.current += 1;
     setRunState("idle");
     setProgress(0);
-    setPhase("Cancelled");
-  }, []);
+    if (partial.length) {
+      setEvents(partial);
+      setSelectedId(partial[0].id);
+      setPhase(`Cancelled · recovered ${partial.length} partial candidate${partial.length === 1 ? "" : "s"}`);
+      appendAudit("Cancelled scan with partial recovery", `${partial.length} candidate hypotheses were checkpointed without complete method calibration.`);
+      showToast(`Scan stopped; ${partial.length} partial candidate${partial.length === 1 ? "" : "s"} recovered for recalculation`);
+    } else {
+      setPhase("Cancelled before any candidate checkpoint");
+    }
+    partialEventsRef.current = [];
+  }, [appendAudit, showToast]);
 
   const updateSelected = useCallback((patch: Partial<RdpEvent>, action = "Edited event") => {
     if (!selectedId) return;
@@ -881,11 +1285,16 @@ export default function Home() {
     if (unchanged) return;
     const scientificFields = new Set(["recombinant", "majorParent", "minorParent", "start", "end", "wraps"]);
     const makesEvidenceStale = Object.keys(patch).some((key) => scientificFields.has(key));
+    const normalizedPatch: Partial<RdpEvent> = makesEvidenceStale ? {
+      ...patch,
+      confidenceStart: patch.confidenceStart ?? [patch.start ?? currentEvent.start, patch.start ?? currentEvent.start],
+      confidenceEnd: patch.confidenceEnd ?? [patch.end ?? currentEvent.end, patch.end ?? currentEvent.end],
+    } : patch;
     const changedFields = Object.keys(patch).filter((key) => key !== "breakpointModel").join(", ");
     const nextEvents = events.map((event) => event.id === selectedId ? {
       ...event,
-      ...patch,
-      evidenceStale: patch.evidenceStale ?? (event.evidenceStale || makesEvidenceStale),
+      ...normalizedPatch,
+      evidenceStale: normalizedPatch.evidenceStale ?? (event.evidenceStale || makesEvidenceStale),
       history: [...(event.history ?? []), {
         id: `audit-${Date.now()}-${event.history?.length ?? 0}`,
         timestamp: new Date().toISOString(),
@@ -896,7 +1305,8 @@ export default function Home() {
     setUndoStack((current) => [...current.slice(-99), { label: action, events, selectedId }]);
     setRedoStack([]);
     setEvents(nextEvents);
-  }, [events, selectedId]);
+    appendAudit(action, changedFields ? `Changed ${changedFields}.` : "Updated the event hypothesis.", selectedId);
+  }, [appendAudit, events, selectedId]);
 
   const recalculateSelected = useCallback(() => {
     if (!selectedEvent) return;
@@ -915,7 +1325,7 @@ export default function Home() {
         updateSelected(payload.patch, "Recalculated exact hypothesis");
         setMetrics((current) => current
           ? { ...current, diagnostics: payload.diagnostics }
-          : { elapsedMs: payload.elapsedMs, comparisons: 1, engine: "WebAssembly manual-event recalculation", diagnostics: payload.diagnostics });
+          : { elapsedMs: payload.elapsedMs, comparisons: payload.patch.hypothesisTests ?? 1, engine: "WebAssembly manual-event recalculation", diagnostics: payload.diagnostics });
         setProgress(1);
         setRunState("complete");
         setPhase(`Recalculated · ${payload.elapsedMs.toFixed(1)} ms`);
@@ -933,8 +1343,8 @@ export default function Home() {
       setPhase("Event recalculation failed");
       showToast("The local recalculation worker stopped unexpectedly.");
     };
-    worker.postMessage({ type: "recalculate", jobId, alignment, options, event: selectedEvent });
-  }, [alignment, options, selectedEvent, showToast, updateSelected]);
+    worker.postMessage({ type: "recalculate", jobId, alignment, options, event: selectedEvent, comparisons: metrics?.comparisons ?? selectedEvent.hypothesisTests ?? 1 });
+  }, [alignment, metrics?.comparisons, options, selectedEvent, showToast, updateSelected]);
 
   const undo = useCallback(() => {
     const frame = undoStack.at(-1);
@@ -943,7 +1353,8 @@ export default function Home() {
     setUndoStack((current) => current.slice(0, -1));
     setEvents(frame.events);
     setSelectedId(frame.selectedId);
-  }, [events, selectedId, undoStack]);
+    appendAudit("Undo", `Restored state before: ${frame.label}.`, frame.selectedId ?? undefined);
+  }, [appendAudit, events, selectedId, undoStack]);
 
   const redo = useCallback(() => {
     const frame = redoStack.at(-1);
@@ -952,7 +1363,8 @@ export default function Home() {
     setRedoStack((current) => current.slice(0, -1));
     setEvents(frame.events);
     setSelectedId(frame.selectedId);
-  }, [events, redoStack, selectedId]);
+    appendAudit("Redo", `Reapplied: ${frame.label}.`, frame.selectedId ?? undefined);
+  }, [appendAudit, events, redoStack, selectedId]);
 
   const createManualEvent = useCallback(() => {
     const start = Math.max(0, Math.floor(alignment.length * 0.25));
@@ -986,7 +1398,8 @@ export default function Home() {
     setEvents([...events, event]);
     setSelectedId(id);
     setTab("explore");
-  }, [alignment.length, events, selectedId]);
+    appendAudit("Created manual event", `Initialized manual hypothesis ${id}.`, id);
+  }, [alignment.length, appendAudit, events, selectedId]);
 
   const duplicateSelected = useCallback(() => {
     if (!selectedEvent) return;
@@ -1003,7 +1416,8 @@ export default function Home() {
     setRedoStack([]);
     setEvents([...events, duplicate]);
     setSelectedId(id);
-  }, [events, selectedEvent, selectedId]);
+    appendAudit("Duplicated event", `Copied ${selectedEvent.id} to ${id}.`, id);
+  }, [appendAudit, events, selectedEvent, selectedId]);
 
   const deleteSelected = useCallback(() => {
     if (!selectedEvent) return;
@@ -1013,7 +1427,8 @@ export default function Home() {
     setRedoStack([]);
     setEvents(remaining);
     setSelectedId(remaining[Math.min(index, remaining.length - 1)]?.id ?? null);
-  }, [events, selectedEvent, selectedId]);
+    appendAudit("Deleted event", `Deleted ${selectedEvent.id}; complete event provenance remains in this project audit ledger.`, selectedEvent.id, JSON.stringify(selectedEvent));
+  }, [appendAudit, events, selectedEvent, selectedId]);
 
   const navigateEvent = useCallback((direction: -1 | 1) => {
     if (!events.length) return;
@@ -1041,6 +1456,34 @@ export default function Home() {
 
   useEffect(() => () => workerRef.current?.terminate(), []);
 
+  useEffect(() => {
+    let cancelled = false;
+    loadAutosave()
+      .then((record) => {
+        if (!cancelled && record?.project?.schema?.startsWith("rdp-web/")) setAutosaveCandidate(record);
+      })
+      .catch(() => undefined)
+      .finally(() => { if (!cancelled) setAutosaveReady(true); });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (!autosaveReady || autosaveCandidate) return;
+    const timeout = window.setTimeout(() => {
+      const project: RdpProject = {
+        schema: "rdp-web/0.5",
+        alignment,
+        options,
+        events,
+        metrics,
+        distance: distanceMatrix,
+        auditLog,
+      };
+      saveAutosave(project).then(setLastAutosavedAt).catch(() => undefined);
+    }, 1_200);
+    return () => window.clearTimeout(timeout);
+  }, [alignment, auditLog, autosaveCandidate, autosaveReady, distanceMatrix, events, metrics, options]);
+
   const setOption = <K extends keyof AnalysisOptions>(key: K, value: AnalysisOptions[K]) => {
     setOptions((current) => ({ ...current, [key]: value }));
   };
@@ -1054,6 +1497,19 @@ export default function Home() {
     }));
   };
 
+  const autoGroupReferences = () => {
+    setAlignment((current) => ({
+      ...current,
+      sequences: current.sequences.map((record) => {
+        if (record.role === "query") return record;
+        const inferred = record.name.replace(/(?:[-_.\s]?\d+)+$/u, "").replace(/[-_.\s]+$/u, "").trim();
+        return { ...record, referenceGroup: inferred || "Reference" };
+      }),
+    }));
+    appendAudit("Auto-grouped reference sequences", "Inferred reference-group labels from sequence-name prefixes.");
+    showToast("Reference groups inferred from sequence names; edit any label inline");
+  };
+
   const onDrop = (dragEvent: DragEvent<HTMLElement>) => {
     dragEvent.preventDefault();
     setDragging(false);
@@ -1063,7 +1519,7 @@ export default function Home() {
 
   const exportResults = (kind: "json" | "csv") => {
     if (kind === "json") {
-      download("rdp-web-project.rdpweb", serializeProject({ alignment, options, events, metrics, distance: distanceMatrix }), "application/json");
+      download("rdp-web-project.rdpweb", serializeProject({ alignment, options, events, metrics, distance: distanceMatrix, auditLog }), "application/json");
       return;
     }
     const rows = [["event", "group", "recombinant", "major_parent", "minor_parent", "start", "end", "wraps_origin", "breakpoint_model", "evidence_stale", "methods", "best_corrected_p", "decision", "warnings", "audit_entries"]];
@@ -1088,8 +1544,13 @@ export default function Home() {
   };
 
   const exportClean = (mode: "remove" | "mask" | "mask-codon" | "split" | "partition") => {
-    const files = exportRecombinationFree(alignment, events, mode);
+    if (!exportableEvents.length) {
+      showToast("No fresh hypotheses match the selected export safety scope");
+      return;
+    }
+    const files = exportRecombinationFree(alignment, exportableEvents, mode);
     files.forEach((file, index) => window.setTimeout(() => download(file.filename, file.content), index * 120));
+    appendAudit("Exported recombination-aware alignment", `${mode} export used ${exportableEvents.length} fresh ${exportScope} hypotheses.`);
   };
 
   return (
@@ -1107,6 +1568,7 @@ export default function Home() {
             <button type="button" className="ghost-button" disabled={!undoStack.length} onClick={undo} title={undoStack.length ? `Undo ${undoStack.at(-1)?.label}` : "Nothing to undo"} aria-label="Undo event edit"><Icon name="undo"/></button>
             <button type="button" className="ghost-button" disabled={!redoStack.length} onClick={redo} title={redoStack.length ? `Redo ${redoStack.at(-1)?.label}` : "Nothing to redo"} aria-label="Redo event edit"><Icon name="redo"/></button>
           </div>
+          <button type="button" className="ghost-button examples-button" onClick={() => setExamplesOpen(true)}>▦ Examples</button>
           <button type="button" className="ghost-button" onClick={() => setTutorialOpen(true)}><Icon name="help"/> Guide</button>
           <input ref={fileRef} hidden type="file" accept=".fa,.fasta,.fas,.fna,.aln,.phy,.phylip,.nex,.nexus,.txt,.json,.rdpweb" onChange={(event: ChangeEvent<HTMLInputElement>) => { const file = event.target.files?.[0]; if (file) readFile(file); event.target.value = ""; }}/>
           <input ref={annotationRef} hidden type="file" accept=".gff,.gff3,.gb,.gbk,.genbank,.bed,.txt" onChange={(event: ChangeEvent<HTMLInputElement>) => { const file = event.target.files?.[0]; if (file) readAnnotationFile(file); event.target.value = ""; }}/>
@@ -1125,11 +1587,11 @@ export default function Home() {
         <aside className="sidebar">
           <div className="sidebar-scroll">
             <section className="dataset-card">
-              <div className="dataset-heading"><span className="eyebrow">Dataset</span><button type="button" onClick={() => setPasteOpen(true)}>Paste</button></div>
+              <div className="dataset-heading"><span className="eyebrow">Dataset</span><div><button type="button" onClick={() => setExamplesOpen(true)}>Examples</button><button type="button" onClick={() => setPasteOpen(true)}>Paste</button></div></div>
               <h2 title={alignment.name}>{alignment.name}</h2>
               <div className="dataset-stats"><span><b>{alignment.sequences.length}</b> sequences</span><span><b>{alignment.length.toLocaleString()}</b> sites</span><span title={stats.sampled ? "Stratified estimate for responsive large-data loading" : "Exact count"}><b>{stats.sampled ? "≈" : ""}{stats.variableSites.toLocaleString()}</b> variable</span><span title={stats.sampled ? "Stratified sequence/site estimate" : "Exact mean"}><b>{stats.sampled ? "≈" : ""}{(stats.meanIdentity * 100).toFixed(1)}%</b> mean ID</span></div>
               <div className="quality-line"><i style={{ width: `${Math.max(2, 100 - ((stats.gaps + stats.ambiguities) / (alignment.length * alignment.sequences.length)) * 100)}%` }}/><span>{stats.gaps + stats.ambiguities === 0 ? "No gaps or ambiguities" : `${(stats.gaps + stats.ambiguities).toLocaleString()} gaps / ambiguities`}</span></div>
-              <button type="button" className="example-link" onClick={() => { setAlignment(makeDemoAlignment()); setEvents([demoEvent()]); setUndoStack([]); setRedoStack([]); setSelectedId("example-1"); setMetrics(null); setRunState("idle"); showToast("Synthetic positive-control dataset restored"); }}>Reset tutorial dataset</button>
+              <button type="button" className="example-link" onClick={() => setExamplesOpen(true)}>{loadedExampleId ? `Loaded example · ${EXAMPLE_DATASETS.find((example) => example.id === loadedExampleId)?.complexity ?? "synthetic"} · browse library` : "Browse synthetic examples and stress tests"}</button>
             </section>
 
             <section className="settings-section">
@@ -1156,42 +1618,49 @@ export default function Home() {
                 <label className="switch"><input type="checkbox" checked={options.polishBreakpoints} onChange={(event) => setOption("polishBreakpoints", event.target.checked)}/><i/><span>HMM-polish breakpoints</span></label>
                 <label className="switch"><input type="checkbox" checked={options.checkMisalignment} onChange={(event) => setOption("checkMisalignment", event.target.checked)}/><i/><span>Flag alignment artefacts</span></label>
                 <label className="switch"><input type="checkbox" checked={options.exhaustive} onChange={(event) => setOption("exhaustive", event.target.checked)}/><i/><span>Exhaustive parent search</span></label>
+                {options.mode === "query-reference" && <label className="switch"><input type="checkbox" checked={options.testReferences} onChange={(event) => setOption("testReferences", event.target.checked)}/><i/><span>Also test references as recombinants</span></label>}
                 <label><span>Bootstrap replicates <b>{options.bootstrapReplicates}</b></span><input type="range" min={0} max={500} step={25} value={options.bootstrapReplicates} onChange={(event) => setOption("bootstrapReplicates", Number(event.target.value))}/></label>
                 <label className="select-label"><span>Random seed</span><input type="number" min={0} max={4294967295} value={options.randomSeed} onChange={(event) => setOption("randomSeed", Number(event.target.value) >>> 0)}/></label>
                 <label className="select-label"><span>Global α</span><select value={options.alpha} onChange={(event) => setOption("alpha", Number(event.target.value))}><option value={0.1}>0.10</option><option value={0.05}>0.05</option><option value={0.01}>0.01</option><option value={0.001}>0.001</option></select></label>
               </div></details>
             </section>
           </div>
-          <div className="sidebar-footer"><span>{runState === "running" ? phase : metrics ? `${metrics.comparisons.toLocaleString()} triplets · ${(metrics.elapsedMs / 1000).toFixed(2)} s` : "Ready for local analysis"}</span><small>{metrics?.engine ?? "Worker-isolated"}</small></div>
+          <div className="sidebar-footer"><span>{runState === "running" ? phase : metrics ? `${metrics.comparisons.toLocaleString()} triplets · ${(metrics.elapsedMs / 1000).toFixed(2)} s` : "Ready for local analysis"}</span><small>{lastAutosavedAt ? `Browser autosaved ${new Date(lastAutosavedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : metrics?.engine ?? "Worker-isolated · autosave initializing"}</small></div>
         </aside>
 
         <section className="workspace">
+          {autosaveCandidate && <div className="autosave-banner"><div><strong>Unsaved local project found</strong><span>{autosaveCandidate.project.alignment.name} · {autosaveCandidate.project.events.length} hypotheses · saved {new Date(autosaveCandidate.savedAt).toLocaleString()}</span></div><button type="button" onClick={dismissAutosave}>Start fresh</button><button type="button" className="restore" onClick={restoreAutosave}>Restore autosave</button></div>}
           <nav className="tabs" aria-label="Analysis views">
-            {(["explore", "alignment", "matrices", "export", "methods"] as Tab[]).map((item) => <button type="button" key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>{item === "explore" ? "Explore" : item === "alignment" ? "Alignment" : item === "matrices" ? "Trees & matrices" : item === "export" ? "Export" : "Methods & papers"}{item === "explore" && events.length > 0 && <span>{events.length}</span>}</button>)}
+            {(["explore", "trees", "alignment", "patterns", "export", "methods"] as Tab[]).map((item) => <button type="button" key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>{item === "explore" ? "Events & evidence" : item === "trees" ? "⑂ Local trees" : item === "alignment" ? "Alignment" : item === "patterns" ? "Patterns & matrices" : item === "export" ? "Export" : "Methods & papers"}{item === "explore" && events.length > 0 && <span>{events.length}</span>}</button>)}
           </nav>
 
           <div className="workspace-content">
             {tab === "explore" && <>
-              <Panel title="Recombination map" action={<div className="map-summary"><span className="status-chip">{events.filter((event) => event.decision !== "rejected").length} visible events</span><span>{reviewed}/{events.length} reviewed</span></div>}>
+              {selectedEvent && <div className="selected-context"><div><span>Selected hypothesis · E{selectedIndex + 1}</span><b>{alignment.sequences[selectedEvent.recombinant].name}</b></div><div><span>Major parent</span><b>{alignment.sequences[selectedEvent.majorParent].name}</b></div><div><span>Minor parent</span><b>{alignment.sequences[selectedEvent.minorParent].name}</b></div><div><span>Region</span><b>{formatEventRegion(selectedEvent, alignment.length)}</b></div><button type="button" onClick={() => setTab("trees")}>Compare trees <span>→</span></button></div>}
+              <Panel title="Recombination map" action={<div className="map-summary"><span className="status-chip">{events.filter((event) => event.decision !== "rejected").length} visible events</span><span>{reviewed}/{events.length} reviewed</span>{events.some((event) => event.decision === "accepted" && !event.evidenceStale) && <button type="button" className="small-button" onClick={runIterativeAnalysis} title="Keep accepted hypotheses and exclude their recombinant sequences from the next target pass">↻ Rescan unresolved</button>}</div>}>
                 <Overview alignment={alignment} events={events} selectedId={selectedId} onSelect={setSelectedId}/>
               </Panel>
-              {selectedEvent ? <Panel title="Evidence across the alignment" action={<div className="region-chip"><span>{alignment.sequences[selectedEvent.recombinant].name}</span><b>{formatEventRegion(selectedEvent, alignment.length)}</b></div>}><EvidencePlot alignment={alignment} event={selectedEvent} window={options.window} circular={options.circular} onUpdate={updateSelected}/></Panel> : <div className="empty-state"><span className="empty-mark">∿</span><h2>No signal selected</h2><p>Run the enabled methods, or lower the consensus threshold if a scan returns no events.</p><button type="button" className="run-inline" onClick={runAnalysis}><Icon name="run"/> Run local scan</button></div>}
+              {selectedEvent ? <>
+                <Panel title="Method-by-method result" action={<span className={`decision-label ${selectedEvent.evidenceStale ? "unreviewed" : selectedEvent.decision}`}>{selectedEvent.evidenceStale ? "evidence stale" : selectedEvent.decision}</span>}><MethodEvidencePanel alignment={alignment} event={selectedEvent} window={options.window} selectedMethod={selectedMethod} onSelectMethod={setSelectedMethod}/></Panel>
+                <Panel title="Identity context & breakpoint editor" action={<div className="region-chip"><span>Context plot—not a method-specific test</span><b>{formatEventRegion(selectedEvent, alignment.length)}</b></div>}><EvidencePlot alignment={alignment} event={selectedEvent} window={options.window} circular={options.circular} onUpdate={updateSelected}/></Panel>
+              </> : <div className="empty-state"><span className="empty-mark">∿</span><h2>No hypothesis selected</h2><p>Run the enabled methods, create a manual hypothesis, or load a truth-annotated example.</p><div className="empty-actions"><button type="button" className="run-inline" onClick={runAnalysis}><Icon name="run"/> Run local scan</button><button type="button" className="small-button" onClick={() => setExamplesOpen(true)}>Browse examples</button></div></div>}
               <Panel title="Event hypotheses" action={<div className="table-actions"><button className="small-button" type="button" onClick={createManualEvent}>＋ Manual event</button><button className="small-button" type="button" onClick={() => exportResults("csv")}><Icon name="download" size={14}/> CSV</button></div>}><EventTable alignment={alignment} events={events} selectedId={selectedId} onSelect={setSelectedId}/></Panel>
             </>}
+
+            {tab === "trees" && <LocalTrees alignment={alignment} events={events} event={selectedEvent} onSelectEvent={setSelectedId}/>}
 
             {tab === "alignment" && <>
               <AlignmentViewer key={`${alignment.createdAt}-${selectedEvent?.id ?? "none"}`} alignment={alignment} event={selectedEvent}/>
               <AnnotationPanel alignment={alignment} onOpen={() => annotationRef.current?.click()}/>
-              <Panel title="Sequence roles" action={<input className="role-filter" aria-label="Filter sequence roles" placeholder="Find a sequence…" value={roleFilter} onChange={(event) => setRoleFilter(event.target.value)}/>}>
-                <div className="role-list">{matchingRoleRows.slice(0, 500).map(({ record, index }) => <div key={`${record.name}-${index}`}><span className={`role-dot ${record.role ?? "both"}`}>{record.role === "query" ? "Q" : record.role === "reference" ? "R" : "B"}</span><b>{record.name}</b><code>{record.sequence.length.toLocaleString()} nt</code><button type="button" onClick={() => setAlignment((current) => ({ ...current, sequences: current.sequences.map((candidate, candidateIndex) => candidateIndex === index ? { ...candidate, role: candidate.role === "query" ? "reference" : candidate.role === "reference" ? "both" : "query" } : candidate) }))}>{record.role === "query" ? "Query" : record.role === "reference" ? "Reference" : "Both"}</button></div>)}</div>
+              <Panel title="Sequence roles & reference groups" action={<div className="role-actions"><input className="role-filter" aria-label="Filter sequence roles" placeholder="Find a sequence…" value={roleFilter} onChange={(event) => setRoleFilter(event.target.value)}/><button type="button" className="small-button" onClick={autoGroupReferences}>Auto-group by name</button></div>}>
+                <div className="role-help">Groups diversify the fast parent shortlist. References can also be tested as recombinants from Advanced controls.</div>
+                <div className="role-list">{matchingRoleRows.slice(0, 500).map(({ record, index }) => <div key={`${record.name}-${index}`}><span className={`role-dot ${record.role ?? "both"}`}>{record.role === "query" ? "Q" : record.role === "reference" ? "R" : "B"}</span><b>{record.name}</b><input className="reference-group-input" aria-label={`Reference group for ${record.name}`} placeholder="Unassigned group" value={record.referenceGroup ?? ""} disabled={record.role === "query"} onChange={(value) => setAlignment((current) => ({ ...current, sequences: current.sequences.map((candidate, candidateIndex) => candidateIndex === index ? { ...candidate, referenceGroup: value.target.value || undefined } : candidate) }))}/><code>{record.sequence.length.toLocaleString()} nt</code><button type="button" onClick={() => setAlignment((current) => ({ ...current, sequences: current.sequences.map((candidate, candidateIndex) => candidateIndex === index ? { ...candidate, role: candidate.role === "query" ? "reference" : candidate.role === "reference" ? "both" : "query" } : candidate) }))}>{record.role === "query" ? "Query" : record.role === "reference" ? "Reference" : "Both"}</button></div>)}</div>
                 {matchingRoleRows.length > 500 && <p className="role-overflow">Showing the first 500 matches. Refine the sequence-name filter to edit another role.</p>}
               </Panel>
             </>}
 
-            {tab === "matrices" && <>
+            {tab === "patterns" && <>
               <Panel title="Pairwise p-distance matrix" action={<span className="panel-caption">Uncorrected · canonical sites</span>}><DistanceMatrix alignment={alignment} matrix={distanceMatrix}/></Panel>
-              <Panel title="Local topology contrast" action={<span className="panel-caption">Closest pair by region</span>}><TopologyCards alignment={alignment} event={selectedEvent}/></Panel>
-              <Panel title="Local neighbor-joining trees" action={<span className="panel-caption">Up to 14 sequences · p-distance · Newick export</span>}><LocalTrees alignment={alignment} event={selectedEvent}/></Panel>
               <Panel title="Breakpoint density" action={<span className="panel-caption">Uniform-location null · seed {options.randomSeed}</span>}>
                 <div className="density-chart">{Array.from({ length: 48 }, (_, bin) => {
                   const start = (bin / 48) * alignment.length;
@@ -1207,15 +1676,16 @@ export default function Home() {
             </>}
 
             {tab === "export" && <>
-              <div className="export-hero"><span className="eyebrow">Recombination-aware outputs</span><h1>Take a defensible dataset downstream.</h1><p>Exports use accepted and unreviewed hypotheses; rejected events are excluded. Review all events before publication-grade use.</p><div className="review-meter"><i style={{ width: `${events.length ? (reviewed / events.length) * 100 : 0}%` }}/><span>{reviewed} of {events.length} events reviewed</span></div></div>
+              <div className="export-hero"><span className="eyebrow">Recombination-aware outputs</span><h1>Take a defensible dataset downstream.</h1><p>The safe default uses only accepted hypotheses whose method evidence is fresh. Project and CSV exports always preserve every hypothesis and audit entry.</p><div className="review-meter"><i style={{ width: `${events.length ? (reviewed / events.length) * 100 : 0}%` }}/><span>{reviewed} of {events.length} events reviewed · {events.filter((event) => event.evidenceStale).length} stale</span></div></div>
+              <div className="export-scope"><div><span className="eyebrow">Safety scope for sequence-changing exports</span><h2>{exportableEvents.length} hypothesis{exportableEvents.length === 1 ? "" : "es"} will be applied</h2></div><Segmented value={exportScope} options={[{ value: "accepted-fresh", label: "Accepted + fresh" }, { value: "all-fresh", label: "All fresh" }, { value: "all-retained", label: "All retained" }]} onChange={setExportScope}/><p>{exportScope === "accepted-fresh" ? "Publication-safe default: ignores unreviewed, rejected, and edited-but-unrecalculated events." : exportScope === "all-fresh" ? "Exploratory: includes fresh accepted and unreviewed hypotheses, while excluding rejected and stale events." : "Unsafe override: includes unreviewed and stale hypotheses; rejected events remain excluded. The project export preserves this choice in its ledger."}</p></div>
               <div className="export-grid">
-                <article><span className="export-icon">—</span><h3>Remove recombinants</h3><p>Exclude every sequence carrying a retained event.</p><button type="button" onClick={() => exportClean("remove")}><Icon name="download"/> FASTA</button></article>
-                <article><span className="export-icon">N</span><h3>Mask recombinant tracts</h3><p>Replace retained recombinant fragments with N characters.</p><button type="button" onClick={() => exportClean("mask")}><Icon name="download"/> FASTA</button></article>
-                <article><span className="export-icon">3</span><h3>Codon-aware masking</h3><p>Expand retained tracts to CDS phase-aligned codon boundaries before masking.</p><button type="button" onClick={() => exportClean("mask-codon")}><Icon name="download"/> FASTA</button></article>
-                <article><span className="export-icon">÷</span><h3>Split mosaic sequences</h3><p>Disassemble recombinants at retained breakpoints.</p><button type="button" onClick={() => exportClean("split")}><Icon name="download"/> FASTA</button></article>
-                <article><span className="export-icon">▤</span><h3>Breakpoint partitions</h3><p>Create non-overlapping sub-alignments bounded by breakpoints.</p><button type="button" onClick={() => exportClean("partition")}><Icon name="download"/> FASTA set</button></article>
+                <article><span className="export-icon">—</span><h3>Remove recombinants</h3><p>Exclude every sequence carrying an in-scope event.</p><button disabled={!exportableEvents.length} type="button" onClick={() => exportClean("remove")}><Icon name="download"/> FASTA</button></article>
+                <article><span className="export-icon">N</span><h3>Mask recombinant tracts</h3><p>Replace in-scope recombinant fragments with N characters.</p><button disabled={!exportableEvents.length} type="button" onClick={() => exportClean("mask")}><Icon name="download"/> FASTA</button></article>
+                <article><span className="export-icon">3</span><h3>Codon-aware masking</h3><p>Expand in-scope tracts to CDS phase-aligned codon boundaries before masking.</p><button disabled={!exportableEvents.length} type="button" onClick={() => exportClean("mask-codon")}><Icon name="download"/> FASTA</button></article>
+                <article><span className="export-icon">÷</span><h3>Split mosaic sequences</h3><p>Disassemble recombinants at in-scope breakpoints.</p><button disabled={!exportableEvents.length} type="button" onClick={() => exportClean("split")}><Icon name="download"/> FASTA</button></article>
+                <article><span className="export-icon">▤</span><h3>Breakpoint partitions</h3><p>Create non-overlapping sub-alignments bounded by in-scope breakpoints.</p><button disabled={!exportableEvents.length} type="button" onClick={() => exportClean("partition")}><Icon name="download"/> FASTA set</button></article>
               </div>
-              <Panel title="Results & provenance"><><div className="provenance-actions"><button type="button" onClick={() => exportResults("json")}><Icon name="download"/> Restorable project <small>.rdpweb · alignment, options, evidence, decisions</small></button><button type="button" onClick={() => exportResults("csv")}><Icon name="download"/> Event table CSV <small>tidy, one event per row</small></button><button type="button" onClick={() => download("rdp-web-input.fasta", toFasta(alignment.sequences))}><Icon name="download"/> Input FASTA <small>normalized alignment</small></button></div>{metrics && <div className="run-provenance"><span><b>{metrics.comparisons.toLocaleString()}</b> triplets</span><span><b>{metrics.elapsedMs.toFixed(1)} ms</b> wall time</span><span><b>{metrics.matrixMode ?? "exact"}</b> parent screen</span>{metrics.timing && <span><b>{metrics.timing.distanceMs.toFixed(1)} / {metrics.timing.scanMs.toFixed(1)} / {metrics.timing.statisticsMs.toFixed(1)} / {(metrics.timing.diagnosticsMs ?? 0).toFixed(1)} ms</b> distance / scan / evidence / diagnostics</span>}</div>}</></Panel>
+              <Panel title="Results & provenance"><><div className="provenance-actions"><button type="button" onClick={() => exportResults("json")}><Icon name="download"/> Restorable project <small>.rdpweb 0.5 · all events + immutable project ledger</small></button><button type="button" onClick={() => exportResults("csv")}><Icon name="download"/> Event table CSV <small>all hypotheses, one event per row</small></button><button type="button" onClick={() => download("rdp-web-input.fasta", toFasta(alignment.sequences))}><Icon name="download"/> Input FASTA <small>normalized alignment</small></button></div><div className="run-provenance"><span><b>{auditLog.length}</b> project audit entries</span>{metrics && <><span><b>{metrics.comparisons.toLocaleString()}</b> triplets</span><span><b>{metrics.elapsedMs.toFixed(1)} ms</b> wall time</span><span><b>{metrics.matrixMode ?? "exact"}</b> parent screen</span>{metrics.timing && <span><b>{metrics.timing.distanceMs.toFixed(1)} / {metrics.timing.scanMs.toFixed(1)} / {metrics.timing.statisticsMs.toFixed(1)} / {(metrics.timing.diagnosticsMs ?? 0).toFixed(1)} ms</b> distance / scan / evidence / diagnostics</span>}</>}</div><details className="project-ledger"><summary>Project audit ledger · {auditLog.length} entries</summary><div>{[...auditLog].reverse().slice(0, 100).map((entry) => <article key={entry.id}><div><b>{entry.action}</b>{entry.eventSnapshot && <em>event tombstone saved</em>}</div><span>{entry.summary}</span><time dateTime={entry.timestamp}>{new Date(entry.timestamp).toLocaleString()}</time></article>)}</div></details></></Panel>
             </>}
 
             {tab === "methods" && <>
@@ -1236,9 +1706,10 @@ export default function Home() {
           </div>
         </section>
 
-        <Inspector alignment={alignment} event={selectedEvent} onDecision={(decision) => updateSelected({ decision }, decision === "accepted" ? "Accepted event" : decision === "rejected" ? "Rejected event" : "Reset review decision")} onUpdate={updateSelected} onNavigate={navigateEvent} onDuplicate={duplicateSelected} onDelete={deleteSelected} onRecalculate={recalculateSelected} recalculating={runState === "running"} canPrevious={selectedIndex > 0} canNext={selectedIndex >= 0 && selectedIndex < events.length - 1} groupIds={groupIds}/>
+        <Inspector alignment={alignment} event={selectedEvent} onDecision={(decision) => updateSelected({ decision }, decision === "accepted" ? "Accepted event" : decision === "rejected" ? "Rejected event" : "Reset review decision")} onUpdate={updateSelected} onNavigate={navigateEvent} onDuplicate={duplicateSelected} onDelete={deleteSelected} onRecalculate={recalculateSelected} onOpenTrees={() => setTab("trees")} onOpenMethod={(method) => { setSelectedMethod(method); setTab("explore"); }} recalculating={runState === "running"} canPrevious={selectedIndex > 0} canNext={selectedIndex >= 0 && selectedIndex < events.length - 1} groupIds={groupIds}/>
       </div>
 
+      {examplesOpen && <ExampleLibrary onClose={() => setExamplesOpen(false)} onLoad={loadExample}/>}
       {pasteOpen && <div className="modal-backdrop" role="presentation" onMouseDown={() => setPasteOpen(false)}><section className="modal paste-modal" role="dialog" aria-modal="true" aria-labelledby="paste-title" onMouseDown={(event) => event.stopPropagation()}><button className="modal-close" type="button" onClick={() => setPasteOpen(false)} aria-label="Close"><Icon name="close"/></button><span className="eyebrow">Local import</span><h2 id="paste-title">Paste an aligned dataset</h2><p>FASTA, CLUSTAL, sequential/interleaved PHYLIP, and NEXUS MATRIX are recognized. Sequences are parsed in your browser.</p><textarea autoFocus spellCheck={false} value={pasteText} onChange={(event) => setPasteText(event.target.value)} placeholder={">sequence_A\nACGTACGT…\n>sequence_B\nACGTTCGT…"}/><div className="modal-actions"><button type="button" className="ghost-button" onClick={() => setPasteOpen(false)}>Cancel</button><button type="button" className="run-button" onClick={() => { try { loadAlignment(parseAlignment(pasteText)); setPasteOpen(false); setPasteText(""); } catch (error) { showToast(error instanceof Error ? error.message : "Could not parse alignment"); } }}>Load alignment</button></div></section></div>}
 
       {tutorialOpen && <div className="modal-backdrop" role="presentation" onMouseDown={() => setTutorialOpen(false)}><section className="modal tutorial-modal" role="dialog" aria-modal="true" aria-labelledby="tutorial-title" onMouseDown={(event) => event.stopPropagation()}><button className="modal-close" type="button" onClick={() => setTutorialOpen(false)} aria-label="Close"><Icon name="close"/></button><div className="tutorial-rail">{["Load", "Scan", "Verify", "Export"].map((step, index) => <button type="button" key={step} className={index === tutorialStep ? "active" : index < tutorialStep ? "done" : ""} onClick={() => setTutorialStep(index)}><span>{index < tutorialStep ? "✓" : index + 1}</span>{step}</button>)}</div><div className="tutorial-body"><span className="eyebrow">RDP5-style workflow · {tutorialStep + 1}/4</span><h2 id="tutorial-title">{["Start from a defensible alignment.", "Screen with multiple signals.", "Treat every event as a hypothesis.", "Remove the signal you reviewed."][tutorialStep]}</h2><p>{[

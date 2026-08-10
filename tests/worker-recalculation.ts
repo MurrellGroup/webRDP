@@ -24,20 +24,26 @@ runtime.self.onmessage({
     type: "recalculate",
     jobId: 11,
     alignment: makeDemoAlignment(),
-    options: { ...DEFAULT_OPTIONS, mode: "query-reference", correction: "none" },
+    options: { ...DEFAULT_OPTIONS, mode: "query-reference", correction: "holm" },
     event: { ...demoEvent(), start: 790, end: 1_530, evidenceStale: true },
+    comparisons: 56,
   },
 });
 
 const message = await result;
 const patch = message.patch as {
-  evidence: Array<{ method: string; calibration: string }>;
+  evidence: Array<{ method: string; calibration: string; correctionScope: string }>;
   informativeSites: number;
   evidenceStale: boolean;
   diagnostics: { rateRatio: number };
+  hypothesisTests: number;
+  recalculationNote: string;
 };
 assert.equal(patch.evidence.length, 7);
 assert.equal(patch.evidenceStale, false);
 assert.ok(patch.informativeSites > 250);
 assert.match(patch.evidence.find((item) => item.method === "3Seq")?.calibration ?? "", /HGRW/);
+assert.match(patch.evidence[0].correctionScope, /56 scanned triplets/);
+assert.equal(patch.hypothesisTests, 56);
+assert.match(patch.recalculationNote, /conservative Bonferroni/);
 assert.ok(patch.diagnostics.rateRatio > 0);

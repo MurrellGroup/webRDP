@@ -23,22 +23,22 @@ can claim parity with RDP5.
 | --- | --- | --- |
 | Aligned FASTA, CLUSTAL, PHYLIP, NEXUS import | Operational, local-only | Corpus of difficult interleaved/quoted files |
 | Fully exploratory triplet scan | Operational | RDP5/OpenRDP fixture comparison and simulation ROC curves |
-| Query vs reference scan | Operational | Naming/role parity and grouped-reference fixtures |
+| Query vs reference scan | Operational roles, editable reference groups, group-diversified parent shortlist, and opt-in reference-as-recombinant testing | RDP5 naming/group parity fixtures |
 | RDP evidence | Exact binomial tail on informative-site identity shifts with within-triplet window correction | RDP5 window/reference-mode corrected-p parity |
 | GENECONV evidence | G-scale 0 concordant-fragment scan with a conservative run bound | Mismatch scoring, KA parameters and global permutation parity |
 | BootScan/RecScan evidence | Seeded native p-distance triplet bootstrap at tract/flank windows plus an all-window topology sign statistic | Full multi-taxon NJ/substitution-model and cutoff parity |
-| MaxChi evidence | Independent pairwise variable/non-variable boundary χ² kernel | Polymorphic-window and corrected-p parity |
-| Chimaera evidence | Independent compressed binary-triplet boundary χ² kernel | RDP5 window and event-region parity |
+| MaxChi evidence | Pairwise variable/non-variable χ² at shared candidate boundaries | Independent candidate scan, polymorphic-window and corrected-p parity |
+| Chimaera evidence | Compressed binary-triplet χ² at shared candidate boundaries | Independent candidate scan, RDP5 window and event-region parity |
 | SiScan evidence | Oriented site-category Z surrogate | Fourth-sequence selection and vertical/horizontal permutations |
 | 3Seq evidence | Maximum HGRW descent with exact first-passage dynamic programming inside a bounded work budget and a conservative large-case fallback | Published large-table/algorithm scale comparisons and RDP5 corrected-p parity |
 | Breakpoint polishing | Candidate-seeded, windowless two-state HMM/Viterbi path with local χ² fallback | BURT 2–20-state step-up fitting, random-start training, EM, and confidence-interval parity |
 | Circular genomes | Opt-in dual-origin triplet scan, circular-breakpoint deduplication, native wrapping coordinates, plots, editing, and masking | Broader circular simulation corpus and RDP5 numerical comparison |
-| False-positive flags | Gap/boundary checks, bounded four-gamete incompatibility, PHI-style proximity contrast, local rate-density shift, and parent-conflict diagnostics exposed as review evidence | Exact PHI p-values, tree-conditioned homoplasy and broader challenge calibration |
-| Event verification and editing | Draggable and numeric breakpoints, manual create/duplicate/delete, recombinant/parent reassignment, grouping, exact-hypothesis recalculation, undo/redo and a saved audit trail | User studies and complex ancestral/reassortment grouping parity |
-| Pairwise matrix and local topology contrast | Pairwise matrix, closest-pair contrast, native NJ tract/flank trees and Newick export | ML trees and SH/AU/RF matrices |
+| False-positive flags | Gap/boundary checks, bounded four-gamete incompatibility, seeded four-gamete proximity permutation, PHI-style contrast, local rate-density shift, and parent-conflict diagnostics exposed as review evidence | Exact PHI p-values, tree-conditioned homoplasy and broader challenge calibration |
+| Event verification and editing | Draggable/numeric breakpoints, seven selected-triplet method profiles, manual create/duplicate/delete, recombinant/parent reassignment, automatic ancestry groups, unresolved-target rescans, scan-scope recalculation, undo/redo, partial recovery, IndexedDB autosave, and event/project audit trails with deletion tombstones | User studies and explicit unknown-parent/reassortment/ancestral propagation parity |
+| Pairwise matrix and local topology contrast | Pairwise matrix, closest-pair contrast, dedicated left/tract/right native NJ comparison, adaptive nearest context, role highlighting, cohort display, and Newick export | ML trees and SH/AU/RF matrices |
 | Breakpoint density | Descriptive density, circular-aware pair matrix and seeded uniform-null hotspot permutation | RDP5 hot/cold-spot model parity and association covariates |
 | Recombination-free outputs | Remove, mask, CDS-phase-aware mask, split and partition, including wrapping tracts | More frame/feature edge cases and every RDP5 export variant |
-| Project/results output | Restorable `.rdpweb` schema 0.4, legacy schema import, annotations, edit history, diagnostics, circular/HMM provenance and CSV | Long-term migration corpus and RDP5 project conversion |
+| Project/results output | Restorable `.rdpweb` schema 0.5, legacy schema import, immutable project audit ledger, annotations, edit history, diagnostics, circular/HMM provenance, CSV, and a same-engine Node batch runner | Long-term migration corpus, analysis manifests and RDP5 project conversion |
 | Annotation | GFF3, GenBank FEATURES and BED import; mapped feature track and GFF3 export | ORF calling, multi-record mapping and richer feature analyses |
 | PDB/SCHEMA, LDHat, ancestral inference | Not implemented | Separate workstreams |
 
@@ -53,9 +53,11 @@ The WebAssembly engine uses three layers:
    visible matrix is calculated exactly for the first 24 sequences.
 3. Each retained recombinant/parent triplet is scanned in O(L) with prefix sums
    and a detrended cumulative-sum excursion. The candidate tract is evaluated
-   by separate GENECONV-run, topology-window, MAXCHI, CHIMAERA, SISCAN-category,
-   maximum-HGRW-descent kernels. Seeded column bootstraps run natively for the
-   candidate tract and available flanks.
+   by method-specific GENECONV-run, topology-window, MAXCHI, CHIMAERA,
+   SISCAN-category, and maximum-HGRW-descent kernels. Candidate discovery is
+   still shared and is not yet seven independent scans. A WebAssembly bitmask
+   skips disabled kernels; seeded column bootstraps run natively only when
+   BootScan is enabled.
 4. Exact 3SEQ first-passage probabilities are computed in the worker within a
    per-event and per-job work budget; larger cases retain a labeled
    conservative bound so one alignment cannot monopolize the browser.

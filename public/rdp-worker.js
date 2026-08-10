@@ -4,6 +4,13 @@ let wasmPromise;
 
 const BASES = { A: 0, C: 1, G: 2, T: 3, U: 3, "-": 5 };
 
+function enabledMethodMask(options) {
+  const bits = { GENECONV: 1, BootScan: 2, MaxChi: 4, Chimaera: 8, SiScan: 16, "3Seq": 32 };
+  let mask = options.polishBreakpoints ? 64 : 0;
+  for (const method of options.methods) mask |= bits[method] ?? 0;
+  return mask;
+}
+
 function align(value, multiple = 8) {
   return Math.ceil(value / multiple) * multiple;
 }
@@ -187,7 +194,7 @@ function firstTwoAlleles(mask) {
 // Bounded, deterministic challenge diagnostics. This is intentionally exposed
 // as review evidence rather than used as a hidden filter: four-gamete
 // incompatibility can reflect recombination, recurrent mutation, or error.
-function alignmentDiagnostics(encoded, sequenceCount, length, window) {
+function alignmentDiagnostics(encoded, sequenceCount, length, window, seed = 0x5a17c0de) {
   const sampleCount = Math.min(256, sequenceCount);
   const sampleIndexes = Array.from({ length: sampleCount }, (_, index) => (
     sampleCount === sequenceCount
@@ -224,6 +231,7 @@ function alignmentDiagnostics(encoded, sequenceCount, length, window) {
   let nearPairs = 0;
   let farIncompatible = 0;
   let farPairs = 0;
+  const pairRows = [];
   for (let left = 0; left < sampledSites.length; left += 1) {
     for (let right = left + 1; right < sampledSites.length; right += 1) {
       const a = sampledSites[left];
@@ -239,6 +247,7 @@ function alignmentDiagnostics(encoded, sequenceCount, length, window) {
         if (gametes === 15) break;
       }
       const isIncompatible = gametes === 15;
+      pairRows.push({ left, right, incompatible: isIncompatible });
       testedPairs += 1;
       if (isIncompatible) incompatible += 1;
       if (b.site - a.site <= nearDistance) {
@@ -254,6 +263,40 @@ function alignmentDiagnostics(encoded, sequenceCount, length, window) {
   const farFraction = farIncompatible / Math.max(1, farPairs);
   const proximityRatio = (nearFraction + 1 / Math.max(2, nearPairs))
     / (farFraction + 1 / Math.max(2, farPairs));
+  const proximityStatistic = farFraction - nearFraction;
+  const permutationReplicates = sampledSites.length >= 4 ? 199 : 0;
+  let permutationExtreme = 0;
+  let randomState = seed >>> 0;
+  const random = () => {
+    randomState ^= randomState << 13;
+    randomState ^= randomState >>> 17;
+    randomState ^= randomState << 5;
+    return (randomState >>> 0) / 4294967296;
+  };
+  const originalPositions = sampledSites.map((site) => site.site);
+  for (let replicate = 0; replicate < permutationReplicates; replicate += 1) {
+    const permuted = [...originalPositions];
+    for (let index = permuted.length - 1; index > 0; index -= 1) {
+      const swap = Math.floor(random() * (index + 1));
+      [permuted[index], permuted[swap]] = [permuted[swap], permuted[index]];
+    }
+    let permutedNearPairs = 0;
+    let permutedNearIncompatible = 0;
+    let permutedFarPairs = 0;
+    let permutedFarIncompatible = 0;
+    for (const row of pairRows) {
+      if (Math.abs(permuted[row.right] - permuted[row.left]) <= nearDistance) {
+        permutedNearPairs += 1;
+        if (row.incompatible) permutedNearIncompatible += 1;
+      } else {
+        permutedFarPairs += 1;
+        if (row.incompatible) permutedFarIncompatible += 1;
+      }
+    }
+    const statistic = permutedFarIncompatible / Math.max(1, permutedFarPairs)
+      - permutedNearIncompatible / Math.max(1, permutedNearPairs);
+    if (statistic >= proximityStatistic - 1e-12) permutationExtreme += 1;
+  }
   const summary = {
     sampledSequences: sampleCount,
     sampledBiallelicSites: sampledSites.length,
@@ -263,6 +306,9 @@ function alignmentDiagnostics(encoded, sequenceCount, length, window) {
     nearIncompatibility: nearFraction,
     farIncompatibility: farFraction,
     proximityRatio,
+    proximityStatistic,
+    proximityPermutationP: (permutationExtreme + 1) / (permutationReplicates + 1),
+    proximityPermutationReplicates: permutationReplicates,
     ambiguityFraction: nonCanonical / Math.max(1, sampleCount * length),
   };
   return { summary, variablePrefix };
@@ -304,20 +350,33 @@ function candidateDiagnostics(candidate, encoded, length, profile) {
   };
 }
 
-function deduplicate(candidates, length) {
+function deduplicate(candidates, length, targetCount) {
   const ordered = [...candidates].sort((left, right) =>
     right.chiSquare - left.chiSquare || tractLength(left, length) - tractLength(right, length),
   );
   const kept = [];
   for (const candidate of ordered) {
-    const duplicate = kept.find((existing) =>
-      existing.recombinant === candidate.recombinant &&
-      (overlap(existing, candidate, length) > 0.62 || sameCircularBreakpoints(existing, candidate, length)),
-    );
+    const duplicate = kept.find((existing) => {
+      if (existing.recombinant !== candidate.recombinant) return false;
+      const existingLength = tractLength(existing, length);
+      const candidateLength = tractLength(candidate, length);
+      const lengthRatio = Math.min(existingLength, candidateLength) / Math.max(1, Math.max(existingLength, candidateLength));
+      return sameCircularBreakpoints(existing, candidate, length)
+        || (overlap(existing, candidate, length) > 0.75 && lengthRatio > 0.55);
+    });
     if (!duplicate) kept.push(candidate);
     else if (!duplicate.alternatives.includes(candidate.minorParent)) duplicate.alternatives.push(candidate.minorParent);
   }
-  return kept.slice(0, 500);
+  // Keep an adaptive, bounded candidate set so large alignments do not let the
+  // first few high-scoring recombinants consume a fixed global quota.
+  const maximum = Math.max(500, Math.min(5_000, targetCount * 8));
+  const perRecombinant = new Map();
+  return kept.filter((candidate) => {
+    const count = perRecombinant.get(candidate.recombinant) ?? 0;
+    if (count >= 12) return false;
+    perRecombinant.set(candidate.recombinant, count + 1);
+    return true;
+  }).slice(0, maximum);
 }
 
 async function analyze(message) {
@@ -329,7 +388,7 @@ async function analyze(message) {
   const nSites = alignment.length;
   const encoded = encodeSequences(sequences, nSites);
   const diagnosticsStarted = performance.now();
-  const diagnosticProfile = alignmentDiagnostics(encoded, nSeq, nSites, options.window);
+  const diagnosticProfile = alignmentDiagnostics(encoded, nSeq, nSites, options.window, options.randomSeed);
   const diagnosticsMs = performance.now() - diagnosticsStarted;
   const rotation = options.circular ? Math.floor(nSites / 2) : 0;
   const rotated = rotation > 0 ? rotateSequences(encoded, nSeq, nSites, rotation) : null;
@@ -373,14 +432,16 @@ async function analyze(message) {
   const distanceMs = performance.now() - distanceStarted;
   const distance = new Float32Array(memory.buffer, distancePtr, matrixCount * matrixCount).slice();
   const allIndexes = Array.from({ length: nSeq }, (_, index) => index);
+  const excludedTargets = new Set(Array.isArray(message.excludedTargets) ? message.excludedTargets : []);
   const targets = options.mode === "query-reference"
-    ? allIndexes.filter((index) => sequences[index].role === "query" || sequences[index].role === "both")
-    : allIndexes;
+    ? allIndexes.filter((index) => !excludedTargets.has(index) && (options.testReferences || sequences[index].role === "query" || sequences[index].role === "both"))
+    : allIndexes.filter((index) => !excludedTargets.has(index));
   const referencePool = options.mode === "query-reference"
     ? allIndexes.filter((index) => sequences[index].role === "reference" || sequences[index].role === "both")
     : allIndexes;
   new Int32Array(memory.buffer, poolPtr, referencePool.length).set(referencePool);
   const candidates = [];
+  const partialBest = new Map();
   let comparisons = 0;
   const scanStarted = performance.now();
   const scanViews = rotated
@@ -423,6 +484,22 @@ async function analyze(message) {
         if (candidate !== recombinant && !parents.includes(candidate)) parents.push(candidate);
       }
     }
+    // Explicit reference groups reserve a bounded share of the parent shortlist
+    // so a dense group cannot crowd every other named lineage out of the scan.
+    const groupRepresentatives = new Map();
+    for (const candidate of referencePool) {
+      const group = sequences[candidate].referenceGroup;
+      if (!group || candidate === recombinant || groupRepresentatives.has(group)) continue;
+      groupRepresentatives.set(group, candidate);
+    }
+    const reserve = Math.min(groupRepresentatives.size, Math.max(0, Math.floor(parentLimit / 3)));
+    let groupSlot = 0;
+    for (const representative of groupRepresentatives.values()) {
+      if (groupSlot >= reserve) break;
+      if (!parents.includes(representative)) parents[Math.max(0, parents.length - 1 - groupSlot)] = representative;
+      groupSlot += 1;
+    }
+    parents = [...new Set(parents)].filter((index) => index !== recombinant);
     for (let left = 0; left < parents.length; left += 1) {
       for (let right = left + 1; right < parents.length; right += 1) {
         for (const view of scanViews) {
@@ -443,7 +520,7 @@ async function analyze(message) {
           const rawStart = output[0];
           const rawEnd = output[1];
           const mapped = mapInterval(rawStart, rawEnd, view.rotation, nSites);
-          candidates.push({
+          const candidate = {
             recombinant,
             ...mapped,
             rawStart,
@@ -460,7 +537,10 @@ async function analyze(message) {
             outsideMinor: output[9],
             effect: output[10] / 1e6,
             alternatives: [],
-          });
+          };
+          candidates.push(candidate);
+          const previousPartial = partialBest.get(recombinant);
+          if (!previousPartial || candidate.chiSquare > previousPartial.chiSquare) partialBest.set(recombinant, candidate);
         }
       }
     }
@@ -470,10 +550,44 @@ async function analyze(message) {
       progress: 0.85 * (targetPosition + 1) / targets.length,
       phase: `Scanning ${sequences[recombinant].name}`,
     });
+    const partialInterval = Math.max(1, Math.floor(targets.length / 25));
+    if ((targetPosition + 1) % partialInterval === 0 || targetPosition === targets.length - 1) {
+      const confidence = Math.max(4, Math.floor(options.window / 8));
+      const partialEvents = [...partialBest.values()]
+        .sort((left, right) => right.chiSquare - left.chiSquare)
+        .slice(0, 100)
+        .map((candidate, index) => ({
+          id: `partial-${jobId}-${candidate.recombinant}-${index + 1}`,
+          recombinant: candidate.recombinant,
+          majorParent: candidate.majorParent,
+          minorParent: candidate.minorParent,
+          start: candidate.start,
+          end: candidate.end,
+          wraps: candidate.wraps,
+          confidenceStart: [Math.max(0, candidate.start - confidence), Math.min(nSites, candidate.start + confidence)],
+          confidenceEnd: [Math.max(0, candidate.end - confidence), Math.min(nSites, candidate.end + confidence)],
+          breakpointModel: { method: "local-chi-square", informativeSites: candidate.informative },
+          evidence: [],
+          chiSquare: candidate.chiSquare,
+          informativeSites: candidate.informative,
+          decision: "unreviewed",
+          warnings: ["Recovered partial candidate: method evidence and experiment-wide correction are incomplete. Rerun or recalculate before review."],
+          note: "Checkpointed while the scan was still running.",
+          source: "wasm",
+          supportedCount: 0,
+          diagnostics: { tractVariableDensity: 0, backgroundVariableDensity: 0, rateRatio: 1, parentConflictRate: 0, parentDiscriminatingSites: 0, diffuseIncompatibility: false },
+          groupId: null,
+          alternativeParents: [],
+          hypothesisTests: Math.max(1, comparisons),
+          history: [{ id: `partial-history-${jobId}-${index + 1}`, timestamp: new Date().toISOString(), action: "Checkpointed partial candidate", summary: "Candidate discovery completed for a subset of target sequences; evidence calibration did not complete." }],
+          evidenceStale: true,
+        }));
+      postMessage({ type: "partial", jobId, events: partialEvents, comparisons });
+    }
   }
   const scanMs = performance.now() - scanStarted;
 
-  const unique = deduplicate(candidates, nSites);
+  const unique = deduplicate(candidates, nSites, targets.length);
   const statisticsStarted = performance.now();
   unique.forEach((candidate, candidateIndex) => {
     instance.exports.method_stats(
@@ -486,7 +600,7 @@ async function analyze(message) {
       candidate.rawEnd,
       Math.max(20, options.window),
       Math.max(1, options.step),
-      Math.max(0, options.bootstrapReplicates ?? 100),
+      options.methods.includes("BootScan") ? Math.max(0, options.bootstrapReplicates ?? 100) : 0,
       (
         (options.randomSeed ?? 0x5a17c0de)
         ^ Math.imul(candidate.recombinant + 1, 0x9e3779b1)
@@ -495,6 +609,7 @@ async function analyze(message) {
         ^ candidate.rawStart
         ^ Math.imul(candidate.rawEnd, 31)
       ) | 0,
+      enabledMethodMask(options),
       prefixAPtr,
       prefixBPtr,
       statsPtr,
@@ -551,6 +666,10 @@ async function analyze(message) {
           majorFit: hmmOutput[4] / 1000,
           minorFit: hmmOutput[5] / 1000,
         };
+        if (candidate.rotation === 0) {
+          candidate.confidenceStart = [hmmOutput[7], hmmOutput[8]];
+          candidate.confidenceEnd = [hmmOutput[9], hmmOutput[10]];
+        }
       }
       if (polishedStart >= 0 && polishedEnd <= nSites && polishedEnd - polishedStart >= 12) {
         Object.assign(candidate, mapInterval(polishedStart, polishedEnd, candidate.rotation, nSites));
@@ -562,12 +681,12 @@ async function analyze(message) {
         type: "progress",
         jobId,
         progress: 0.85 + 0.15 * (candidateIndex + 1) / Math.max(1, unique.length),
-        phase: "Calibrating independent method evidence",
+        phase: "Calibrating method evidence",
       });
     }
   });
   const statisticsMs = performance.now() - statisticsStarted;
-  let exactThreeSeqBudget = 20_000_000;
+  let exactThreeSeqBudget = options.methods.includes("3Seq") ? 20_000_000 : 0;
   let events = unique.map((candidate, index) => {
     const threeSeqOperations = (candidate.stats.threeSeqMajorSites + 1)
       * (candidate.stats.threeSeqMinorSites + 1)
@@ -577,7 +696,7 @@ async function analyze(message) {
       ...options,
       threeSeqMaxOperations: exactOperations,
     }, Math.max(1, comparisons), nSites);
-    if (threeSeqOperations <= exactOperations) exactThreeSeqBudget -= threeSeqOperations;
+    if (options.methods.includes("3Seq") && threeSeqOperations <= exactOperations) exactThreeSeqBudget -= threeSeqOperations;
     const supportedCount = evidence.filter((item) => item.supported).length;
     const confidence = Math.max(4, Math.floor(options.window / Math.max(6, 2 + Math.sqrt(candidate.informative))));
     return {
@@ -588,8 +707,8 @@ async function analyze(message) {
       start: candidate.start,
       end: candidate.end,
       wraps: candidate.wraps,
-      confidenceStart: [Math.max(0, candidate.start - confidence), Math.min(nSites, candidate.start + confidence)],
-      confidenceEnd: [Math.max(0, candidate.end - confidence), Math.min(nSites, candidate.end + confidence)],
+      confidenceStart: candidate.confidenceStart ?? [Math.max(0, candidate.start - confidence), Math.min(nSites, candidate.start + confidence)],
+      confidenceEnd: candidate.confidenceEnd ?? [Math.max(0, candidate.end - confidence), Math.min(nSites, candidate.end + confidence)],
       breakpointModel: candidate.breakpointModel,
       evidence,
       chiSquare: candidate.chiSquare,
@@ -606,6 +725,8 @@ async function analyze(message) {
       supportedCount,
       diagnostics: candidate.diagnostics,
       groupId: null,
+      alternativeParents: candidate.alternatives.filter((parent) => parent !== candidate.recombinant && parent !== candidate.majorParent && parent !== candidate.minorParent),
+      hypothesisTests: Math.max(1, comparisons),
       history: [{
         id: `history-${jobId}-${index + 1}-1`,
         timestamp: new Date().toISOString(),
@@ -627,6 +748,7 @@ async function analyze(message) {
         const corrected = Math.max(previous, Math.min(1, row.evidence.pValue * (methodRows.length - rank)));
         row.evidence.correctedP = corrected;
         row.evidence.supported = corrected <= options.alpha;
+        row.evidence.correctionScope = `Holm family across ${methodRows.length.toLocaleString()} retained candidate hypotheses`;
         previous = corrected;
       });
     }
@@ -640,6 +762,26 @@ async function analyze(message) {
       const rightP = Math.min(...right.evidence.map((item) => item.correctedP));
       return leftP - rightP;
     });
+
+  const eventsByRecombinant = new Map();
+  events.forEach((event) => {
+    const group = eventsByRecombinant.get(event.recombinant) ?? [];
+    group.push(event);
+    eventsByRecombinant.set(event.recombinant, group);
+  });
+  for (const [recombinant, group] of eventsByRecombinant) {
+    if (group.length < 2) continue;
+    group.forEach((event) => { event.groupId = `ancestry-${recombinant + 1}`; });
+    for (let left = 0; left < group.length; left += 1) {
+      for (let right = left + 1; right < group.length; right += 1) {
+        const shared = overlap(group[left], group[right], nSites);
+        if (shared <= 0.05) continue;
+        const warning = `Overlapping or nested ancestry signal with ${group[left].id === group[right].id ? "another event" : "another retained event"}; review the grouped hypotheses and local trees jointly.`;
+        if (!group[left].warnings.includes(warning)) group[left].warnings.push(warning);
+        if (!group[right].warnings.includes(warning)) group[right].warnings.push(warning);
+      }
+    }
+  }
 
   postMessage({
     type: "result",
@@ -670,7 +812,7 @@ async function recalculate(message) {
   const nSeq = sequences.length;
   const nSites = alignment.length;
   const encoded = encodeSequences(sequences, nSites);
-  const profile = alignmentDiagnostics(encoded, nSeq, nSites, options.window);
+  const profile = alignmentDiagnostics(encoded, nSeq, nSites, options.window, options.randomSeed);
   let working = encoded;
   let rawStart = event.start;
   let rawEnd = event.end;
@@ -714,8 +856,9 @@ async function recalculate(message) {
     rawEnd,
     Math.max(20, options.window),
     Math.max(1, options.step),
-    Math.max(0, options.bootstrapReplicates ?? 100),
+    options.methods.includes("BootScan") ? Math.max(0, options.bootstrapReplicates ?? 100) : 0,
     (options.randomSeed ?? 0x5a17c0de) | 0,
+    enabledMethodMask(options),
     prefixAPtr,
     prefixBPtr,
     statsPtr,
@@ -763,7 +906,17 @@ async function recalculate(message) {
     diagnostics: null,
   };
   candidate.diagnostics = candidateDiagnostics(candidate, encoded, nSites, profile);
-  const evidence = methodEvidence(candidate, stats, options, 1, nSites);
+  const familyComparisons = Math.max(1, Math.trunc(message.comparisons ?? event.hypothesisTests ?? 1));
+  // A single edited hypothesis cannot be inserted into the original Holm rank
+  // ordering without rescanning the whole family. Use conservative Bonferroni
+  // for this local recalculation instead of silently treating it as one test.
+  const recalculationOptions = options.correction === "holm"
+    ? { ...options, correction: "bonferroni" }
+    : options;
+  const evidence = methodEvidence(candidate, stats, recalculationOptions, familyComparisons, nSites);
+  const recalculationNote = options.correction === "holm"
+    ? `Edited-event recalculation uses conservative Bonferroni across ${familyComparisons.toLocaleString()} original scan triplets; rerun the full scan for exact Holm ranks.`
+    : `Multiplicity correction retained the original scan scope of ${familyComparisons.toLocaleString()} triplets.`;
   postMessage({
     type: "recalculated",
     jobId,
@@ -771,9 +924,13 @@ async function recalculate(message) {
       evidence,
       chiSquare: candidate.chiSquare,
       informativeSites: candidate.informative,
-      warnings: addWarnings(candidate, sequences, nSites, options),
+      warnings: [...addWarnings(candidate, sequences, nSites, options), ...(options.correction === "holm" ? [recalculationNote] : [])],
       diagnostics: candidate.diagnostics,
       evidenceStale: false,
+      confidenceStart: [event.start, event.start],
+      confidenceEnd: [event.end, event.end],
+      hypothesisTests: familyComparisons,
+      recalculationNote,
     },
     diagnostics: profile.summary,
     elapsedMs: performance.now() - started,

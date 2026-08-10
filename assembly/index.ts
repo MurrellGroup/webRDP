@@ -248,7 +248,7 @@ export function triplet_counts(
   store<i32>(usize(outPtr + 20), i32(statistic * 1000.0));
 }
 
-// Calculates independent fast statistics for the seven exploratory method
+// Calculates method-specific fast statistics for the seven exploratory method
 // families after a candidate tract has been localized. These are clean-room
 // implementations of the procedures described in the RDP5 manual. Exact
 // parity calibrations that are not redistributable (notably GENECONV and
@@ -276,11 +276,19 @@ export function method_stats(
   step: i32,
   bootstrapReplicates: i32,
   randomSeed: i32,
+  methodMask: i32,
   prefixAPtr: i32,
   prefixBPtr: i32,
   outPtr: i32,
 ): void {
   const halfWindow = window / 2 > 8 ? window / 2 : 8;
+  const wantGeneconv = (methodMask & 1) != 0;
+  const wantBootscan = (methodMask & 2) != 0;
+  const wantMaxChi = (methodMask & 4) != 0;
+  const wantChimaera = (methodMask & 8) != 0;
+  const wantSiScan = (methodMask & 16) != 0;
+  const wantThreeSeq = (methodMask & 32) != 0;
+  const wantPolish = (methodMask & 64) != 0;
 
   // GENECONV G-scale 0: longest uninterrupted concordant fragment in
   // triplet-polymorphic space. Monomorphic sites are ignored, as documented.
@@ -291,7 +299,7 @@ export function method_stats(
   let runStart: i32 = start;
   let bestRunStart: i32 = start;
   let bestRunEnd: i32 = start;
-  for (let site: i32 = 0; site < nSites; site += 1) {
+  if (wantGeneconv) for (let site: i32 = 0; site < nSites; site += 1) {
     const r = seqBase(seqPtr, nSites, recombinant, site);
     const a = seqBase(seqPtr, nSites, majorParent, site);
     const b = seqBase(seqPtr, nSites, minorParent, site);
@@ -315,25 +323,27 @@ export function method_stats(
   // Prefix pairwise mismatches for a deterministic, no-resampling RECSCAN
   // topology-switch statistic. Only sites valid in the full triplet are used
   // so both distances have identical denominators.
-  store<i32>(usize(prefixAPtr), 0);
-  store<i32>(usize(prefixBPtr), 0);
   let majorDifferences: i32 = 0;
   let minorDifferences: i32 = 0;
-  for (let site: i32 = 0; site < nSites; site += 1) {
-    const r = seqBase(seqPtr, nSites, recombinant, site);
-    const a = seqBase(seqPtr, nSites, majorParent, site);
-    const b = seqBase(seqPtr, nSites, minorParent, site);
-    if (valid(r) && valid(a) && valid(b)) {
-      if (r != a) majorDifferences += 1;
-      if (r != b) minorDifferences += 1;
+  if (wantBootscan) {
+    store<i32>(usize(prefixAPtr), 0);
+    store<i32>(usize(prefixBPtr), 0);
+    for (let site: i32 = 0; site < nSites; site += 1) {
+      const r = seqBase(seqPtr, nSites, recombinant, site);
+      const a = seqBase(seqPtr, nSites, majorParent, site);
+      const b = seqBase(seqPtr, nSites, minorParent, site);
+      if (valid(r) && valid(a) && valid(b)) {
+        if (r != a) majorDifferences += 1;
+        if (r != b) minorDifferences += 1;
+      }
+      store<i32>(usize(prefixAPtr + (site + 1) * 4), majorDifferences);
+      store<i32>(usize(prefixBPtr + (site + 1) * 4), minorDifferences);
     }
-    store<i32>(usize(prefixAPtr + (site + 1) * 4), majorDifferences);
-    store<i32>(usize(prefixBPtr + (site + 1) * 4), minorDifferences);
   }
   let topologyConsistent: i32 = 0;
   let decisiveWindows: i32 = 0;
   const stride = step > 0 ? step : 1;
-  for (let center = halfWindow; center <= nSites - halfWindow; center += stride) {
+  if (wantBootscan) for (let center = halfWindow; center <= nSites - halfWindow; center += stride) {
     const left = center - halfWindow;
     const right = center + halfWindow;
     const majorDistance = prefixValue(prefixAPtr, right) - prefixValue(prefixAPtr, left);
@@ -358,7 +368,7 @@ export function method_stats(
   const targetWindow = clamp(window, 12, nSites);
   let state: u32 = u32(randomSeed) ^ 0x9e3779b9;
   if (state == 0) state = 0x6d2b79f5;
-  for (let region: i32 = 0; region < 3; region += 1) {
+  if (wantBootscan) for (let region: i32 = 0; region < 3; region += 1) {
     let regionStart: i32 = 0;
     let regionLength: i32 = 0;
     let expectMinor = false;
@@ -401,57 +411,71 @@ export function method_stats(
   }
 
   // MAXCHI pairwise variable/non-variable states in triplet-polymorphic space.
-  store<i32>(usize(prefixAPtr), 0);
-  store<i32>(usize(prefixBPtr), 0);
   let pairVariable: i32 = 0;
   let pairNonVariable: i32 = 0;
-  for (let site: i32 = 0; site < nSites; site += 1) {
-    const r = seqBase(seqPtr, nSites, recombinant, site);
-    const a = seqBase(seqPtr, nSites, majorParent, site);
-    const b = seqBase(seqPtr, nSites, minorParent, site);
-    if (valid(r) && valid(a) && valid(b) && (r != a || r != b || a != b)) {
-      if (r == b) pairNonVariable += 1;
-      else pairVariable += 1;
+  if (wantMaxChi) {
+    store<i32>(usize(prefixAPtr), 0);
+    store<i32>(usize(prefixBPtr), 0);
+    for (let site: i32 = 0; site < nSites; site += 1) {
+      const r = seqBase(seqPtr, nSites, recombinant, site);
+      const a = seqBase(seqPtr, nSites, majorParent, site);
+      const b = seqBase(seqPtr, nSites, minorParent, site);
+      if (valid(r) && valid(a) && valid(b) && (r != a || r != b || a != b)) {
+        if (r == b) pairNonVariable += 1;
+        else pairVariable += 1;
+      }
+      store<i32>(usize(prefixAPtr + (site + 1) * 4), pairVariable);
+      store<i32>(usize(prefixBPtr + (site + 1) * 4), pairNonVariable);
     }
-    store<i32>(usize(prefixAPtr + (site + 1) * 4), pairVariable);
-    store<i32>(usize(prefixBPtr + (site + 1) * 4), pairNonVariable);
   }
-  const maxChiStart = breakpointChi(prefixAPtr, prefixBPtr, nSites, start, halfWindow);
-  const maxChiEnd = breakpointChi(prefixAPtr, prefixBPtr, nSites, end, halfWindow);
-  const maxChiStatistic = maxChiStart < maxChiEnd ? maxChiStart : maxChiEnd;
+  let maxChiStart: f64 = 0.0;
+  let maxChiEnd: f64 = 0.0;
+  let maxChiStatistic: f64 = 0.0;
+  if (wantMaxChi) {
+    maxChiStart = breakpointChi(prefixAPtr, prefixBPtr, nSites, start, halfWindow);
+    maxChiEnd = breakpointChi(prefixAPtr, prefixBPtr, nSites, end, halfWindow);
+    maxChiStatistic = maxChiStart < maxChiEnd ? maxChiStart : maxChiEnd;
+  }
 
   // CHIMAERA's compressed binary string and SISCAN-style oriented category
   // score. The same prefixes support an O(window) breakpoint-polishing pass.
-  store<i32>(usize(prefixAPtr), 0);
-  store<i32>(usize(prefixBPtr), 0);
   let matchesMajor: i32 = 0;
   let matchesMinor: i32 = 0;
   let sisterScore: i32 = 0;
   let sisterSites: i32 = 0;
-  for (let site: i32 = 0; site < nSites; site += 1) {
-    const r = seqBase(seqPtr, nSites, recombinant, site);
-    const a = seqBase(seqPtr, nSites, majorParent, site);
-    const b = seqBase(seqPtr, nSites, minorParent, site);
-    if (valid(r) && valid(a) && valid(b) && a != b) {
-      let category: i32 = 0;
-      if (r == a) {
-        matchesMajor += 1;
-        category = -1;
-      } else if (r == b) {
-        matchesMinor += 1;
-        category = 1;
+  if (wantChimaera || wantSiScan || wantThreeSeq || wantPolish) {
+    store<i32>(usize(prefixAPtr), 0);
+    store<i32>(usize(prefixBPtr), 0);
+    for (let site: i32 = 0; site < nSites; site += 1) {
+      const r = seqBase(seqPtr, nSites, recombinant, site);
+      const a = seqBase(seqPtr, nSites, majorParent, site);
+      const b = seqBase(seqPtr, nSites, minorParent, site);
+      if (valid(r) && valid(a) && valid(b) && a != b) {
+        let category: i32 = 0;
+        if (r == a) {
+          matchesMajor += 1;
+          category = -1;
+        } else if (r == b) {
+          matchesMinor += 1;
+          category = 1;
+        }
+        if (category != 0 && wantSiScan) {
+          sisterSites += 1;
+          sisterScore += (site >= start && site < end) ? category : -category;
+        }
       }
-      if (category != 0) {
-        sisterSites += 1;
-        sisterScore += (site >= start && site < end) ? category : -category;
-      }
+      store<i32>(usize(prefixAPtr + (site + 1) * 4), matchesMajor);
+      store<i32>(usize(prefixBPtr + (site + 1) * 4), matchesMinor);
     }
-    store<i32>(usize(prefixAPtr + (site + 1) * 4), matchesMajor);
-    store<i32>(usize(prefixBPtr + (site + 1) * 4), matchesMinor);
   }
-  const chimaeraStart = breakpointChi(prefixAPtr, prefixBPtr, nSites, start, halfWindow);
-  const chimaeraEnd = breakpointChi(prefixAPtr, prefixBPtr, nSites, end, halfWindow);
-  const chimaeraStatistic = chimaeraStart < chimaeraEnd ? chimaeraStart : chimaeraEnd;
+  let chimaeraStart: f64 = 0.0;
+  let chimaeraEnd: f64 = 0.0;
+  let chimaeraStatistic: f64 = 0.0;
+  if (wantChimaera) {
+    chimaeraStart = breakpointChi(prefixAPtr, prefixBPtr, nSites, start, halfWindow);
+    chimaeraEnd = breakpointChi(prefixAPtr, prefixBPtr, nSites, end, halfWindow);
+    chimaeraStatistic = chimaeraStart < chimaeraEnd ? chimaeraStart : chimaeraEnd;
+  }
   // 3SEQ maps sites matching the major parent to an up-step and sites
   // matching the minor parent to a down-step. Its two-breakpoint statistic is
   // the maximum descent of that hypergeometric random walk from any previous
@@ -460,7 +484,7 @@ export function method_stats(
   let threeSeqWalk: i32 = 0;
   let threeSeqMaximum: i32 = 0;
   let threeSeqDescent: i32 = 0;
-  for (let position: i32 = 1; position <= nSites; position += 1) {
+  if (wantThreeSeq) for (let position: i32 = 1; position <= nSites; position += 1) {
     const majorStep = prefixValue(prefixAPtr, position) - prefixValue(prefixAPtr, position - 1);
     const minorStep = prefixValue(prefixBPtr, position) - prefixValue(prefixBPtr, position - 1);
     threeSeqWalk += majorStep - minorStep;
@@ -468,8 +492,8 @@ export function method_stats(
     const descent = threeSeqMaximum - threeSeqWalk;
     if (descent > threeSeqDescent) threeSeqDescent = descent;
   }
-  const polishedStart = polishBreakpoint(prefixAPtr, prefixBPtr, nSites, start, halfWindow);
-  const polishedEnd = polishBreakpoint(prefixAPtr, prefixBPtr, nSites, end, halfWindow);
+  const polishedStart = wantPolish ? polishBreakpoint(prefixAPtr, prefixBPtr, nSites, start, halfWindow) : start;
+  const polishedEnd = wantPolish ? polishBreakpoint(prefixAPtr, prefixBPtr, nSites, end, halfWindow) : end;
 
   store<i32>(usize(outPtr), bestRun);
   store<i32>(usize(outPtr + 4), eligible);

@@ -25,24 +25,28 @@ simulation results, workflow parity, and browser-scale performance.
 - Extend the operational candidate-seeded two-state, windowless Viterbi kernel
   to BURT's documented 2–20-state step-up fitting, repeated random starts, EM
   training, and validated confidence intervals.
-- Bounded four-gamete, PHI-style proximity, rate-variation, parent-conflict,
-  gap and misalignment diagnostics are exposed as review evidence; add exact
-  PHI calibration and tree-conditioned homoplasy tests.
-- Expand the operational dual-origin circular-event path to reassortment,
-  unknown parents, recombinant parents, ancestral recombinant grouping, and
-  overlapping/nested events.
+- Bounded four-gamete, seeded proximity-permutation, PHI-style contrast,
+  rate-variation, parent-conflict, gap and misalignment diagnostics are exposed
+  as review evidence; add exact PHI calibration and tree-conditioned homoplasy
+  tests.
+- The dual-origin circular-event path now retains alternative parents and
+  overlapping/nested candidates in automatic ancestry groups; expand this to
+  explicit reassortment, unknown-parent, and recombinant-parent models.
 - Parametric and column-preserving null simulations with reproducible seeds.
 
 ## Track C — interactive analysis parity
 
-- Manual events, draggable/numeric breakpoints and exact-hypothesis live
-  recalculation are operational; add method-specific manual scan canvases.
-- Grouping/ungrouping, recombinant/parent reassignment, undo/redo, saved audit
-  trails, duplication and deletion are operational; add richer group-history
-  comparison and ancestral-event semantics.
-- Native local NJ views/Newick, circular breakpoint pair matrices and seeded
-  hotspot permutations are operational; ML, RF/SH/AU and association tests
-  remain.
+- Manual events, draggable/numeric breakpoints, scan-scope exact-hypothesis
+  recalculation, and seven bounded method-specific review profiles are
+  operational; add independent method-specific candidate scan canvases.
+- Grouping/ungrouping, recombinant/parent reassignment, unresolved-sequence
+  rescans, undo/redo, per-event history, an immutable project ledger,
+  duplication, deletion, IndexedDB autosave, and partial-scan checkpoints are
+  operational; add richer ancestral-event propagation semantics.
+- Dedicated flank/tract/right-flank NJ comparison, nearest-context cohorts,
+  role highlighting, Newick export, circular breakpoint pair matrices and
+  seeded hotspot permutations are operational; ML, RF/SH/AU and association
+  tests remain.
 - GenBank/GFF3/BED annotations, feature-coordinate mapping, GFF3 export and
   CDS-phase-aware masking are operational; add ORF calling and complex
   circular/multi-record feature mappings.
@@ -61,8 +65,9 @@ simulation results, workflow parity, and browser-scale performance.
   simulation designs.
 - Chrome, Firefox, Safari, and Edge benchmarks at 100 × 10 kb, 4,000 × 10 kb,
   and long-genome workloads with time and memory ceilings.
-- Stable `.rdpweb` schema migrations, command-line batch runner, and
-  reproducible analysis manifests.
+- The `.rdpweb` 0.5 migration path and same-engine Node batch runner are
+  operational; add a long-term migration corpus and standalone reproducible
+  analysis manifests.
 
 ## Release gates
 

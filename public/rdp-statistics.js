@@ -192,12 +192,14 @@ export function methodEvidence(candidate, stats, options, comparisons, nSites) {
   const partitionTests = Math.max(1, nSites - 1);
   const sisterZ = stats.siskanScore / Math.sqrt(Math.max(1, stats.siskanSites));
   const descent = stats.threeSeqDescent ?? stats.threeSeqBridge / 1000;
-  const exactThreeSeq = threeSeqExactP(
-    stats.threeSeqMajorSites ?? Math.floor(stats.threeSeqSites / 2),
-    stats.threeSeqMinorSites ?? Math.ceil(stats.threeSeqSites / 2),
-    descent,
-    options.threeSeqMaxOperations ?? 4_000_000,
-  );
+  const exactThreeSeq = options.methods.includes("3Seq")
+    ? threeSeqExactP(
+        stats.threeSeqMajorSites ?? Math.floor(stats.threeSeqSites / 2),
+        stats.threeSeqMinorSites ?? Math.ceil(stats.threeSeqSites / 2),
+        descent,
+        options.threeSeqMaxOperations ?? 4_000_000,
+      )
+    : { p: null, exact: false };
   const threeSeqBound = Math.min(1, 2 * Math.exp(
     (-2 * descent * descent) / Math.max(1, stats.threeSeqSites),
   ));
@@ -271,6 +273,11 @@ export function methodEvidence(candidate, stats, options, comparisons, nSites) {
         statistic: calculation.statistic,
         statisticLabel: calculation.statisticLabel,
         calibration: calculation.calibration,
+        correctionScope: options.correction === "none"
+          ? "Unadjusted"
+          : options.correction === "holm"
+            ? `Holm family across ${Math.max(1, comparisons).toLocaleString()} scanned hypotheses`
+            : `Bonferroni across ${Math.max(1, comparisons).toLocaleString()} scanned triplets`,
       };
     });
 }

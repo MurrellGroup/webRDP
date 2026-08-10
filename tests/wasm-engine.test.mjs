@@ -156,6 +156,7 @@ test("triplet kernel localizes a known internal mosaic tract", async () => {
     5,
     100,
     12345,
+    127,
     pointers.prefixAPtr,
     pointers.prefixBPtr,
     pointers.statsPtr,
@@ -171,6 +172,28 @@ test("triplet kernel localizes a known internal mosaic tract", async () => {
   assert.equal(stats[22], 300, "three representative windows should each contribute 100 decisive bootstraps");
   assert.equal(stats[21], 300, "all bootstrap topologies should match the known mosaic");
 
+  instance.exports.method_stats(
+    pointers.seqPtr,
+    nSites,
+    2,
+    0,
+    1,
+    result[0],
+    result[1],
+    60,
+    5,
+    25,
+    12345,
+    2,
+    pointers.prefixAPtr,
+    pointers.prefixBPtr,
+    pointers.statsPtr,
+  );
+  const bootscanOnly = new Int32Array(instance.exports.memory.buffer, pointers.statsPtr, 23);
+  assert.equal(bootscanOnly[0], 0, "disabled GENECONV kernel should not run");
+  assert.ok(bootscanOnly[6] > 0, "enabled BootScan kernel should run");
+  assert.equal(bootscanOnly[7], 0, "disabled MaxChi kernel should not run");
+  assert.equal(bootscanOnly[11], 0, "disabled 3SEQ kernel should not run");
   const hmmFound = instance.exports.hmm_polish(
     pointers.seqPtr,
     nSites,

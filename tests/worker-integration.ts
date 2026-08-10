@@ -12,10 +12,12 @@ runtime.self = runtime;
 runtime.fetch = async () => new Response(wasm, {
   headers: { "content-type": "application/wasm" },
 });
+let partialCheckpoints = 0;
 
 const result = new Promise<Record<string, unknown>>((resolve, reject) => {
   runtime.postMessage = (payload: unknown) => {
     const message = payload as Record<string, unknown>;
+    if (message.type === "partial") partialCheckpoints += 1;
     if (message.type === "result") resolve(message);
     if (message.type === "error") reject(new Error(String(message.message)));
   };
@@ -40,6 +42,7 @@ const events = message.events as Array<{
   minorParent: number;
 }>;
 assert.ok(events.length > 0, "the positive-control alignment should yield events");
+assert.ok(partialCheckpoints > 0, "the worker should checkpoint recoverable partial candidates during discovery");
 const mosaic = events.find((event) => event.recombinant === 0);
 assert.ok(mosaic, "Mosaic-X should be identified as a recombinant candidate");
 assert.ok(Math.abs(mosaic.start - 782) <= 80, `left breakpoint ${mosaic.start} should localize near 782`);

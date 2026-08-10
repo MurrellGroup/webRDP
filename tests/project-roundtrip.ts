@@ -35,10 +35,11 @@ const serialized = serializeProject({
   events: [event],
   metrics: { elapsedMs: 12.5, comparisons: 56, engine: "test" },
   distance: [0, 0.1, 0.1, 0],
+  auditLog: [{ id: "audit-1", timestamp: "2026-08-11T00:00:00.000Z", action: "Accepted event", summary: "Reviewed fixture.", eventId: event.id }],
 });
 const restored = parseProject(serialized);
 
-assert.equal(restored.schema, "rdp-web/0.4");
+assert.equal(restored.schema, "rdp-web/0.5");
 assert.equal(restored.alignment.sequences[0].sequence, makeDemoAlignment().sequences[0].sequence);
 assert.equal(restored.options.candidateParents, 12);
 assert.equal(restored.events[0].decision, "accepted");
@@ -51,6 +52,7 @@ assert.equal(restored.alignment.features?.[0].name, "rep");
 assert.equal(eventLength(restored.events[0], restored.alignment.length), 300);
 assert.equal(restored.events[0].evidence[0].calibration, event.evidence[0].calibration);
 assert.deepEqual(restored.distance, [0, 0.1, 0.1, 0]);
+assert.equal(restored.auditLog[0].eventId, event.id);
 
 const masked = exportRecombinationFree(restored.alignment, restored.events, "mask")[0];
 const maskedAlignment = parseAlignment(masked.content, masked.filename);

@@ -15,6 +15,7 @@ export interface SequenceRecord {
   name: string;
   sequence: string;
   role?: "query" | "reference" | "both";
+  referenceGroup?: string;
 }
 
 export interface GenomeFeature {
@@ -47,6 +48,7 @@ export interface MethodEvidence {
   statistic: number;
   statisticLabel: string;
   calibration: string;
+  correctionScope?: string;
 }
 
 export interface BreakpointModel {
@@ -62,6 +64,11 @@ export interface EventAuditEntry {
   timestamp: string;
   action: string;
   summary: string;
+}
+
+export interface ProjectAuditEntry extends EventAuditEntry {
+  eventId?: string;
+  eventSnapshot?: string;
 }
 
 export interface EventDiagnostics {
@@ -82,6 +89,9 @@ export interface AlignmentDiagnostics {
   nearIncompatibility: number;
   farIncompatibility: number;
   proximityRatio: number;
+  proximityStatistic: number;
+  proximityPermutationP: number;
+  proximityPermutationReplicates: number;
   ambiguityFraction: number;
 }
 
@@ -104,6 +114,9 @@ export interface RdpEvent {
   note: string;
   source: "wasm" | "example" | "manual";
   groupId: string | null;
+  alternativeParents?: number[];
+  hypothesisTests?: number;
+  recalculationNote?: string;
   history: EventAuditEntry[];
   evidenceStale: boolean;
   diagnostics: EventDiagnostics;
@@ -111,6 +124,7 @@ export interface RdpEvent {
 
 export interface AnalysisOptions {
   mode: "exploratory" | "query-reference";
+  testReferences: boolean;
   circular: boolean;
   window: number;
   step: number;
@@ -925,6 +939,7 @@ export function exportRecombinationFree(
 
 export const DEFAULT_OPTIONS: AnalysisOptions = {
   mode: "exploratory",
+  testReferences: false,
   circular: false,
   window: 120,
   step: 5,
@@ -941,7 +956,7 @@ export const DEFAULT_OPTIONS: AnalysisOptions = {
 };
 
 export interface RdpProject {
-  schema: "rdp-web/0.4";
+  schema: "rdp-web/0.5";
   alignment: AlignmentData;
   options: AnalysisOptions;
   events: RdpEvent[];
@@ -955,14 +970,15 @@ export interface RdpProject {
     diagnostics?: AlignmentDiagnostics;
   } | null;
   distance: number[];
+  auditLog: ProjectAuditEntry[];
 }
 
 function finiteNumber(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
-export function serializeProject(project: Omit<RdpProject, "schema">): string {
-  return JSON.stringify({ schema: "rdp-web/0.4", ...project }, null, 2);
+export function serializeProject(project: Omit<RdpProject, "schema" | "auditLog"> & { auditLog?: ProjectAuditEntry[] }): string {
+  return JSON.stringify({ schema: "rdp-web/0.5", ...project, auditLog: project.auditLog ?? [] }, null, 2);
 }
 
 export function parseProject(text: string): RdpProject {
@@ -990,6 +1006,7 @@ export function parseProject(text: string): RdpProject {
         name: typeof candidate.name === "string" ? candidate.name : `Sequence_${index + 1}`,
         sequence: typeof candidate.sequence === "string" ? candidate.sequence : "",
         role,
+        referenceGroup: typeof candidate.referenceGroup === "string" && candidate.referenceGroup.trim() ? candidate.referenceGroup.trim() : undefined,
       };
     }),
   );
@@ -1019,6 +1036,7 @@ export function parseProject(text: string): RdpProject {
     ...rawOptions,
     methods: methods.length ? methods : [...PRIMARY_METHODS],
     mode: rawOptions.mode === "query-reference" ? "query-reference" : "exploratory",
+    testReferences: rawOptions.testReferences === true,
     correction: rawOptions.correction === "holm" || rawOptions.correction === "none" ? rawOptions.correction : "bonferroni",
     bootstrapReplicates: Math.max(0, Math.min(1000, Math.trunc(finiteNumber(rawOptions.bootstrapReplicates, DEFAULT_OPTIONS.bootstrapReplicates)))),
     randomSeed: Math.trunc(finiteNumber(rawOptions.randomSeed, DEFAULT_OPTIONS.randomSeed)) >>> 0,
@@ -1051,6 +1069,7 @@ export function parseProject(text: string): RdpProject {
         statistic: finiteNumber(item.statistic, 0),
         statisticLabel: typeof item.statisticLabel === "string" ? item.statisticLabel : "imported statistic",
         calibration: typeof item.calibration === "string" ? item.calibration : "legacy project",
+        correctionScope: typeof item.correctionScope === "string" ? item.correctionScope : undefined,
       }];
     }) : [];
     const confidence = Math.max(2, Math.floor(options.window / 12));
@@ -1097,6 +1116,11 @@ export function parseProject(text: string): RdpProject {
       note: typeof event.note === "string" ? event.note : "",
       source: event.source === "manual" || event.source === "example" ? event.source : "wasm",
       groupId: typeof event.groupId === "string" && event.groupId.trim() ? event.groupId.trim() : null,
+      alternativeParents: Array.isArray(event.alternativeParents)
+        ? [...new Set(event.alternativeParents.map((item) => Math.trunc(finiteNumber(item, -1))).filter((item) => item >= 0 && item < alignment.sequences.length && item !== recombinant && item !== majorParent && item !== minorParent))]
+        : [],
+      hypothesisTests: Math.max(1, Math.trunc(finiteNumber(event.hypothesisTests, 1))),
+      recalculationNote: typeof event.recalculationNote === "string" ? event.recalculationNote : undefined,
       history,
       evidenceStale: event.evidenceStale === true,
       diagnostics: event.diagnostics && typeof event.diagnostics === "object"
@@ -1144,6 +1168,9 @@ export function parseProject(text: string): RdpProject {
               nearIncompatibility: finiteNumber(rawMetrics.diagnostics.nearIncompatibility, 0),
               farIncompatibility: finiteNumber(rawMetrics.diagnostics.farIncompatibility, 0),
               proximityRatio: finiteNumber(rawMetrics.diagnostics.proximityRatio, 1),
+              proximityStatistic: finiteNumber(rawMetrics.diagnostics.proximityStatistic, 0),
+              proximityPermutationP: finiteNumber(rawMetrics.diagnostics.proximityPermutationP, 1),
+              proximityPermutationReplicates: Math.trunc(finiteNumber(rawMetrics.diagnostics.proximityPermutationReplicates, 0)),
               ambiguityFraction: finiteNumber(rawMetrics.diagnostics.ambiguityFraction, 0),
             }
           : undefined,
@@ -1152,5 +1179,17 @@ export function parseProject(text: string): RdpProject {
   const distance = Array.isArray(raw.distance)
     ? raw.distance.map((value) => finiteNumber(value, 0))
     : [];
-  return { schema: "rdp-web/0.4", alignment, options, events, metrics, distance };
+  const auditLog = Array.isArray(raw.auditLog) ? raw.auditLog.flatMap((value, index): ProjectAuditEntry[] => {
+    const entry = value as Partial<ProjectAuditEntry>;
+    if (typeof entry.action !== "string") return [];
+    return [{
+      id: typeof entry.id === "string" ? entry.id : `imported-project-audit-${index + 1}`,
+      timestamp: typeof entry.timestamp === "string" ? entry.timestamp : new Date(0).toISOString(),
+      action: entry.action,
+      summary: typeof entry.summary === "string" ? entry.summary : "Imported project audit entry.",
+      eventId: typeof entry.eventId === "string" ? entry.eventId : undefined,
+      eventSnapshot: typeof entry.eventSnapshot === "string" ? entry.eventSnapshot : undefined,
+    }];
+  }) : [];
+  return { schema: "rdp-web/0.5", alignment, options, events, metrics, distance, auditLog };
 }

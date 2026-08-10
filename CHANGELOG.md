@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.5.0 — 2026-08-11
+
+- Rebuilt viewport sizing and overflow ownership so the center workspace,
+  settings, and inspector scroll reliably on short, desktop, and mobile screens.
+- Promoted local phylogenies to a dedicated event-centered workspace with
+  flank/tract trees, adaptive nearest-sequence cohorts, role highlighting,
+  topology summaries, and per-tree/batch Newick export.
+- Added explicit method result tabs with named supporting methods, raw and
+  adjusted p-values, statistic/calibration details, correction scope, and an
+  honest per-method fidelity warning.
+- Added eight deterministic synthetic example datasets spanning clean triplets,
+  virus families, circular and segmented genomes, nested mosaics, an 80 kb
+  bacterial core panel, and a 520-genome performance stress test.
+- Made sequence-changing exports accepted-and-fresh by default, preserved full
+  scan multiplicity during event recalculation, invalidated breakpoint bounds
+  after manual edits, retained alternative parents, and introduced an immutable
+  project-level audit ledger in `.rdpweb` schema 0.5.
+- Avoided disabled BootScan bootstrap and 3SEQ exact-DP work, replaced the fixed
+  500-candidate ceiling with an adaptive per-recombinant bound, and surfaced
+  HMM informative-site breakpoint intervals.
+
 ## 0.4.0 — 2026-08-10
 
 - Added exact bounded 3SEQ HGRW first-passage probabilities with exhaustive

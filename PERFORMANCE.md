@@ -19,14 +19,14 @@ raw signals, and windowless HMM refinement on those retained signals reported:
 
 | Stage | Time |
 | --- | ---: |
-| Scalar distance reference | 143.74 ms |
-| Packed production distance | 9.62 ms |
-| Packed distance speed-up | 14.94× |
-| Triplet candidate scans | 196.79 ms |
-| Seven-family evidence + 100×3 bootstrap kernels | 175.69 ms |
-| Two-state HMM polishing | 41.19 ms |
-| Production-kernel total | 430.87 ms |
-| Triplet scan throughput | 142.3 million site-comparisons/s |
+| Scalar distance reference | 141.72 ms |
+| Packed production distance | 8.80 ms |
+| Packed distance speed-up | 16.11× |
+| Triplet candidate scans | 191.47 ms |
+| Seven-family evidence + 100×3 bootstrap kernels | 180.36 ms |
+| Two-state HMM polishing | 40.86 ms |
+| Production-kernel total | 421.49 ms |
+| Triplet scan throughput | 146.2 million site-comparisons/s |
 
 `npm run bench:gate` enforces deliberately hardware-tolerant CI ceilings for
 the same workload (150 ms packed distance, 1.5 s production total, and at
@@ -67,12 +67,19 @@ display matrix without allocating an N² matrix.
   inappropriate.
 - Seeded bootstrap resampling is compiled into WebAssembly and capped at 1,000
   replicates; the default 100-replicate, three-region pass adds bounded work.
+- A method bitmask now prevents disabled GENECONV, BootScan, MaxChi, Chimaera,
+  SiScan, 3SEQ, and local-polishing loops from running. In particular, disabled
+  BootScan performs no resampling and disabled 3SEQ performs no exact DP.
 - Exact 3SEQ dynamic programming has a four-million-operation event guard and
   a 20-million-operation job budget, with tuple caching and a labeled fallback.
 - Pre-scan dataset summaries, uncomputed matrix fallbacks and local NJ trees
   use explicit stratified work bounds; the overview and alignment viewer cap
   rendered rows while preserving every event-bearing sequence and searchable
   role editing. This avoids main-thread O(N²L) work before the worker starts.
+- Candidate retention scales from 500 to a bounded 5,000 with a 12-event
+  per-recombinant guard, and discovery checkpoints at most 100 partial
+  candidates so stopping a long job can recover useful hypotheses without an
+  unbounded message or render cost.
 
 ## Next optimization gates
 
