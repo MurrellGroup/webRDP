@@ -54,6 +54,9 @@ runtime.self.onmessage({
     options: {
       ...DEFAULT_OPTIONS,
       mode: "query-reference",
+      // This fixture exercises the explicitly approximate large-cohort path;
+      // full-triplet enumeration has its own combinatorial regression.
+      exhaustive: false,
       correction: "none",
       minMethods: 2,
     },
@@ -67,4 +70,3 @@ assert.equal((message.distance as number[]).length, 24 ** 2);
 assert.equal(message.comparisons, 28);
 const events = message.events as Array<{ recombinant: number; start: number; end: number }>;
 assert.ok(events.some((event) => event.recombinant === 0 && event.start < 360 && event.end > 540));
-

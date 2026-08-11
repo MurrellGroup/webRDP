@@ -86,21 +86,43 @@ export interface BreakpointModel {
   minorFit?: number;
   states?: number;
   logLikelihood?: number;
+  viterbiLogLikelihood?: number;
   bic?: number;
   aic?: number;
   criterion?: string;
   randomStarts?: number;
   iterations?: number;
+  winningRestart?: number;
   selectedState?: number;
   posteriorThreshold?: number;
   sourceParity?: boolean;
   sourceCompatibility?: string;
+  sourceRoutines?: string[];
+  sequenceOrder?: number[];
+  stateDominantCategories?: number[];
+  circularPadding?: { offset: number; fittedSites: number; croppedSites: number };
+  candidateBreakpoints?: [number, number];
+  polishedBreakpoints?: [number, number];
+  polishDecision?: {
+    startAdopted: boolean;
+    endAdopted: boolean;
+    sameSwitchResolved: boolean;
+    startMissingBoundary?: boolean;
+    endMissingBoundary?: boolean;
+    revertedForInformation: boolean;
+    insideVariableSites: number;
+    outsideVariableSites: number;
+    startWithin99: boolean;
+    endWithin99: boolean;
+    startVariableSiteDistance?: number;
+    endVariableSiteDistance?: number;
+  };
   confidence99Start?: [number, number];
   confidence99End?: [number, number];
   emissions?: number[][];
   transitions?: number[][];
-  switches?: Array<{ position: number; fromState: number; toState: number; confidence95: [number, number]; confidence99?: [number, number] }>;
-  posteriorTrace?: Array<{ position: number; state: number; probabilities: number[] }>;
+  switches?: Array<{ position: number; informativeIndex?: number; fromState: number; toState: number; confidence95: [number, number]; confidence99?: [number, number]; sourceCoordinates?: number[]; matchedStart?: boolean; matchedEnd?: boolean }>;
+  posteriorTrace?: Array<{ position: number; informativeIndex?: number; state: number; probabilities: number[] }>;
   modelSelection?: Array<{ states: number; logLikelihood: number; bic: number; aic: number; iterations: number; winningRestart: number }>;
 }
 
@@ -1187,7 +1209,9 @@ export const DEFAULT_OPTIONS: AnalysisOptions = {
   minMethods: 3,
   candidateParents: 8,
   methods: [...PRIMARY_METHODS],
-  exhaustive: false,
+  // RDP5 parity default: enumerate every concrete unordered sequence triplet.
+  // Parent shortlisting remains an explicit approximate opt-in for previews.
+  exhaustive: true,
   polishBreakpoints: true,
   burtMode: "rdp5-source",
   burtRandomStarts: 21,
@@ -1224,6 +1248,8 @@ export interface RdpProject {
     comparisons: number;
     engine: string;
     matrixMode?: string;
+    tripletMode?: "all-concrete-triplets" | "approximate-parent-shortlist";
+    concreteTripletInputs?: boolean;
     parentSamples?: number;
     timing?: { distanceMs: number; scanMs: number; statisticsMs: number; diagnosticsMs?: number; clusteringMs?: number };
     diagnostics?: AlignmentDiagnostics;
@@ -1524,15 +1550,49 @@ export function parseProject(text: string): RdpProject {
             minorFit: finiteNumber(event.breakpointModel.minorFit, 0) || undefined,
             states: Math.trunc(finiteNumber(event.breakpointModel.states, 0)) || undefined,
             logLikelihood: Number.isFinite(event.breakpointModel.logLikelihood) ? event.breakpointModel.logLikelihood : undefined,
+            viterbiLogLikelihood: Number.isFinite(event.breakpointModel.viterbiLogLikelihood) ? event.breakpointModel.viterbiLogLikelihood : undefined,
             bic: Number.isFinite(event.breakpointModel.bic) ? event.breakpointModel.bic : undefined,
             aic: Number.isFinite(event.breakpointModel.aic) ? event.breakpointModel.aic : undefined,
             criterion: typeof event.breakpointModel.criterion === "string" ? event.breakpointModel.criterion : undefined,
             randomStarts: Math.trunc(finiteNumber(event.breakpointModel.randomStarts, 0)) || undefined,
             iterations: Math.trunc(finiteNumber(event.breakpointModel.iterations, 0)) || undefined,
+            winningRestart: Math.trunc(finiteNumber(event.breakpointModel.winningRestart, 0)) || undefined,
             selectedState: Number.isFinite(event.breakpointModel.selectedState) ? Math.trunc(event.breakpointModel.selectedState as number) : undefined,
             posteriorThreshold: finiteNumber(event.breakpointModel.posteriorThreshold, 0) || undefined,
             sourceParity: event.breakpointModel.sourceParity === true,
             sourceCompatibility: typeof event.breakpointModel.sourceCompatibility === "string" ? event.breakpointModel.sourceCompatibility : undefined,
+            sourceRoutines: Array.isArray(event.breakpointModel.sourceRoutines) ? event.breakpointModel.sourceRoutines.filter((entry): entry is string => typeof entry === "string") : undefined,
+            sequenceOrder: Array.isArray(event.breakpointModel.sequenceOrder) ? event.breakpointModel.sequenceOrder.map((entry) => Math.trunc(finiteNumber(entry, 0))) : undefined,
+            stateDominantCategories: Array.isArray(event.breakpointModel.stateDominantCategories) ? event.breakpointModel.stateDominantCategories.map((entry) => Math.trunc(finiteNumber(entry, 0))) : undefined,
+            circularPadding: event.breakpointModel.circularPadding && typeof event.breakpointModel.circularPadding === "object"
+              ? {
+                  offset: Math.trunc(finiteNumber(event.breakpointModel.circularPadding.offset, 0)),
+                  fittedSites: Math.trunc(finiteNumber(event.breakpointModel.circularPadding.fittedSites, 0)),
+                  croppedSites: Math.trunc(finiteNumber(event.breakpointModel.circularPadding.croppedSites, 0)),
+                }
+              : undefined,
+            candidateBreakpoints: Array.isArray(event.breakpointModel.candidateBreakpoints) && event.breakpointModel.candidateBreakpoints.length === 2
+              ? [finiteNumber(event.breakpointModel.candidateBreakpoints[0], start), finiteNumber(event.breakpointModel.candidateBreakpoints[1], end)]
+              : undefined,
+            polishedBreakpoints: Array.isArray(event.breakpointModel.polishedBreakpoints) && event.breakpointModel.polishedBreakpoints.length === 2
+              ? [finiteNumber(event.breakpointModel.polishedBreakpoints[0], start), finiteNumber(event.breakpointModel.polishedBreakpoints[1], end)]
+              : undefined,
+            polishDecision: event.breakpointModel.polishDecision && typeof event.breakpointModel.polishDecision === "object"
+              ? {
+                  startAdopted: event.breakpointModel.polishDecision.startAdopted === true,
+                  endAdopted: event.breakpointModel.polishDecision.endAdopted === true,
+                  sameSwitchResolved: event.breakpointModel.polishDecision.sameSwitchResolved === true,
+                  startMissingBoundary: event.breakpointModel.polishDecision.startMissingBoundary === true,
+                  endMissingBoundary: event.breakpointModel.polishDecision.endMissingBoundary === true,
+                  revertedForInformation: event.breakpointModel.polishDecision.revertedForInformation === true,
+                  insideVariableSites: Math.trunc(finiteNumber(event.breakpointModel.polishDecision.insideVariableSites, 0)),
+                  outsideVariableSites: Math.trunc(finiteNumber(event.breakpointModel.polishDecision.outsideVariableSites, 0)),
+                  startWithin99: event.breakpointModel.polishDecision.startWithin99 === true,
+                  endWithin99: event.breakpointModel.polishDecision.endWithin99 === true,
+                  startVariableSiteDistance: Number.isFinite(event.breakpointModel.polishDecision.startVariableSiteDistance) ? event.breakpointModel.polishDecision.startVariableSiteDistance : undefined,
+                  endVariableSiteDistance: Number.isFinite(event.breakpointModel.polishDecision.endVariableSiteDistance) ? event.breakpointModel.polishDecision.endVariableSiteDistance : undefined,
+                }
+              : undefined,
             confidence99Start: Array.isArray(event.breakpointModel.confidence99Start) && event.breakpointModel.confidence99Start.length === 2
               ? [finiteNumber(event.breakpointModel.confidence99Start[0], 0), finiteNumber(event.breakpointModel.confidence99Start[1], alignment.length)]
               : undefined,
@@ -1549,18 +1609,23 @@ export function parseProject(text: string): RdpProject {
               if (!entry || typeof entry !== "object" || !Array.isArray(entry.confidence95) || entry.confidence95.length !== 2) return [];
               return [{
                 position: Math.trunc(finiteNumber(entry.position, 0)),
+                informativeIndex: Number.isFinite(entry.informativeIndex) ? Math.trunc(entry.informativeIndex as number) : undefined,
                 fromState: Math.trunc(finiteNumber(entry.fromState, 0)),
                 toState: Math.trunc(finiteNumber(entry.toState, 0)),
                 confidence95: [finiteNumber(entry.confidence95[0], 0), finiteNumber(entry.confidence95[1], alignment.length)] as [number, number],
                 confidence99: Array.isArray(entry.confidence99) && entry.confidence99.length === 2
                   ? [finiteNumber(entry.confidence99[0], 0), finiteNumber(entry.confidence99[1], alignment.length)] as [number, number]
                   : undefined,
+                sourceCoordinates: Array.isArray(entry.sourceCoordinates) ? entry.sourceCoordinates.map((value) => finiteNumber(value, 0)) : undefined,
+                matchedStart: entry.matchedStart === true,
+                matchedEnd: entry.matchedEnd === true,
               }];
             }) : undefined,
             posteriorTrace: Array.isArray(event.breakpointModel.posteriorTrace) ? event.breakpointModel.posteriorTrace.flatMap((entry) => {
               if (!entry || typeof entry !== "object" || !Array.isArray(entry.probabilities)) return [];
               return [{
                 position: Math.trunc(finiteNumber(entry.position, 0)),
+                informativeIndex: Number.isFinite(entry.informativeIndex) ? Math.trunc(entry.informativeIndex as number) : undefined,
                 state: Math.trunc(finiteNumber(entry.state, 0)),
                 probabilities: entry.probabilities.map((item) => finiteNumber(item, 0)),
               }];
@@ -1802,6 +1867,10 @@ export function parseProject(text: string): RdpProject {
         comparisons: Math.trunc(finiteNumber(rawMetrics.comparisons, 0)),
         engine: rawMetrics.engine,
         matrixMode: typeof rawMetrics.matrixMode === "string" ? rawMetrics.matrixMode : undefined,
+        tripletMode: (rawMetrics.tripletMode === "approximate-parent-shortlist" || (rawMetrics.tripletMode === undefined && !options.exhaustive)
+          ? "approximate-parent-shortlist"
+          : "all-concrete-triplets") as "all-concrete-triplets" | "approximate-parent-shortlist",
+        concreteTripletInputs: rawMetrics.concreteTripletInputs !== false,
         parentSamples: finiteNumber(rawMetrics.parentSamples, 0) || undefined,
         rdpSignalTruncations: Math.max(0, Math.trunc(finiteNumber(rawMetrics.rdpSignalTruncations, 0))) || undefined,
         timing: rawMetrics.timing && typeof rawMetrics.timing === "object"

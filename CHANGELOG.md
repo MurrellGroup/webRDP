@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.9.2 — 2026-08-11
+
+- Changed the scientific default from an eight-parent shortlist to exhaustive
+  enumeration of every unordered combination of three concrete alignment
+  sequences. Query/reference mode likewise tests every allowed query with
+  every concrete reference pair. The worker records `all-concrete-triplets`
+  and `concreteTripletInputs: true` in project provenance.
+- Kept distance-pruned screening only as an explicitly named approximate
+  preview. Its toggle and settings warn that unlisted triples are not tested;
+  it never constructs a consensus/rest-of-alignment proxy, because even the
+  preview passes three real sequence indexes to every method kernel.
+- Added a concrete-triplet ledger to every method result, made the CLI
+  exhaustive by default, and added a C(5,3)=10 worker regression so future
+  optimizations cannot silently restore pair/consensus-proxy screening.
+- Replaced the simplified BURT post-fit path with direct translations of the
+  supplied RDP5 `BenHMM`, `MatchBPtoCI`, and non-reassortment `PolishBP`
+  behavior. Switches are now enumerated at the same shifted informative-site
+  indexes, and midpoint assignments use VB6 round-half-to-even semantics.
+- Reproduced the desktop circular BURT working sequence, including its rotated
+  half-copy, zero sentinel, central copy, trailing half-copy, and post-fit crop;
+  circular origin-spanning tracts now have deterministic source-mode fixtures.
+- Implemented the source `.995`/`.999` any-state confidence scans, wrapped
+  confidence intervals, strict first-on-tie variable-site matching, negative
+  outside-CI signals, half-tract adoption rule, same-switch conflict handling,
+  three-inside/three-outside reversion guard, and missing-data-edge snapping.
+- Added an always-available interactive BURT posterior plot to each selected
+  event. It overlays the recombinant tract, every HMM state posterior,
+  candidate breakpoints, source switches, and 95/99 intervals, and lets an
+  analyst apply any switch as the left or right breakpoint.
+- Persisted and exported the complete breakpoint audit: candidate and polished
+  coordinates, selected switches, winning restart, forward and Viterbi
+  likelihoods, source routine chain, state/category mapping, circular-padding
+  dimensions, and every `PolishBP` decision/reversion reason.
+- Added source-derived regressions for the circular sentinel layout, VB6 ties,
+  `MatchBPtoCI` priority/ties/wrapped intervals, origin-spanning polishing,
+  same-switch resolution, missing-data edges, insufficient-information
+  reversion, deterministic fitting, project round trips, and UI wiring.
+
 ## 0.9.1 — 2026-08-11
 
 - Replaced SiScan's final category-Z surrogate with the author-supplied RDP5

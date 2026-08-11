@@ -24,8 +24,8 @@ corpus validation or implementation before the project can claim full parity.
 | RDP5 surface | State in RDP Web | Validation needed |
 | --- | --- | --- |
 | Aligned FASTA, CLUSTAL, PHYLIP, NEXUS import | Operational, local-only | Corpus of difficult interleaved/quoted files |
-| Fully exploratory triplet scan | Operational | RDP5/OpenRDP fixture comparison and simulation ROC curves |
-| Query vs reference scan | Operational roles, editable reference groups, group-diversified parent shortlist, and opt-in reference-as-recombinant testing | RDP5 naming/group parity fixtures |
+| Fully exploratory triplet scan | Every unordered combination of three concrete alignment sequences is the default and multiplicity family; each method call receives three explicit indexes | RDP5 desktop fixture comparison and simulation ROC curves |
+| Query vs reference scan | Operational roles, editable reference groups, every allowed concrete query × reference pair by default, and opt-in reference-as-recombinant testing | RDP5 naming/group parity fixtures |
 | RDP evidence | Source-compatible `FindSubSeqPB3` → `XOHomologyP2` → `FindNextP` → `DefineEventP2` VNP-window locator, RDP5 common/different tract rule, polarity assignment, multiple distinct excursions per triplet with a tunable retention ceiling, and `ProbCalcP/P2`-equivalent binomial-tail scaling | Golden desktop corpus across ties, missing data, circular origins, raw-signal multiplicity, and correction modes |
 | GENECONV evidence | Independent triplet-polymorphic fragment scan; G=0 exact-run special case; finite-G source integer mismatch penalty; direct `CalcKMaxP`/`GCCalcPValP` lambda/K probability; tunable G-scale | Indel-run modes, overlapping-fragment suppression, pair-scan/global-polymorphism mode, permutations and desktop rounding corpus |
 | BootScan/RecScan evidence | Seeded native p-distance triplet bootstrap at tract/flank windows plus an all-window topology sign statistic | Full multi-taxon NJ/substitution-model and cutoff parity |
@@ -112,9 +112,10 @@ The WebAssembly engine uses three layers:
 
 1. Small/medium alignments use an exact packed canonical-site distance matrix.
    Sixteen bases are compared per 32-bit word, with a separate validity mask.
-2. Large alignments avoid the O(N²L) matrix. A 64/128/256-site deterministic
-   screen plus a stratified panel identifies plausible parents, while the
-   visible matrix is calculated exactly for the first 24 sequences. The
+2. Large alignments avoid materializing the O(N²L) display matrix. A sampled
+   distance pass supports the UI and optional explicitly approximate preview,
+   while the default scientific scan still enumerates every concrete triplet.
+   The visible matrix is calculated exactly for the first 24 sequences. The
    clustering normalizer uses a separate streaming packed kernel to obtain the
    exact global maximum distance without materializing an N×N matrix.
 3. The enabled RDP method has an independent O(L) source-compatible VNP scan
@@ -140,10 +141,10 @@ The WebAssembly engine uses three layers:
    conservative bound so one alignment cannot monopolize the browser.
 5. Breakpoints can be refined with source-compatible fixed-three-state BURT or
    the manual's optional 2–20-state step-up model over parent-discriminating
-   sites. Circular mode adds one half-genome rotation and maps candidates back
-   to native coordinates; because the second origin is a coordinate-coverage
-   device rather than another biological hypothesis, it is not double-counted
-   in the multiplicity family. The linear fast path pays none of that scan cost.
+   sites. Source mode reproduces circular informative-site half-copy padding,
+   its sentinel/crop, `.995`/`.999` intervals, VNP CI matching and the principal
+   non-reassortment polishing rules. Circular detection also scans a second
+   coordinate origin, which is not double-counted in the multiplicity family.
 
 Exploratory multiplicity counts unique unordered triplets rather than the
 three target-oriented passes. Query/reference mode counts each query-specific
@@ -151,11 +152,13 @@ reference pair. This matches the hypothesis family more closely and prevents
 the implementation detail of polarity evaluation or circular rotation from
 inflating adjusted p-values.
 
-Default parent pruning changes the triplet cost from O(N³L) toward O(NK²L),
-where K defaults to eight. For large N the parent screen is O(N²S), where S is
-at most 256 and falls to 64 above 2,000 sequences. Exhaustive mode is available
-for definitive analyses. The worker boundary keeps rendering and cancellation
-responsive; typed arrays avoid per-site JavaScript objects.
+The RDP5-parity default pays the true O(N³L) triplet cost. An explicit
+"approximate parent shortlist" preview can reduce this toward O(NK²L), where K
+defaults to eight, but its UI and saved provenance state that unlisted triples
+were not tested. That preview never constructs a consensus/rest-of-alignment
+proxy: every executed method call still receives three real sequence indexes.
+The worker boundary keeps rendering and cancellation responsive; typed arrays
+avoid per-site JavaScript objects.
 
 GitHub Pages cannot guarantee cross-origin-isolation headers, so shared-memory
 threads are not a baseline assumption. A later pool can use transferable

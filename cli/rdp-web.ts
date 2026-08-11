@@ -19,7 +19,8 @@ Options:
   --circular
   --methods RDP,GENECONV,BootScan,MaxChi,Chimaera,SiScan,3Seq
   --min-methods N
-  --candidate-parents N
+  --approximate-parent-shortlist
+  --candidate-parents N          (only with approximate shortlist)
   --bootstrap N
   --seed N
   --siscan-outgroup nearest|most-divergent|randomized
@@ -28,7 +29,6 @@ Options:
   --siscan-gaps strip|fifth-state
   --siscan-scan-permutations N
   --siscan-final-permutations N
-  --exhaustive
   --help
 
 The CLI runs the same checked-in WebAssembly and probability code as the
@@ -62,7 +62,7 @@ const options = {
   ...DEFAULT_OPTIONS,
   mode: option("--mode") === "query-reference" ? "query-reference" as const : "exploratory" as const,
   circular: arguments_.includes("--circular"),
-  exhaustive: arguments_.includes("--exhaustive"),
+  exhaustive: !arguments_.includes("--approximate-parent-shortlist"),
   methods,
   minMethods: Math.min(methods.length, Math.max(1, Number(option("--min-methods") ?? DEFAULT_OPTIONS.minMethods))),
   candidateParents: Math.max(3, Number(option("--candidate-parents") ?? DEFAULT_OPTIONS.candidateParents)),

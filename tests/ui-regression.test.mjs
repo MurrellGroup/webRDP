@@ -2,13 +2,14 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-const [page, styles, worker, recombinantIdentification, sisterScan, phi] = await Promise.all([
+const [page, styles, worker, recombinantIdentification, sisterScan, phi, burt] = await Promise.all([
   readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
   readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
   readFile(new URL("../public/rdp-worker.js", import.meta.url), "utf8"),
   readFile(new URL("../public/rdp-recombinant-identification.js", import.meta.url), "utf8"),
   readFile(new URL("../public/rdp-siscan.js", import.meta.url), "utf8"),
   readFile(new URL("../public/rdp-phi.js", import.meta.url), "utf8"),
+  readFile(new URL("../public/rdp-burt.js", import.meta.url), "utf8"),
 ]);
 
 test("the false-positive studio uses the source PHI statistic rather than a PHI-labelled surrogate", () => {
@@ -47,6 +48,34 @@ test("source SiScan controls, provenance, and interactive trace are wired", () =
   assert.match(sisterScan, /export function sourceSiScanPattern/);
   assert.match(sisterScan, /buildPermutationPrefix/);
   assert.match(sisterScan, /GetSSOL \+ Get3Score\/GetPScores2 \+ DoPerms3P/);
+});
+
+test("source BURT exposes the desktop polish path and an interactive posterior workbench", () => {
+  assert.match(burt, /export function buildSourceBurtWorkingSet/);
+  assert.match(burt, /export function sourceBurtSwitches/);
+  assert.match(burt, /export function matchSourceBreakpoint/);
+  assert.match(burt, /export function polishSourceBreakpointPair/);
+  assert.match(burt, /DoHMMCyclesSerial.*GetLaticePathP.*ForwardCP.*ReverseCP.*MatchBPtoCI.*PolishBP/s);
+  assert.match(page, /BURT posterior evidence/);
+  assert.match(page, /Use as start/);
+  assert.match(page, /Use as end/);
+  assert.match(page, /Source circular padding applied/);
+  assert.match(page, /0\.995 \/ 0\.999 fixed/);
+  assert.match(styles, /\.burt-evidence-plot/);
+  assert.match(styles, /\.burt-switch-actions\s*\{[^}]*overflow:\s*auto/s);
+});
+
+test("full scans default to every concrete sequence triplet with approximate pruning clearly isolated", () => {
+  assert.match(page, /Every unordered set of three actual sequences is screened/);
+  assert.match(page, /All concrete triplets/);
+  assert.match(page, /Use approximate parent shortlist/);
+  assert.match(page, /not RDP5 triplet parity/);
+  assert.match(page, /three explicit sequences each/);
+  assert.match(worker, /all-concrete-triplets/);
+  assert.match(worker, /No alignment consensus or rest-of-alignment proxy/);
+  assert.match(worker, /concreteTripletInputs:\s*true/);
+  assert.match(styles, /\.triplet-coverage-setting/);
+  assert.match(styles, /\.approximate-setting/);
 });
 
 test("every Panel exposes an accessible full-screen control", () => {

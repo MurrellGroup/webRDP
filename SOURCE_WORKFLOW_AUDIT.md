@@ -7,6 +7,8 @@ author-supplied RDP5 manual and source archive. The original authors have
 permitted direct use for this MIT project. The web implementation therefore
 ports selected routines where compatibility matters while replacing the VB6 /
 Win32 state architecture with typed project state, workers, and WebAssembly.
+The legacy projects are read-only behavioral specifications: they are never
+compiled, linked, or included in the web build.
 
 Materials reviewed for this checkpoint:
 
@@ -53,15 +55,15 @@ new Review studio.
 
 ## Observable behavior crosswalk
 
-| RDP5 evidence | Observable behavior | RDP Web 0.9.1 implementation | Fidelity boundary |
+| RDP5 evidence | Observable behavior | RDP Web 0.9.2 implementation | Fidelity boundary |
 | --- | --- | --- | --- |
-| Manual §4.1 and §10.3 | Detection and unique-event inference are separate phases. | Scan results are retained as hypotheses; all seven primary families emit independent intervals, directional families run both parent orientations, and co-location is required for confirmation. RDP has a bounded source multi-excursion queue and SiScan queues every locally significant source topology run rather than only its global optimum. | Exact source multi-signal queues for GENECONV, BootScan, MaxChi, Chimaera and 3Seq plus desktop numerical fixtures remain method-specific parity gates. |
+| Manual §4.1 and §10.3 | Detection and unique-event inference are separate phases, and detection screens real sequence triplets. | Scan results are retained as hypotheses. Full mode enumerates every unordered combination of three concrete sequences and evaluates every possible recombinant polarity; no consensus/rest-of-alignment proxy is substituted. All seven primary families emit independent intervals, directional families run both parent orientations, and co-location is required for confirmation. RDP has a bounded source multi-excursion queue and SiScan queues every locally significant source topology run rather than only its global optimum. | Exact source multi-signal queues for GENECONV, BootScan, MaxChi, Chimaera and 3Seq plus desktop numerical fixtures remain method-specific parity gates. |
 | Manual §5.1 and §10.4; `GoToNextEventMnu_Click` | Events are reviewed in stored characterization order; next/previous wrap and can skip accepted/rejected events. | Ordered queue, previous/next wrap, best-unresolved jump, skip accepted, skip rejected, warning-only, stale-only, and minimum-method filters. | RDP5's exact internal `BestEvent` ordering has not been numerically replicated. |
 | `GoToBestMnu`, `Detect1Mnu`–`Detect7Mnu` | Jump to strongest unaccepted evidence and filter by number of detecting methods. | Best adjusted-p unresolved jump and 0–7 minimum-support filter. | Adjusted p is used as the transparent tie-breaker; exact desktop ordering remains a fixture target. |
 | Manual §5.1–5.3; `ShowBestAllMnu` / `ShowAllAllMnu` | Schematic context, event information, and method plots work together; best evidence and all evidence can be selected. | Integrated dossier, recombination map, all-method tabs, and best-evidence mode in one continuous review surface. | The original method-specific graphic primitives are not pixel-cloned. |
 | Manual §5.2 | Event information includes sequence roles, breakpoints, confidence, warnings, and recombinant-identification confidence. | Selected dossier plus checklist for method confirmation, breakpoint precision/freshness, role warnings, artefact warnings, and co-recombinant grouping. | Checklist rules are documented heuristics rather than the hidden RDP5 score. |
 | Manual §8/§9; `PHITest2` and PHIPACK-derived helpers | PHI distinguishes spatially clustered incompatibilities from diffuse homoplasy/error and is reported as challenge evidence. | Direct multistate `pair_score` graph, PHI neighbourhood statistic, analytic mean/variance and normal lower-tail calculation appear beside a separate four-gamete permutation diagnostic. Site work ceilings and total informative-site counts are explicit. | Exact VB random thinning above 6,000 sites and desktop golden-corpus calibration remain. |
-| Manual §5.3–5.4 | Plot and sequence displays support breakpoint placement and parent-match inspection. | Draggable/numeric breakpoints, confidence reset, stale-evidence marking, and arbitrary 2–6-parent alignment affinity highlighting. | Exact RDP5 plot statistics remain on the method-parity track. |
+| Manual §5.3–5.4; `BenHMM`, `MatchBPtoCI`, `PolishBP` | Plot and sequence displays support breakpoint placement, source breakpoint refinement, and parent-match inspection. | Draggable/numeric breakpoints, confidence reset, stale-evidence marking, arbitrary 2–6-parent alignment affinity highlighting, and an interactive BURT posterior/state/switch plot. Source mode implements circular padding/crop, `.995`/`.999` confidence scans, VNP-space switch matching, and principal non-reassortment polish/reversion behavior. | Reassortment segment-boundary branches, exact RDP5 method-plot statistics, and desktop BURT golden outputs remain. |
 | Manual §4.1.5 and §10.4; source role-classifier routines | Each member of a detection triplet must be considered as the recombinant; a weighted profile/tree consensus identifies polarity and roles remain editable. | Three-way workbench persists all 18 standalone source statistics, the final-trim penalty, and six joint rules: profile/tree movement, TrpScore/OuCheck, O:E/O:EDist, SSDist/OUIndex, four-stage ParsimonyO/I with `FindSets` event-history closure, distinct-category Conflict, SetDistT/P, packed-WASM dMax, VB6 banker’s-rounding gates, and the desktop default `MakeConsensusC` weighting/60% ambiguity rule. Auto-resolve holds challenged/ambiguous roles. | Optional logistic/neural selector modes and desktop golden-corpus calibration remain. |
 | Manual §5.5; `DendrogramForm6.frm` | Paired trees show recombinant region versus non-recombinant region; marking follows a sequence across trees. | Default tract-versus-combined-background trees, optional left/tract/right mode, linked leaf marking, role colors, nearest-sequence cohorts, and Newick export. | Browser trees are NJ/p-distance aids. ML/Bayesian trees and SH/AU tests remain open. |
 | Manual §5.5 | Drawn trees are unrooted even when visually oriented; absence of a topology change is not proof against recombination. | Tree caveat explicitly distinguishes midpoint-oriented drawing from an inferred root and warns against interpreting left-to-right ancestry. | No root inference is claimed. |
@@ -91,7 +93,7 @@ global-variable architecture. Group decisions and shared-breakpoint edits are
 single undo frames, every action receives an audit entry, and stale downstream
 evidence is visible rather than silently recomputed.
 
-## Implemented in the 0.9.1 source-parity checkpoint
+## Implemented through the 0.9.2 source-parity checkpoint
 
 - Review studio replaces the disconnected main-page result stack.
 - Six-stage selected-event rail: signal, breakpoints, roles, trees, grouping,
@@ -109,7 +111,13 @@ evidence is visible rather than silently recomputed.
 - Regression tests for queue navigation, filters, best-event selection,
   grouping, checklist state, role scoring, workflow wiring, and tree wording.
 - Direct RDP5 VNP detection and source probability scaling.
-- Fixed-three-state source BURT plus the manual 2–20-state mode.
+- Complete concrete-triplet enumeration by default, with all three
+  recombinant polarities and no consensus/rest-of-alignment proxy; approximate
+  parent shortlisting is opt-in and provenance-marked.
+- Fixed-three-state source BURT with exact circular working-set construction,
+  shifted switch/CI scanning, `MatchBPtoCI`, principal non-reassortment
+  `PolishBP`, and an interactive posterior workbench, plus the manual 2–20-state
+  mode.
 - `GetSupers` ancestral-event merging and all-sequence/all-three-orientation
   co-recombinant screening, including unsignalled descendants.
 - Six-tree seeded JC/NJ bootstrap evidence with low-support branch collapse.

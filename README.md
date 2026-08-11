@@ -42,14 +42,23 @@ table and reuse exact permutation-prefix ranges across triplets. See
 same checkpoint replaces the PHI-style warning surrogate with direct ports of
 RDP5's multistate `pair_score`, `PHI`, and analytic mean/variance path; any
 browser work-ceiling subset is explicitly reported with its all-site count.
-The
+Version 0.9.2 closes the previously simplified half of source BURT: exact
+circular working-sequence padding/cropping, shifted switch enumeration,
+`.995`/`.999` confidence scans, VNP-space `MatchBPtoCI`, and the principal
+non-reassortment `PolishBP` adoption, same-switch, missing-data and
+information-reversion rules are now active. Every selected event exposes an
+interactive posterior/state/switch plot and a persisted source-decision
+ledger. The
 former cross-method CUSUM discovery shortcut has also been removed: every
 enabled family now contributes its own interval and a method can confirm an
 event only when that interval is co-located with the event. GENECONV uses the
 source finite-G mismatch penalty and `CalcKMaxP`/`GCCalcPValP` probability
 path (including the G=0 special case); MAXCHI and CHIMAERA scan compressed
 informative-site coordinates and use the source peak multiplier. Unique
-unordered triplets define the multiplicity family, and order-invariant RDP
+unordered triplets define both the default exhaustive scan and the multiplicity
+family: every method receives three explicit sequence records, never a pair
+plus an alignment-consensus/rest-of-alignment proxy. Distance-pruned parent
+shortlisting survives only as a visibly approximate opt-in. Order-invariant RDP
 triplets are cached to avoid redundant three-polarity source scans. Direct
 ports of `MakePhPrScore`, `MakeTrpGroups`/`MakeTrpScore`,
 `MakeINList`/`MakeOUCheck`, `SimpleDist`, `MakeSSDistB`, `GetBadDists`,
@@ -121,22 +130,25 @@ restorable project:
 
 ```sh
 npm run cli -- alignment.fasta results.rdpweb \
-  --candidate-parents 12 --bootstrap 100 --seed 1511506142
+  --bootstrap 100 --seed 1511506142
 ```
 
 Use `npm run cli -- --help` for method, circular-genome, query/reference, and
-exhaustive-search options. This is a local batch interface, not a separate
-algorithm implementation.
+explicit approximate-parent-shortlist options. Full concrete-triplet screening
+is the default. This is a local batch interface, not a separate algorithm
+implementation.
 
 The tests cover scalar/packed distance equivalence, the RDP5 multi-signal VNP event locator,
-order-invariant cached triplets, independent non-RDP discovery, co-location
+the C(5,3) full-concrete-triplet invariant, order-invariant cached triplets,
+independent non-RDP discovery, co-location
 gating, finite-G GENECONV fragment scoring/KA calibration, informative-site
 MAXCHI/CHIMAERA windows and source peak correction,
 source SiScan quartet categories, outgroup selection, cached/streamed MSVC
 randomization, topology-run calibration and multi-event expansion,
 source PHI incompatibility graphs, analytic moments and lower-tail calibration,
 exact HGRW tails, seeded bootstraps, sampled large-dataset parent selection,
-source-mode and manual step-up BURT breakpoint localization, recursive
+source-mode BURT circular padding, VB6 ties, CI matching, missing-edge and
+reversion behavior plus manual step-up BURT localization, recursive
 erase/extract signal disassembly, deleted-tract splitting and uncertainty,
 RDP5 weighted event merging, bootstrapped-JC/NJ tree evidence, and
 three-orientation co-recombinant clustering, direct source PhPr/SubDist/

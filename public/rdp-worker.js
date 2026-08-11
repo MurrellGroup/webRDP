@@ -98,7 +98,7 @@ function candidateParents(distance, nSeq, target, pool, limit) {
 }
 
 function mapInterval(start, end, rotation, length) {
-  if (rotation === 0) return { start, end, wraps: false };
+  if (rotation === 0) return { start, end, wraps: start > end };
   const mappedStart = (start + rotation) % length;
   const mappedEnd = (end + rotation) % length;
   if (mappedEnd === 0) return { start: mappedStart, end: length, wraps: false };
@@ -117,6 +117,8 @@ function mapBreakpointModel(model, rotation, length) {
   const mapPoint = (position) => (position + rotation) % length;
   return {
     ...model,
+    candidateBreakpoints: model.candidateBreakpoints?.map(mapPoint),
+    polishedBreakpoints: model.polishedBreakpoints?.map(mapPoint),
     confidence99Start: model.confidence99Start ? mapConfidenceInterval(model.confidence99Start, rotation, length) : undefined,
     confidence99End: model.confidence99End ? mapConfidenceInterval(model.confidence99End, rotation, length) : undefined,
     switches: model.switches?.map((entry) => ({
@@ -1276,6 +1278,7 @@ async function analyze(message) {
           maxStates: options.burtMaxStates,
           exhaustiveModels: options.burtExhaustiveModels,
           posteriorThreshold: options.burtPosteriorThreshold,
+          circular: options.circular,
           seed: options.burtMode !== "manual-step-up"
             ? (options.randomSeed ?? 0x5a17c0de) >>> 0
             : (
@@ -1293,7 +1296,8 @@ async function analyze(message) {
         candidate.confidenceStart = mapConfidenceInterval(burt.confidenceStart, candidate.rotation, nSites);
         candidate.confidenceEnd = mapConfidenceInterval(burt.confidenceEnd, candidate.rotation, nSites);
       }
-      if (polishedStart >= 0 && polishedEnd <= nSites && polishedEnd - polishedStart >= 12) {
+      const polishedLength = polishedStart <= polishedEnd ? polishedEnd - polishedStart : nSites + polishedEnd - polishedStart;
+      if (polishedStart >= 0 && polishedEnd <= nSites && polishedLength >= 12) {
         Object.assign(candidate, mapInterval(polishedStart, polishedEnd, candidate.rotation, nSites));
       }
     }
@@ -1533,8 +1537,15 @@ async function analyze(message) {
     matrixMode: exactDistanceMatrix && exactDisplayMatrix
       ? "exact"
       : `${exactDisplayMatrix ? "exact display" : "24-sequence display"} + ${exactDistanceMatrix ? "exact component parent search" : "sampled/stratified component parent search"}`,
+    tripletMode: options.exhaustive ? "all-concrete-triplets" : "approximate-parent-shortlist",
+    // Every method invocation above receives three explicit indexes into the
+    // working alignment. No alignment consensus or rest-of-alignment proxy is
+    // ever substituted for a triplet member. SiScan may separately select a
+    // real fourth outgroup, as required by that method.
+    concreteTripletInputs: true,
     engine: [
       "WebAssembly",
+      options.exhaustive ? "all concrete sequence triplets" : "approximate parent-shortlist triplets",
       exactDistanceMatrix ? "packed distance" : "sampled parent search",
       options.circular ? "dual-origin circular scan" : "linear scan",
       options.polishBreakpoints ? (options.burtMode === "manual-step-up" ? "BURT 2–20-state step-up" : "RDP5-source BURT") : "raw breakpoints",
@@ -1606,6 +1617,7 @@ async function recalculate(message) {
         maxStates: options.burtMaxStates,
         exhaustiveModels: options.burtExhaustiveModels,
         posteriorThreshold: options.burtPosteriorThreshold,
+        circular: options.circular,
         seed: options.burtMode !== "manual-step-up"
           ? (options.randomSeed ?? 0x5a17c0de) >>> 0
           : (
@@ -1616,7 +1628,8 @@ async function recalculate(message) {
             ) >>> 0,
       },
     );
-    if (burt && burt.end - burt.start >= 4) {
+    const burtLength = burt ? (burt.start <= burt.end ? burt.end - burt.start : nSites + burt.end - burt.start) : 0;
+    if (burt && burtLength >= 4) {
       rawStart = burt.start;
       rawEnd = burt.end;
       mappedInterval = mapInterval(rawStart, rawEnd, rotation, nSites);

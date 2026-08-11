@@ -6,6 +6,12 @@ simulation results, workflow parity, and browser-scale performance.
 
 ## Track A — primary detection methods
 
+- The parity scan now enumerates every unordered triplet of concrete alignment
+  sequences by default and evaluates each possible recombinant polarity; no
+  method receives a consensus/rest-of-alignment proxy as its third member. The
+  parent shortlist is an explicitly approximate preview only. Preserve this
+  coverage while moving more triplet batching and method orchestration into
+  packed WebAssembly kernels.
 - RDP: reproduce reference selection, informative-window enumeration, and
   local/global p-values on documented triplets. Multi-excursion source
   enumeration is operational; complete the desktop tie/missing/circular corpus.
@@ -30,9 +36,14 @@ simulation results, workflow parity, and browser-scale performance.
 ## Track B — false-positive control and breakpoint inference
 
 - Source-compatible fixed-three-state BURT fitting, repeated random starts,
-  historical backtrace behavior, and posterior confidence intervals are
-  operational; validate exact circular/tie behavior against a desktop corpus
-  and finish the optional manual 2–20-state mode's selection fixtures.
+  historical backtrace/sentinel behavior, exact circular half-copy padding and
+  cropping, `.995`/`.999` confidence scans, `MatchBPtoCI` VNP matching,
+  non-reassortment `PolishBP` adoption/reversion rules, missing-data snapping,
+  and an interactive posterior/switch workbench are operational with
+  source-derived circular, tie, same-switch, missing-data and information-guard
+  fixtures. Remaining gate: compare these deterministic outputs with a broad
+  desktop-generated golden corpus and finish optional reassortment segment-
+  boundary handling plus the manual 2–20-state mode's selection corpus.
 - Direct `PHITest2`/`PHI` multistate incompatibility scoring, analytic moments
   and normal-tail p-values now accompany the bounded four-gamete permutation,
   rate-variation, parent-conflict, gap and misalignment diagnostics. Add a
@@ -90,6 +101,9 @@ simulation results, workflow parity, and browser-scale performance.
 - Positive, independent-mutation negative, gap-block, circular, rate-shift and
   large-path fixtures are automated; expand low/high-diversity and
   recombinant-of-recombinant corpora.
+- The C(5,3) worker regression guards complete concrete-triplet coverage and
+  provenance. Add method-by-method, polarity-by-polarity call-count fixtures
+  as the remaining detector orchestration moves into larger batched kernels.
 - Numerical comparison ledger against RDP5 outputs supplied by the original
   authors and collaborators; the permitted desktop source is the reference
   specification for browser ports.

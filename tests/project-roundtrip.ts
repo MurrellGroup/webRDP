@@ -24,11 +24,21 @@ const event = {
     majorFit: 0.96,
     minorFit: 0.94,
     sourceParity: true,
-    sourceCompatibility: "RDP5 BenHMM + DoHMMCyclesSerial",
+    sourceCompatibility: "RDP5 BenHMM + DoHMMCyclesSerial + MatchBPtoCI + PolishBP",
+    sourceRoutines: ["BenHMM", "DoHMMCyclesSerial", "MatchBPtoCI", "PolishBP"],
+    sequenceOrder: [0, 1, 2],
+    stateDominantCategories: [0, 2, 1],
+    viterbiLogLikelihood: -83.5,
+    winningRestart: 3,
+    circularPadding: { offset: 142, fittedSites: 569, croppedSites: 285 },
+    candidateBreakpoints: [2_180, 120] as [number, number],
+    polishedBreakpoints: [2_200, 100] as [number, number],
+    polishDecision: { startAdopted: true, endAdopted: true, sameSwitchResolved: false, startMissingBoundary: false, endMissingBoundary: true, revertedForInformation: false, insideVariableSites: 42, outsideVariableSites: 88, startWithin99: true, endWithin99: false, startVariableSiteDistance: 2, endVariableSiteDistance: 4 },
     posteriorThreshold: 0.995,
     confidence99Start: [2_190, 2_210] as [number, number],
     confidence99End: [90, 110] as [number, number],
-    switches: [{ position: 2_200, fromState: 0, toState: 1, confidence95: [2_195, 2_205] as [number, number], confidence99: [2_190, 2_210] as [number, number] }],
+    switches: [{ position: 2_200, informativeIndex: 141, fromState: 0, toState: 1, confidence95: [2_195, 2_205] as [number, number], confidence99: [2_190, 2_210] as [number, number], sourceCoordinates: [2_190, 2_210, 2_200, 2_195, 2_205], matchedStart: true, matchedEnd: false }],
+    posteriorTrace: [{ position: 2_200, informativeIndex: 141, state: 1, probabilities: [0.01, 0.98, 0.01] }],
   },
   methodSignals: [
     { method: "RDP" as const, start: 2_200, end: 100, wraps: true, statistic: 91.2, locator: "RDP5 source" },
@@ -111,7 +121,7 @@ const serialized = serializeProject({
   },
   options: { ...DEFAULT_OPTIONS, candidateParents: 12, siskanOutgroupMode: "manual", siskanOutgroupSequence: 10, siskanPositionMode: "quartet-variable", siskanGapMode: "fifth-state", siskanScanPermutations: 200, siskanPValuePermutations: 2000 },
   events: [event],
-  metrics: { elapsedMs: 12.5, comparisons: 56, engine: "test", rdpSignalTruncations: 3, disassembly: { appliedEvents: 1, components: 2, erasedCanonicalBases: 1_000 } },
+  metrics: { elapsedMs: 12.5, comparisons: 56, engine: "test", tripletMode: "all-concrete-triplets", concreteTripletInputs: true, rdpSignalTruncations: 3, disassembly: { appliedEvents: 1, components: 2, erasedCanonicalBases: 1_000 } },
   distance: [0, 0.1, 0.1, 0],
   auditLog: [{ id: "audit-1", timestamp: "2026-08-11T00:00:00.000Z", action: "Accepted event", summary: "Reviewed fixture.", eventId: event.id }],
 });
@@ -129,9 +139,18 @@ assert.equal(restored.events[0].decision, "accepted");
 assert.equal(restored.events[0].note, "reviewed circular positive control");
 assert.equal(restored.events[0].wraps, true);
 assert.equal(restored.events[0].breakpointModel?.method, "burt-hmm");
-assert.equal(restored.events[0].breakpointModel?.sourceCompatibility, "RDP5 BenHMM + DoHMMCyclesSerial");
+assert.equal(restored.events[0].breakpointModel?.sourceCompatibility, "RDP5 BenHMM + DoHMMCyclesSerial + MatchBPtoCI + PolishBP");
+assert.equal(restored.events[0].breakpointModel?.viterbiLogLikelihood, -83.5);
+assert.equal(restored.events[0].breakpointModel?.winningRestart, 3);
+assert.deepEqual(restored.events[0].breakpointModel?.sourceRoutines, ["BenHMM", "DoHMMCyclesSerial", "MatchBPtoCI", "PolishBP"]);
+assert.deepEqual(restored.events[0].breakpointModel?.circularPadding, { offset: 142, fittedSites: 569, croppedSites: 285 });
+assert.deepEqual(restored.events[0].breakpointModel?.candidateBreakpoints, [2_180, 120]);
+assert.equal(restored.events[0].breakpointModel?.polishDecision?.endMissingBoundary, true);
 assert.deepEqual(restored.events[0].breakpointModel?.confidence99Start, [2_190, 2_210]);
 assert.deepEqual(restored.events[0].breakpointModel?.switches?.[0].confidence99, [2_190, 2_210]);
+assert.equal(restored.events[0].breakpointModel?.switches?.[0].informativeIndex, 141);
+assert.equal(restored.events[0].breakpointModel?.switches?.[0].matchedStart, true);
+assert.equal(restored.events[0].breakpointModel?.posteriorTrace?.[0].informativeIndex, 141);
 assert.equal(restored.events[0].methodSignals?.[0].locator, "RDP5 source");
 assert.equal(restored.events[0].methodSignals?.[1].outgroup, 10);
 assert.equal(restored.events[0].methodSignals?.[1].profile?.[0].z, 3.2);
@@ -162,6 +181,8 @@ assert.deepEqual(restored.distance, [0, 0.1, 0.1, 0]);
 assert.equal(restored.auditLog[0].eventId, event.id);
 assert.equal(restored.metrics?.disassembly?.components, 2);
 assert.equal(restored.metrics?.rdpSignalTruncations, 3);
+assert.equal(restored.metrics?.tripletMode, "all-concrete-triplets");
+assert.equal(restored.metrics?.concreteTripletInputs, true);
 
 const masked = exportRecombinationFree(restored.alignment, restored.events, "mask")[0];
 const maskedAlignment = parseAlignment(masked.content, masked.filename);

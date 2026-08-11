@@ -83,7 +83,8 @@ function initialiseModel(stateCount, random, options) {
   const transition = new Float64Array(stateCount * stateCount);
   const emission = new Float64Array(stateCount * 3);
   if (options.sourceParity === true) {
-    const switchProbability = Math.max(1e-9, Math.min(0.999999, 5 / Math.max(6, options.alignmentLength ?? 1)));
+    // BenHMM declares iVal as Single before assigning 5 / alignment length.
+    const switchProbability = Math.max(1e-9, Math.min(0.999999, Math.fround(5 / Math.max(6, options.alignmentLength ?? 1))));
     const imbalance = (Math.floor(random() * 3) + 1) / 10;
     const anchors = [];
     const used = new Uint8Array(3);
@@ -459,6 +460,546 @@ function pairCategory(sortedTriplet, leftSequence, rightSequence) {
   return 1;
 }
 
+// Visual Basic 6 converts floating-point values assigned to Long with
+// round-half-to-even semantics. Breakpoint midpoints in BenHMM and PolishBP
+// therefore cannot use JavaScript's Math.round without changing exact ties.
+export function vbLong(value) {
+  if (!Number.isFinite(value)) return 0;
+  const lower = Math.floor(value);
+  const fraction = value - lower;
+  if (fraction < 0.5) return lower;
+  if (fraction > 0.5) return lower + 1;
+  return lower % 2 === 0 ? lower : lower + 1;
+}
+
+function sourceXPositionMaps(realPositions, nSites) {
+  const xDiffPos = new Int32Array(realPositions.length + 2);
+  const xPosDiff = new Int32Array(nSites + 1);
+  let informative = 0;
+  for (let position = 1; position <= nSites; position += 1) {
+    if (informative < realPositions.length && realPositions[informative] + 1 === position) {
+      informative += 1;
+      xDiffPos[informative] = position;
+    }
+    xPosDiff[position] = informative;
+  }
+  return { xDiffPos, xPosDiff };
+}
+
+// This preserves BenHMM's unusual inclusive SLen contract, zero sentinel and,
+// for circular alignments, the exact rotated half-copy + central copy + half-
+// copy layout. The zero cell between the leading and central copies is not a
+// typo: it is present in the supplied RDP5 source and affects fitted paths.
+export function buildSourceBurtWorkingSet(realPositions, realObservations, nSites, circular = false) {
+  const positions = realPositions instanceof Int32Array ? realPositions : Int32Array.from(realPositions);
+  const observations = realObservations instanceof Uint8Array ? realObservations : Uint8Array.from(realObservations);
+  const { xDiffPos, xPosDiff } = sourceXPositionMaps(positions, nSites);
+  const originalLength = observations.length;
+  if (!circular) {
+    const recoded = new Uint8Array(originalLength + 1);
+    recoded.set(observations);
+    return {
+      observations: recoded,
+      xDiffPos,
+      xPosDiff,
+      originalLength,
+      sourceLength: originalLength,
+      circularOffset: 0,
+      circular: false,
+    };
+  }
+  const circularOffset = vbLong(originalLength / 2);
+  const sourceLength = originalLength + circularOffset * 2;
+  const recoded = new Uint8Array(sourceLength + 1);
+  for (let index = 0; index < circularOffset; index += 1) {
+    recoded[originalLength + index + circularOffset + 1] = observations[index];
+  }
+  for (let index = circularOffset; index < originalLength; index += 1) {
+    recoded[index - circularOffset] = observations[index];
+  }
+  for (let index = 0; index < originalLength; index += 1) {
+    recoded[index + circularOffset + 1] = observations[index];
+  }
+  return {
+    observations: recoded,
+    xDiffPos,
+    xPosDiff,
+    originalLength,
+    sourceLength,
+    circularOffset,
+    circular: true,
+  };
+}
+
+function cropSourceCircularFit(path, posterior, stateCount, workingSet) {
+  if (!workingSet.circular) {
+    return { path: Uint8Array.from(path), posterior: Float32Array.from(posterior), sourceLength: workingSet.sourceLength };
+  }
+  const sourceLength = vbLong(workingSet.sourceLength / 2);
+  const croppedPath = new Uint8Array(sourceLength + 1);
+  const croppedPosterior = new Float32Array((sourceLength + 1) * stateCount);
+  const offset = workingSet.circularOffset + 1;
+  for (let index = 0; index <= sourceLength; index += 1) {
+    croppedPath[index] = path[index + offset] ?? 0;
+    for (let state = 0; state < stateCount; state += 1) {
+      croppedPosterior[index * stateCount + state] = posterior[(index + offset) * stateCount + state] ?? 0;
+    }
+  }
+  return { path: croppedPath, posterior: croppedPosterior, sourceLength };
+}
+
+function anyStateExceeds(posterior, stateCount, index, threshold) {
+  for (let state = 0; state < stateCount; state += 1) {
+    if ((posterior[index * stateCount + state] ?? 0) > threshold) return true;
+  }
+  return false;
+}
+
+function normaliseSourceCoordinate(value, nSites) {
+  if (value <= nSites) return value;
+  const factor = Math.trunc(value / nSites);
+  return value - nSites * factor;
+}
+
+function sourceIntervalContains(left, right, position, nSites) {
+  const target = Math.max(0, Math.min(nSites, position));
+  return left < right ? target >= left && target <= right : target >= left || target <= right;
+}
+
+// Direct translation of BenHMM's switch enumeration and its .995/.999 scans.
+// Coordinates are the source program's breakpoint coordinates (1..L, with 0
+// accepted for a user candidate at the first boundary).
+export function sourceBurtSwitches(pathInput, posterior, stateCount, sourceLength, xDiffPos, nSites, circular = false) {
+  const path = Uint8Array.from(pathInput);
+  if (sourceLength < 4) return [];
+  path[sourceLength - 1] = circular ? (path[2] ?? 0) : (path[sourceLength - 2] ?? 0);
+  const switches = [];
+  for (let index = 2; index <= sourceLength - 2; index += 1) {
+    if (path[index] === path[index + 1]) continue;
+    let position = index < sourceLength - 2
+      ? vbLong(xDiffPos[index] + (xDiffPos[index + 1] - xDiffPos[index]) / 2)
+      : vbLong(xDiffPos[index] + (nSites - xDiffPos[index]) / 2);
+    if (position < 0) position = 0;
+    let lower99 = 0;
+    let upper99 = 0;
+    let lower95 = 0;
+    let upper95 = 0;
+
+    for (let scan = index; scan >= -sourceLength; scan -= 1) {
+      let at = scan;
+      if (scan <= 0) {
+        if (!circular) {
+          lower99 = 1;
+          break;
+        }
+        at = scan + sourceLength;
+      }
+      if (anyStateExceeds(posterior, stateCount, at, 0.995) && lower95 === 0) {
+        lower95 = at > 1 ? xDiffPos[at - 1] + 1 : 1;
+      }
+      if (anyStateExceeds(posterior, stateCount, at, 0.999)) {
+        lower99 = at > 1 ? xDiffPos[at - 1] + 1 : 1;
+        break;
+      }
+    }
+    for (let scan = index + 1; scan <= sourceLength * 2; scan += 1) {
+      let at = scan;
+      if (scan > sourceLength) {
+        if (!circular) {
+          upper99 = nSites;
+          upper95 = nSites;
+          break;
+        }
+        at = scan - sourceLength;
+      }
+      if (anyStateExceeds(posterior, stateCount, at, 0.995) && upper95 === 0) {
+        upper95 = at < sourceLength - 1 ? xDiffPos[at + 1] - 1 : nSites;
+      }
+      if (anyStateExceeds(posterior, stateCount, at, 0.999)) {
+        upper99 = at < sourceLength - 1 ? xDiffPos[at + 1] - 1 : nSites;
+        break;
+      }
+    }
+
+    if (circular) {
+      if (upper99 === 1 || upper99 === nSites) upper99 = Math.max(1, xDiffPos[1] - 1);
+      if (upper95 === 1 || upper95 === nSites) upper95 = Math.max(1, xDiffPos[1] - 1);
+      if (lower99 === 1 || lower99 === nSites) lower99 = Math.min(nSites, xDiffPos[sourceLength] + 1);
+      if (lower95 === 1 || lower95 === nSites) lower95 = Math.min(nSites, xDiffPos[sourceLength] + 1);
+    }
+    if (lower95 < upper95) {
+      if (!(position > lower95 && position < upper95)) position = lower95 + vbLong((upper95 - lower95) / 2);
+    } else if (!(position > lower95 || position < upper95)) {
+      // Preserve the supplied source's wrapped-midpoint expression, including
+      // its asymmetric use of the right bound.
+      position = vbLong((lower95 + (nSites - upper95)) / 2);
+      if (position > nSites) position -= nSites;
+    }
+    switches.push({
+      position,
+      informativeIndex: index,
+      fromState: path[index],
+      toState: path[index + 1],
+      confidence95: [lower95, upper95],
+      confidence99: [lower99, upper99],
+      sourceCoordinates: [lower99, upper99, position, lower95, upper95],
+    });
+  }
+  return switches;
+}
+
+// Direct translation of MatchBPtoCI. A negative signed match means that the
+// proposed breakpoint lay outside the matched switch's 99% interval; RDP5 may
+// still adopt it later when it is within half a tract length.
+export function matchSourceBreakpoint(switches, breakpoint, xPosDiff, nSites, circular = false) {
+  if (!switches.length) return null;
+  let smallest = nSites;
+  let selectedIndex = 0;
+  let selectedDistance = nSites;
+  const distances = [];
+  const normalised = switches.map((entry) => {
+    const values = [...(entry.sourceCoordinates ?? [entry.confidence99[0], entry.confidence99[1], entry.position, entry.confidence95[0], entry.confidence95[1]])];
+    const factor = Math.trunc(values[0] / nSites);
+    for (let index = 0; index < values.length; index += 1) {
+      if (values[index] > nSites) values[index] -= nSites * factor;
+    }
+    return values;
+  });
+  const target = Math.max(0, Math.min(nSites, Math.trunc(breakpoint)));
+  const totalVariable = xPosDiff[nSites] ?? 0;
+  for (let index = 0; index < normalised.length; index += 1) {
+    const ci = normalised[index];
+    const position = normaliseSourceCoordinate(ci[2], nSites);
+    let distance = Math.abs((xPosDiff[target] ?? 0) - (xPosDiff[position] ?? 0));
+    if (circular && totalVariable - distance < distance) distance = totalVariable - distance;
+    const within99 = sourceIntervalContains(ci[0], ci[1], target, nSites);
+    if (within99) {
+      const wrappedDistance = totalVariable - distance;
+      distance = -(wrappedDistance < distance ? wrappedDistance : distance);
+    }
+    distances.push({ index, distance, within99, variableSiteDistance: Math.abs(distance) });
+    if (smallest === 0) break;
+    if (smallest > 0) {
+      if (smallest > distance) {
+        smallest = distance;
+        selectedIndex = index;
+        selectedDistance = distance;
+      }
+    } else if (Math.abs(smallest) > Math.abs(distance) && distance <= 0) {
+      smallest = distance;
+      selectedIndex = index;
+      selectedDistance = distance;
+    }
+  }
+  const ci = normalised[selectedIndex];
+  const sourceAccepted = selectedDistance <= 0;
+  const within99 = distances.find((entry) => entry.index === selectedIndex)?.within99 ?? false;
+  const sign = sourceAccepted ? 1 : -1;
+  return {
+    switchIndex: selectedIndex,
+    signedCoordinates: ci.map((value) => value * sign),
+    confidence99: [ci[0], ci[1]],
+    position: ci[2],
+    confidence95: [ci[3], ci[4]],
+    within99,
+    sourceAccepted,
+    signedDistance: selectedDistance,
+    variableSiteDistance: Math.abs(selectedDistance),
+    distances,
+  };
+}
+
+function circularCoordinateDistance(left, right, nSites, circular) {
+  const distance = Math.abs(left - right);
+  return circular ? Math.min(distance, nSites - distance) : distance;
+}
+
+function tripletComplete(encoded, nSites, triplet, site) {
+  return triplet.every((sequence) => encoded[sequence * nSites + site] < 4);
+}
+
+function sourceVariablePositions(encoded, nSites, triplet) {
+  const positions = [];
+  for (let site = 0; site < nSites; site += 1) {
+    if (!tripletComplete(encoded, nSites, triplet, site)) continue;
+    const first = encoded[triplet[0] * nSites + site];
+    const second = encoded[triplet[1] * nSites + site];
+    const third = encoded[triplet[2] * nSites + site];
+    if (first !== second || first !== third) positions.push(site + 1);
+  }
+  return positions;
+}
+
+function sourcePartitionCounts(variablePositions, start, end) {
+  let inside = 0;
+  for (const position of variablePositions) {
+    if (start < end ? position >= start && position <= end : position <= end || position >= start) inside += 1;
+  }
+  return { inside, outside: variablePositions.length - inside };
+}
+
+function snapCompleteBreakpoint(encoded, nSites, triplet, position, direction, circular) {
+  let candidate = Math.max(1, Math.min(nSites, Math.trunc(position)));
+  if (tripletComplete(encoded, nSites, triplet, candidate - 1)) return candidate;
+  for (let step = 1; step <= nSites; step += 1) {
+    candidate += direction;
+    if (candidate > nSites) {
+      if (!circular) return position;
+      candidate = 1;
+    }
+    if (candidate < 1) {
+      if (!circular) return 1;
+      candidate = nSites;
+    }
+    if (tripletComplete(encoded, nSites, triplet, candidate - 1)) return candidate;
+  }
+  return position;
+}
+
+function moveSourceBreakpointToMissingEdge(encoded, nSites, triplet, match, otherMatch, side, circular) {
+  if (!match) return { position: null, adjusted: false };
+  let scan = side === "start" ? match.confidence99[1] : match.confidence99[0];
+  const direction = side === "start" ? -1 : 1;
+  for (let step = 0; step <= nSites; step += 1) {
+    scan += direction;
+    if (scan < 1) {
+      if (!circular) return { position: side === "start" ? 2 : match.position, adjusted: side === "start" };
+      scan = nSites;
+    } else if (scan > nSites) {
+      if (!circular) return { position: match.position, adjusted: false };
+      scan = 1;
+    }
+    if (scan === match.position) return { position: match.position, adjusted: false };
+    if (tripletComplete(encoded, nSites, triplet, scan - 1)) continue;
+    if (side === "start") {
+      if (!otherMatch || match.position >= otherMatch.position || scan < otherMatch.position) {
+        const position = scan === nSites && circular ? 1 : scan + 1;
+        return { position, adjusted: true };
+      }
+      return { position: match.position, adjusted: false };
+    }
+    if (!otherMatch || match.position <= otherMatch.position || scan > otherMatch.position) {
+      const position = scan === 1 && circular ? nSites : scan - 1;
+      return { position, adjusted: true };
+    }
+    return { position: match.position, adjusted: false };
+  }
+  return { position: match.position, adjusted: false };
+}
+
+export function polishSourceBreakpointPair(encoded, nSites, triplet, candidateStart, candidateEnd, switches, xPosDiff, circular, repositionOutside = false) {
+  const originalStart = candidateStart;
+  const originalEnd = candidateEnd;
+  const tractLength = candidateStart < candidateEnd ? candidateEnd - candidateStart : nSites + candidateEnd - candidateStart;
+  const startMatch = matchSourceBreakpoint(switches, candidateStart, xPosDiff, nSites, circular);
+  const endMatch = matchSourceBreakpoint(switches, candidateEnd, xPosDiff, nSites, circular);
+  let start = candidateStart;
+  let end = candidateEnd;
+  let startAdopted = false;
+  let endAdopted = false;
+  let sameSwitchResolved = false;
+  let startMissingBoundary = false;
+  let endMissingBoundary = false;
+  if (startMatch && endMatch && Math.abs(Math.abs(startMatch.position) - Math.abs(endMatch.position)) > 2) {
+    if (startMatch.sourceAccepted || repositionOutside || circularCoordinateDistance(start, startMatch.position, nSites, circular) < tractLength / 2) {
+      start = Math.abs(startMatch.position);
+      startAdopted = true;
+    }
+    if (endMatch.sourceAccepted || repositionOutside || circularCoordinateDistance(end, endMatch.position, nSites, circular) < tractLength / 2) {
+      end = Math.abs(endMatch.position);
+      endAdopted = true;
+    }
+  } else if (startMatch && endMatch) {
+    sameSwitchResolved = true;
+    const startDirect = Math.abs(start - startMatch.position);
+    const endDirect = Math.abs(end - endMatch.position);
+    const chooseStart = (startDirect <= endDirect || (circular && nSites - startDirect <= endDirect))
+      && (!circular || startDirect <= nSites - endDirect || nSites - startDirect <= nSites - endDirect);
+    const startDistance = circularCoordinateDistance(start, startMatch.position, nSites, circular);
+    const endDistance = circularCoordinateDistance(end, endMatch.position, nSites, circular);
+    if (chooseStart) {
+      if (startDistance < tractLength / 2) {
+        start = Math.abs(startMatch.position);
+        startAdopted = true;
+      }
+    } else if (endDistance < tractLength / 2) {
+      end = Math.abs(endMatch.position);
+      endAdopted = true;
+    }
+  }
+
+  if (startAdopted) {
+    const missingEdge = moveSourceBreakpointToMissingEdge(encoded, nSites, triplet, startMatch, endMatch, "start", circular);
+    if (missingEdge.position !== null) start = missingEdge.position;
+    startMissingBoundary = missingEdge.adjusted;
+  }
+  if (endAdopted) {
+    const missingEdge = moveSourceBreakpointToMissingEdge(encoded, nSites, triplet, endMatch, startMatch, "end", circular);
+    if (missingEdge.position !== null) end = missingEdge.position;
+    endMissingBoundary = missingEdge.adjusted;
+  }
+
+  start = snapCompleteBreakpoint(encoded, nSites, triplet, start, 1, circular);
+  end = snapCompleteBreakpoint(encoded, nSites, triplet, end, -1, circular);
+  const information = sourcePartitionCounts(sourceVariablePositions(encoded, nSites, triplet), start, end);
+  const revertedForInformation = information.inside < 3 || information.outside < 3;
+  if (revertedForInformation) {
+    start = originalStart;
+    end = originalEnd;
+    startAdopted = false;
+    endAdopted = false;
+  }
+  return {
+    start,
+    end,
+    startMatch,
+    endMatch,
+    startAdopted,
+    endAdopted,
+    sameSwitchResolved,
+    startMissingBoundary,
+    endMissingBoundary,
+    information,
+    revertedForInformation,
+  };
+}
+
+function sampleSourcePosteriorTrace(xDiffPos, path, posterior, stateCount, sourceLength, maximumPoints = 360) {
+  const first = Math.min(1, sourceLength);
+  const count = Math.max(1, sourceLength - first + 1);
+  const stride = Math.max(1, Math.ceil(count / maximumPoints));
+  const trace = [];
+  for (let index = first; index <= sourceLength; index += stride) {
+    const probabilities = [];
+    for (let state = 0; state < stateCount; state += 1) probabilities.push(Number((posterior[index * stateCount + state] ?? 0).toFixed(6)));
+    trace.push({ position: xDiffPos[index] || xDiffPos[Math.min(index, xDiffPos.length - 1)] || 0, informativeIndex: index, state: path[index] ?? 0, probabilities });
+  }
+  if (sourceLength >= first && trace.at(-1)?.informativeIndex !== sourceLength) {
+    const probabilities = [];
+    for (let state = 0; state < stateCount; state += 1) probabilities.push(Number((posterior[sourceLength * stateCount + state] ?? 0).toFixed(6)));
+    trace.push({ position: xDiffPos[sourceLength] || 0, informativeIndex: sourceLength, state: path[sourceLength] ?? 0, probabilities });
+  }
+  return trace;
+}
+
+function fitSourceBurtTriplet(encoded, nSites, sortedTriplet, sequence1, sequence2, sequence3, candidateStart, candidateEnd, collected, options) {
+  const circular = options.circular === true;
+  const workingSet = buildSourceBurtWorkingSet(collected.positions, collected.observations, nSites, circular);
+  const fitted = fitCategoricalHMM(workingSet.observations, {
+    ...options,
+    sourceParity: true,
+    alignmentLength: nSites,
+  });
+  if (!fitted?.selected) return null;
+  const model = fitted.selected;
+  const posteriorResult = forwardBackward(workingSet.observations, model);
+  const cropped = cropSourceCircularFit(model.path, posteriorResult.posterior, model.stateCount, workingSet);
+  const switches = sourceBurtSwitches(
+    cropped.path,
+    cropped.posterior,
+    model.stateCount,
+    cropped.sourceLength,
+    workingSet.xDiffPos,
+    nSites,
+    circular,
+  );
+  const polished = polishSourceBreakpointPair(
+    encoded,
+    nSites,
+    sortedTriplet,
+    candidateStart,
+    candidateEnd,
+    switches,
+    workingSet.xPosDiff,
+    circular,
+    options.repositionOutsideConfidence === true,
+  );
+  const selectedStartSwitch = polished.startMatch ? switches[polished.startMatch.switchIndex] : null;
+  const selectedEndSwitch = polished.endMatch ? switches[polished.endMatch.switchIndex] : null;
+  for (let index = 0; index < switches.length; index += 1) {
+    switches[index].matchedStart = polished.startMatch?.switchIndex === index;
+    switches[index].matchedEnd = polished.endMatch?.switchIndex === index;
+  }
+  const confidenceStart = polished.startAdopted && selectedStartSwitch
+    ? [...selectedStartSwitch.confidence95]
+    : [polished.start, polished.start];
+  const confidenceEnd = polished.endAdopted && selectedEndSwitch
+    ? [...selectedEndSwitch.confidence95]
+    : [polished.end, polished.end];
+  const emissions = [];
+  const transitions = [];
+  const stateDominantCategories = [];
+  for (let state = 0; state < model.stateCount; state += 1) {
+    const emissionRow = Array.from(model.emission.subarray(state * 3, state * 3 + 3), (value) => Number(value.toFixed(6)));
+    emissions.push(emissionRow);
+    transitions.push(Array.from(model.transition.subarray(state * model.stateCount, (state + 1) * model.stateCount), (value) => Number(value.toFixed(6))));
+    let dominant = 0;
+    for (let category = 1; category < 3; category += 1) if (emissionRow[category] > emissionRow[dominant]) dominant = category;
+    stateDominantCategories.push(dominant);
+  }
+  const majorCategory = pairCategory(sortedTriplet, sequence1, sequence2);
+  const minorCategory = pairCategory(sortedTriplet, sequence1, sequence3);
+  let majorState = 0;
+  let minorState = 0;
+  for (let state = 1; state < model.stateCount; state += 1) {
+    if (model.emission[state * 3 + majorCategory] > model.emission[majorState * 3 + majorCategory]) majorState = state;
+    if (model.emission[state * 3 + minorCategory] > model.emission[minorState * 3 + minorCategory]) minorState = state;
+  }
+  return {
+    start: polished.start,
+    end: polished.end,
+    confidenceStart,
+    confidenceEnd,
+    model: {
+      method: "burt-hmm",
+      informativeSites: collected.observations.length,
+      states: model.stateCount,
+      stateSwitches: switches.length,
+      majorFit: model.emission[majorState * 3 + majorCategory],
+      minorFit: model.emission[minorState * 3 + minorCategory],
+      logLikelihood: posteriorResult.logLikelihood,
+      viterbiLogLikelihood: model.viterbiLogLikelihood,
+      bic: model.bic,
+      aic: model.aic,
+      criterion: "RDP5 source (maximum Viterbi likelihood)",
+      randomStarts: Math.max(1, Math.trunc(options.randomStarts ?? 21)),
+      iterations: model.iterations,
+      winningRestart: model.restart + 1,
+      selectedState: minorState,
+      posteriorThreshold: 0.995,
+      sourceParity: true,
+      sourceCompatibility: "RDP5 BenHMM + DoHMMCyclesSerial + MatchBPtoCI + PolishBP",
+      sourceRoutines: ["BenHMM", "DoHMMCyclesSerial", "GetLaticePathP", "ForwardCP", "ReverseCP", "MatchBPtoCI", "PolishBP"],
+      sequenceOrder: sortedTriplet,
+      stateDominantCategories,
+      circularPadding: circular ? { offset: workingSet.circularOffset, fittedSites: workingSet.sourceLength + 1, croppedSites: cropped.sourceLength + 1 } : undefined,
+      candidateBreakpoints: [candidateStart, candidateEnd],
+      polishedBreakpoints: [polished.start, polished.end],
+      polishDecision: {
+        startAdopted: polished.startAdopted,
+        endAdopted: polished.endAdopted,
+        sameSwitchResolved: polished.sameSwitchResolved,
+        startMissingBoundary: polished.startMissingBoundary,
+        endMissingBoundary: polished.endMissingBoundary,
+        revertedForInformation: polished.revertedForInformation,
+        insideVariableSites: polished.information.inside,
+        outsideVariableSites: polished.information.outside,
+        startWithin99: polished.startMatch?.within99 ?? false,
+        endWithin99: polished.endMatch?.within99 ?? false,
+        startVariableSiteDistance: polished.startMatch?.variableSiteDistance,
+        endVariableSiteDistance: polished.endMatch?.variableSiteDistance,
+      },
+      confidence99Start: selectedStartSwitch?.confidence99,
+      confidence99End: selectedEndSwitch?.confidence99,
+      emissions,
+      transitions,
+      switches,
+      posteriorTrace: sampleSourcePosteriorTrace(workingSet.xDiffPos, cropped.path, cropped.posterior, model.stateCount, cropped.sourceLength),
+      modelSelection: fitted.ledger,
+    },
+  };
+}
+
 export function fitCategoricalHMM(observations, options = {}) {
   if (!(observations instanceof Uint8Array)) observations = Uint8Array.from(observations);
   if (observations.length < 8) return null;
@@ -498,21 +1039,24 @@ export function fitCategoricalHMM(observations, options = {}) {
 export function fitBurtTriplet(encoded, nSites, sequence1, sequence2, sequence3, candidateStart, candidateEnd, options = {}) {
   const sortedTriplet = [sequence1, sequence2, sequence3].sort((left, right) => left - right);
   const collected = collectBurtObservations(encoded, nSites, sortedTriplet[0], sortedTriplet[1], sortedTriplet[2]);
+  const sourceParity = options.sourceParity !== false;
+  if (collected.observations.length < 8 || (!options.circular && candidateEnd <= candidateStart)) return null;
+  if (sourceParity) {
+    return fitSourceBurtTriplet(
+      encoded,
+      nSites,
+      sortedTriplet,
+      sequence1,
+      sequence2,
+      sequence3,
+      candidateStart,
+      candidateEnd,
+      collected,
+      options,
+    );
+  }
   const realPositions = collected.positions;
   let { positions, observations } = collected;
-  if (observations.length < 8 || candidateEnd <= candidateStart) return null;
-  const sourceParity = options.sourceParity !== false;
-  if (sourceParity) {
-    // BenHMM uses one-based XDiffPos alongside a zero-based RecodeB array and
-    // passes SLen as the count (therefore processing its zero-filled sentinel).
-    // Preserve that observable offset only in source-compatibility mode.
-    const sourcePositions = new Int32Array(positions.length + 1);
-    const sourceObservations = new Uint8Array(observations.length + 1);
-    sourceObservations.set(observations);
-    for (let index = 0; index < positions.length; index += 1) sourcePositions[index + 1] = positions[index];
-    positions = sourcePositions;
-    observations = sourceObservations;
-  }
   const fitOptions = { ...options, sourceParity, alignmentLength: nSites };
   const fitted = fitCategoricalHMM(observations, fitOptions);
   if (!fitted?.selected) return null;
