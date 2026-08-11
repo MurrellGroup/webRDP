@@ -287,7 +287,9 @@ function Panel({ title, action, children, className = "" }: {
   return (
     <section className={`panel ${className}`}>
       <div className="panel-title"><h2>{title}</h2>{action}</div>
-      {children}
+      <div className="panel-body" tabIndex={0} role="region" aria-label={`${title} content`}>
+        {children}
+      </div>
     </section>
   );
 }

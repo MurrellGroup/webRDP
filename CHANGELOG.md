@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.1 — 2026-08-11
+
+- Made every reusable analysis panel own an explicit bounded scroll body on
+  desktop, with a persistent scrollbar, keyboard focus, and scroll chaining
+  back to the center workspace at its edges.
+- Gave the center workspace a definite zero-basis flex height so its overflow
+  cannot be absorbed by an intrinsic grid row on short viewports.
+- Removed the tutorial dialog's clipping override and made its navigation rail
+  independently safe on short desktop and narrow mobile screens.
+- Expanded rendered CSS regressions to cover all primary scroll owners and the
+  responsive handoff from nested desktop scrolling to document scrolling.
+
 ## 0.5.0 — 2026-08-11
 
 - Rebuilt viewport sizing and overflow ownership so the center workspace,

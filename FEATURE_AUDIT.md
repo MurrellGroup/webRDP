@@ -1,13 +1,13 @@
-# Feature audit — 0.5.0 checkpoint
+# Feature audit — 0.5.1 checkpoint
 
 This ledger prevents interface completeness from being confused with validated
 RDP5 replacement status. “Resolved” means the product defect is implemented and
 covered by a local test or build check. It does not imply numerical parity with
 the proprietary Windows package.
 
-| Audit item | 0.5.0 state | Evidence / remaining gate |
+| Audit item | 0.5.1 state | Evidence / remaining gate |
 | --- | --- | --- |
-| Desktop page cannot scroll | **Resolved** | Viewport ownership uses `100dvh`, `min-height: 0`, and one explicit center scroller; short/mobile layouts return scrolling to `body`. Rendered CSS regression test included. |
+| Desktop page or a tall result panel cannot scroll | **Resolved** | Viewport ownership uses `100dvh`, a zero-basis center scroller, and a bounded scroll body in every reusable analysis panel. Sidebar, inspector, matrices, trees, modals, and long sublists all have explicit scroll owners; short/mobile layouts return scrolling to `body`. Rendered CSS regressions cover every primary owner. |
 | Trees are hidden or too weak | **Resolved for exploratory NJ review** | Dedicated Local Trees tab; selected event, parent roles, left/tract/right regions, nearest-context cohort, topology summaries, highlighted leaves, cohort list, and individual/batch Newick export. ML, RF, SH and AU tests remain open. |
 | Method results are impossible to distinguish | **Resolved** | Named support chips in the event table plus seven method tabs showing decision, raw p, adjusted p, experiment scope, statistic, calibration, limitation, primary paper, and a method-specific selected-triplet profile. |
 | Only one small example | **Resolved** | Eight deterministic, truth-annotated synthetic datasets: clean triplet, tutorial control, three-lineage virus family, circular ssDNA family, four-segment family, nested/overlapping mosaics, 80 kb bacterial core genome, and 520-genome stress panel. Empirical sequences remain intentionally unbundled pending dataset-specific licensing/provenance. |
@@ -32,7 +32,7 @@ the proprietary Windows package.
 
 ## Current release judgment
 
-Version 0.5.0 is a substantially clearer and more recoverable **scientific
+Version 0.5.1 is a substantially clearer and more recoverable **scientific
 alpha**, not a validated drop-in RDP5 replacement. The next highest-value work
 is independent candidate discovery plus numerical comparison fixtures for each
 primary method; no amount of additional UI should supersede those gates.
