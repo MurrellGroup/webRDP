@@ -1,17 +1,18 @@
-# Feature audit — 0.6.1 checkpoint
+# Feature audit — 0.7.0 checkpoint
 
 This ledger separates product completeness from scientific parity. “Resolved”
 means the defect is implemented and covered by a local regression or build
 check. It does not imply numerical equivalence to the proprietary Windows RDP
 package.
 
-| Audit item | 0.6.1 state | Evidence / remaining gate |
+| Audit item | 0.7.0 state | Evidence / remaining gate |
 | --- | --- | --- |
 | Center page or Export view cannot scroll | **Resolved systemically** | The center workspace is the desktop vertical scroll owner. Generic panels grow in document flow instead of imposing a viewport cap; only genuinely data-heavy grids, ledgers, trees, and queues have intentional local scrolling. Below 980 px, scrolling returns to `body`. Source and rendered-CSS regressions enforce the ownership model. |
 | Recombination-map rows escape their box and cover later panels | **Resolved structurally** | Every panel is now an isolated clipping boundary without a height cap. The map has a definite 240–420 px scroll viewport with layout/paint containment; expanded mode hands its full content to the panel-body scroll owner. Regression tests require all three containment layers. |
 | A panel is too short to inspect comfortably | **Resolved** | Every reusable titled `Panel` has an accessible full-screen control, backdrop dismissal, Escape handling, focus restoration, body scroll locking, and its own expanded scroll body. |
 | Alignment viewer is too primitive | **Resolved for multi-parent review** | Base mode and parent-affinity mode; any 2–6 sequences can be selected as parents; unique-parent, multi-parent/shared, none/novel, and missing/ambiguous states are visually distinct. Parent-informative-only columns, three zoom densities, linked event-parent defaults, sticky labels, coordinate tooltips, large-alignment memory guard, and unit tests are included. |
 | Complex/nested event workflow is unclear | **Resolved at workflow/UI level; engine propagation remains partial** | New Global reconstruction tab with five-stage RDP-style workflow, ordered review queue, stale/downstream propagation after scientific edits, unresolved-sequence rescan, global per-sequence mosaic map, co-recombinant groups, possible-overprint relationships, recombinant-parent dependencies, and tree/alignment deep links. Full RDP signal erasure/splitting, ancestral-event disassembly, and automated historical direction inference remain parity work. |
+| Global queue must still be resolved manually one event at a time | **Resolved as an explainable heuristic; calibration remains alpha** | Conservative/balanced/aggressive presets, hard evidence gates, weighted scores, dry-run recommendations, analyst-review bands, locked reviewed decisions, transitive dependency holds, and reversible audit entries are operational. The runner stops at its first causal barrier, rescans impacted targets or all unresolved targets according to policy, excludes accepted mosaic sequences from parent search, suppresses only close same-parent duplicates, replans, and obeys a round cap. RDP5 comparison calibration and independent scientific validation remain required before unattended publication-grade use. |
 | Trees look disconnected | **Resolved** | Tree geometry is produced by a tested cumulative-distance layout, non-negative branch sanitization, one continuous SVG path, explicit joints, zero-length branch nodes, and finite-coordinate checks. |
 | Tree exploration is too weak | **Resolved for exploratory NJ review** | Dedicated Local trees tab; left/tract/right or circular tract/background comparison; nearest-context cohorts; linked leaf marking across every tree; triad role colors; topology summaries; individual/batch Newick export. ML trees, RF distances, SH/AU tests, and editable clade operations remain open. |
 | Method result ownership is unclear | **Resolved** | Seven named method tabs expose support decision, raw and adjusted p, correction scope, method statistic, calibration, limitation, source paper, and a method-specific profile. |
@@ -31,11 +32,11 @@ package.
 | Native RDP project compatibility | **Open** | FASTA, CLUSTAL, PHYLIP, NEXUS, GFF3, GenBank FEATURES, BED, and `.rdpweb` are supported. RDP4/RDP5 project conversion is not. |
 | All seven methods discover candidates independently | **Open — critical parity gate** | Candidate retention is adaptive and preserves nested size classes, but RDP, GENECONV, BootScan, MaxChi, Chimaera, SiScan, and 3SEQ still share the initial triplet candidate screen. |
 | Exact RDP5 numerical parity | **Open — critical parity gate** | Exact small probability tests and simulation fixtures exist. GENECONV mismatch/permutation, multi-taxon BootScan, complete MaxChi/Chimaera, SiScan permutations, BURT, and large-case 3SEQ/RDP5 comparison remain. |
-| Validation breadth | **Partially resolved** | Scientific, circular, large-path, diagnostic, exact-probability, method-mask, example, project, scrolling/full-screen, alignment-affinity, tree-layout, reconstruction, deterministic SSR, static artifact, subpath, and performance gates pass. RDP5 comparison corpus, ROC curves, and Chrome/Firefox/Safari/Edge E2E remain release blockers. |
+| Validation breadth | **Partially resolved** | Scientific, circular, large-path, diagnostic, exact-probability, method-mask, example, project, scrolling/full-screen, alignment-affinity, tree-layout, reconstruction, auto-resolution, deterministic SSR, static artifact, subpath, and performance gates pass. RDP5 comparison corpus, ROC curves, and Chrome/Firefox/Safari/Edge E2E remain release blockers. |
 
 ## Current release judgment
 
-Version 0.6.1 is a substantially more coherent and testable **scientific
+Version 0.7.0 is a substantially more coherent and testable **scientific
 alpha**, not a validated drop-in RDP5 replacement. The next highest-value work
 remains independent candidate discovery and numerical comparison fixtures for
 each primary method, followed by full signal-erasure/ancestral-event propagation

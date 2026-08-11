@@ -49,4 +49,22 @@ assert.ok(Math.abs(mosaic.start - 782) <= 80, `left breakpoint ${mosaic.start} s
 assert.ok(Math.abs(mosaic.end - 1538) <= 80, `right breakpoint ${mosaic.end} should localize near 1538`);
 assert.ok([2, 3, 4].includes(mosaic.majorParent), "an Alpha sequence should be the major parent");
 assert.ok([5, 6, 7, 11].includes(mosaic.minorParent), "a Beta sequence should be the minor parent");
+const parentFilteredResult = new Promise<Record<string, unknown>>((resolve, reject) => {
+  runtime.postMessage = (payload: unknown) => {
+    const filteredMessage = payload as Record<string, unknown>;
+    if (filteredMessage.type === "result") resolve(filteredMessage);
+    if (filteredMessage.type === "error") reject(new Error(String(filteredMessage.message)));
+  };
+});
+runtime.self.onmessage({
+  data: {
+    type: "analyze",
+    jobId: 2,
+    alignment: makeDemoAlignment(),
+    options: { ...DEFAULT_OPTIONS, mode: "query-reference" },
+    excludedParents: [2, 3, 4],
+  },
+});
+const parentFilteredEvents = (await parentFilteredResult).events as Array<{ majorParent: number; minorParent: number }>;
+assert.ok(parentFilteredEvents.every((event) => ![2, 3, 4].includes(event.majorParent) && ![2, 3, 4].includes(event.minorParent)), "accepted mosaic parent proxies must be absent from an event-aware rescan parent pool");
 console.log(JSON.stringify({ events: events.length, mosaic, elapsedMs: message.elapsedMs }, null, 2));

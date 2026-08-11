@@ -433,12 +433,13 @@ async function analyze(message) {
   const distance = new Float32Array(memory.buffer, distancePtr, matrixCount * matrixCount).slice();
   const allIndexes = Array.from({ length: nSeq }, (_, index) => index);
   const excludedTargets = new Set(Array.isArray(message.excludedTargets) ? message.excludedTargets : []);
+  const excludedParents = new Set(Array.isArray(message.excludedParents) ? message.excludedParents : []);
   const targets = options.mode === "query-reference"
     ? allIndexes.filter((index) => !excludedTargets.has(index) && (options.testReferences || sequences[index].role === "query" || sequences[index].role === "both"))
     : allIndexes.filter((index) => !excludedTargets.has(index));
   const referencePool = options.mode === "query-reference"
-    ? allIndexes.filter((index) => sequences[index].role === "reference" || sequences[index].role === "both")
-    : allIndexes;
+    ? allIndexes.filter((index) => !excludedParents.has(index) && (sequences[index].role === "reference" || sequences[index].role === "both"))
+    : allIndexes.filter((index) => !excludedParents.has(index));
   new Int32Array(memory.buffer, poolPtr, referencePool.length).set(referencePool);
   const candidates = [];
   const partialBest = new Map();

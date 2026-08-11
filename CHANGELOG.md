@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.7.0 — 2026-08-11
+
+- Added an explainable ordered auto-resolver to Global reconstruction with
+  conservative, balanced, and aggressive profiles plus a live dry-run of
+  accept, reject, analyst-review, locked-decision, and next-rescan outcomes.
+- Combined method concordance, adjusted significance, informative-site depth,
+  breakpoint precision, parent-conflict, rate-density, diffuse-incompatibility,
+  and warning evidence into a tunable score guarded by independent hard gates.
+  Stale or uncalibrated evidence can never be auto-accepted.
+- Added precise advanced controls for every evidence gate and score weight,
+  whether reviewed decisions may be revisited, and all rescan thresholds and
+  dependency-risk contributions.
+- Added dependency-aware rescan barriers for overlapping tracts in one
+  recombinant, recombinant-parent use, reciprocal nested-parent use, and
+  co-recombinant groups. Unresolved events transitively block only their
+  causally linked downstream branch rather than freezing independent events.
+- Added off, impacted-target, adaptive, and full unresolved-target rescan
+  strategies. Each rescan rebuilds the remaining plan, respects a tunable round
+  cap, preserves resolved/provenance records, excludes accepted mosaic
+  sequences from the parent pool, suppresses only close same-parent duplicate
+  detections, and is reversible to the pre-run queue state through Undo.
+- Indexed event dependencies and genomic-interval buckets so a 5,000-event
+  dry-run remains interactive; the development-container stress check completed
+  sparse and concentrated queues in roughly 64 ms and 25 ms, respectively.
+
 ## 0.6.1 — 2026-08-11
 
 - Closed the main-page paint leak by making every panel a clipping and stacking

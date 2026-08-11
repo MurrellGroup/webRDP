@@ -10,7 +10,11 @@ trees, full-screen analysis panels, deterministic hydration-safe rendering,
 and a single reliable workspace scrolling model. Version 0.6.1 also makes
 panel paint containment structural and adds dense RDP4-style breakpoint-pair,
 recombination-region, and local-discordance genome matrices with interactive
-coordinate readouts and accessible scientific palettes. The truth-annotated synthetic
+coordinate readouts and accessible scientific palettes. Version 0.7 adds a
+tunable ordered auto-resolver with conservative/balanced/aggressive profiles,
+explicit evidence gates, dependency-aware targeted rescans, transitive safety
+holds, live dry-runs, rescan-round caps, and one-step workflow undo. The
+truth-annotated synthetic
 dataset library, method-by-method result interpretation, safe-by-default
 fresh/accepted exports, scan-scope event recalculation, and project audit ledger
 remain available. The exact
@@ -87,7 +91,8 @@ gap-block challenges, exact manual-event recalculation, NJ/hotspot routines, a
 513-sequence large-path integration fixture, annotation-aware masking, and
 lossless `.rdpweb` project round-trips, parent-affinity classification,
 ordered/nested event reconstruction, connected tree geometry, global scroll
-ownership, full-screen panel controls, and deterministic server rendering.
+ownership, full-screen panel controls, deterministic server rendering, and
+auto-resolution scoring/rescan barriers.
 
 ## Current status
 

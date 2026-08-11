@@ -88,6 +88,13 @@ display matrix without allocating an N² matrix.
   mosaic rendering caps at 300 recombinant rows, dependency rendering caps at
   500, and derived relationships are bounded at 20,000 while the project keeps
   every event.
+- Auto-resolution scores events in O(E) and uses recombinant, parent, group,
+  and genomic-interval indexes to visit plausible downstream dependencies
+  rather than comparing every pair. It calculates only the next operational
+  rescan barrier because the queue will be rebuilt after that rescan. Deferred
+  dry-run rendering keeps sliders responsive. A 5,000-event development check
+  took about 64 ms for a sparse 520-sequence queue and 25 ms for a deliberately
+  concentrated same-recombinant queue.
 - Dense genome-position matrices render through one canvas per view rather than
   thousands of interactive DOM cells. Breakpoint pairs are O(E); the region
   matrix is O(ER²) with an adaptive cap of R=48 above 2,000 visible events and

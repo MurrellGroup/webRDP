@@ -5,6 +5,7 @@ import {
   DragEvent,
   ReactNode,
   useCallback,
+  useDeferredValue,
   useEffect,
   useMemo,
   useRef,
@@ -56,6 +57,15 @@ import {
   computeRegionSeparationMatrices,
   eventContainsPosition,
 } from "./pattern-matrices";
+import {
+  AUTO_RESOLVE_PRESETS,
+  applyAutoResolutionPlan,
+  filterResolvedEventDuplicates,
+  planAutoResolution,
+  rescanTargetsForBarrier,
+  type AutoResolvePresetName,
+  type AutoResolveSettings,
+} from "./auto-resolve";
 
 type Tab = "explore" | "reconstruction" | "trees" | "alignment" | "patterns" | "export" | "methods";
 type RunState = "idle" | "running" | "complete" | "error";
@@ -75,6 +85,40 @@ interface RunMetrics {
   parentSamples?: number;
   timing?: { distanceMs: number; scanMs: number; statisticsMs: number; diagnosticsMs?: number };
   diagnostics?: AlignmentDiagnostics;
+}
+
+interface AutoResolveStatus {
+  state: "idle" | "resolving" | "rescanning" | "complete" | "paused" | "error";
+  message: string;
+  round: number;
+  processed: number;
+  accepted: number;
+  rejected: number;
+  reviewed: number;
+  rescans: number;
+}
+
+interface AutoResolveSession {
+  settings: AutoResolveSettings;
+  profileLabel: string;
+  round: number;
+  processedEventIds: string[];
+  processed: number;
+  accepted: number;
+  rejected: number;
+  reviewed: number;
+  rescans: number;
+}
+
+interface AnalysisLaunchConfig {
+  excludedTargets?: number[];
+  excludedParents?: number[];
+  retainedEvents?: RdpEvent[];
+  filterResolvedAgainst?: RdpEvent[];
+  resetEditHistory?: boolean;
+  auditAction?: string;
+  auditContext?: string;
+  onComplete?: (events: RdpEvent[]) => void;
 }
 
 const METHOD_META: Record<MethodName, { family: string; detail: string; limit: string; citation: string }> = {
@@ -1182,7 +1226,117 @@ function LocalTrees({ alignment, events, event, onSelectEvent }: { alignment: Al
   </div>;
 }
 
-function ReconstructionWorkspace({ alignment, events, selectedId, onSelect, onDecision, onRescan, rescanning }: {
+function AutoRange({ label, value, minimum, maximum, step = 1, display, onChange }: {
+  label: string;
+  value: number;
+  minimum: number;
+  maximum: number;
+  step?: number;
+  display?: (value: number) => string;
+  onChange: (value: number) => void;
+}) {
+  return <label className="auto-range"><span>{label}<output>{display ? display(value) : value}</output></span><input type="range" min={minimum} max={maximum} step={step} value={value} onChange={(event) => onChange(Number(event.target.value))}/></label>;
+}
+
+function AutoSwitch({ label, detail, checked, onChange }: { label: string; detail: string; checked: boolean; onChange: (checked: boolean) => void }) {
+  return <label className="auto-switch"><input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)}/><i/><span><b>{label}</b><small>{detail}</small></span></label>;
+}
+
+function AutoResolvePanel({ alignment, events, status, rescanning, onRun }: {
+  alignment: AlignmentData;
+  events: RdpEvent[];
+  status: AutoResolveStatus;
+  rescanning: boolean;
+  onRun: (settings: AutoResolveSettings, profileLabel: string) => void;
+}) {
+  const [profile, setProfile] = useState<AutoResolvePresetName | "custom">("conservative");
+  const [settings, setSettings] = useState<AutoResolveSettings>(() => ({ ...AUTO_RESOLVE_PRESETS.conservative }));
+  const deferredSettings = useDeferredValue(settings);
+  const plan = useMemo(() => planAutoResolution(events, alignment.length, deferredSettings), [alignment.length, deferredSettings, events]);
+  const visibleEntries = plan.entries.filter((entry) => entry.recommendation !== "keep").slice(0, 8);
+  const firstBarrier = plan.barriers[0];
+  const running = status.state === "resolving" || status.state === "rescanning" || rescanning;
+  const setValue = <K extends keyof AutoResolveSettings>(key: K, value: AutoResolveSettings[K]) => {
+    setProfile("custom");
+    setSettings((current) => ({ ...current, [key]: value }));
+  };
+  const selectPreset = (next: AutoResolvePresetName) => {
+    setProfile(next);
+    setSettings({ ...AUTO_RESOLVE_PRESETS[next] });
+  };
+  return <Panel title="Heuristic auto-resolver" action={<span className="panel-caption">Dry-run first · reversible as one workflow action</span>}>
+    <div className="auto-resolve-shell">
+      <div className="auto-resolve-intro">
+        <div><span className="eyebrow">Explainable ordered decisions</span><h2>Resolve until the dependency graph says “rescan”.</h2><p>Each event is scored in inference order. Automatic acceptance requires every configured scientific gate; ambiguous or stale evidence stays with the analyst. A rescan is inserted only when a changed decision can alter a later recombinant, parent proxy, overlapping tract, or co-recombinant group.</p></div>
+        <div className="auto-preset-picker" role="radiogroup" aria-label="Auto-resolve profile">
+          {(["conservative", "balanced", "aggressive"] as AutoResolvePresetName[]).map((name) => <button type="button" role="radio" aria-checked={profile === name} className={profile === name ? "active" : ""} key={name} onClick={() => selectPreset(name)}><b>{name}</b><small>{name === "conservative" ? "High-confidence automation; earlier targeted rescans" : name === "balanced" ? "Moderate gates; adaptive scan scope" : "Resolve more; batch more; fewer rescans"}</small></button>)}
+          {profile === "custom" && <span className="custom-profile">Custom advanced profile</span>}
+        </div>
+      </div>
+      <div className="auto-plan-summary" aria-label="Auto-resolution dry-run summary">
+        <article className="accept"><b>{plan.acceptCount}</b><span>auto-accept</span></article>
+        <article className="reject"><b>{plan.rejectCount}</b><span>auto-reject</span></article>
+        <article className="review"><b>{plan.reviewCount}</b><span>analyst review</span></article>
+        <article><b>{plan.keepCount}</b><span>locked decisions</span></article>
+        <article className={firstBarrier ? "rescan" : "quiet"}><b>{plan.barriers.length}</b><span>next rescan barrier</span></article>
+      </div>
+      <div className="auto-run-row">
+        <div className={firstBarrier ? "auto-rescan-forecast active" : "auto-rescan-forecast"}>
+          <span>{firstBarrier ? `First barrier after E${firstBarrier.afterEventIndex + 1}` : settings.rescanStrategy === "off" ? "Automatic rescans disabled" : "No dependency-triggered rescan predicted"}</span>
+          <b>{firstBarrier ? `${firstBarrier.risk}/100 risk · ${firstBarrier.impactedTargetIndexes.length} target${firstBarrier.impactedTargetIndexes.length === 1 ? "" : "s"}` : "Queue can run continuously"}</b>
+          {firstBarrier && <small>{firstBarrier.reasons.slice(0, 2).join("; ")}</small>}
+        </div>
+        <button type="button" className="run-button auto-run-button" disabled={events.length === 0 || running} onClick={() => onRun(settings, profile === "custom" ? "custom" : profile)}>{running ? status.state === "rescanning" ? "Rescanning impacted targets…" : "Resolving queue…" : "Run auto-resolve"}<span>→</span></button>
+      </div>
+      {status.state !== "idle" && <div className={`auto-status ${status.state}`} role="status"><span>{status.state === "complete" ? "✓" : status.state === "error" ? "!" : status.state === "paused" ? "Ⅱ" : "↻"}</span><div><b>{status.message}</b><small>Round {status.round + 1} · {status.processed} processed · {status.accepted} accepted · {status.rejected} rejected · {status.reviewed} held · {status.rescans} rescan{status.rescans === 1 ? "" : "s"}</small></div></div>}
+      <div className="auto-plan-list" aria-label="First auto-resolution recommendations">
+        {visibleEntries.length === 0 ? <div className="empty-state compact">Nothing is eligible for automatic resolution under this profile.</div> : visibleEntries.map((entry) => {
+          const event = events[entry.eventIndex];
+          return <article className={entry.recommendation} key={entry.eventId}><span>E{entry.eventIndex + 1}</span><div><b>{alignment.sequences[event.recombinant]?.name ?? "Unknown recombinant"}</b><small>{entry.reasons[0]}</small>{entry.impactRisk > 0 && <em>downstream risk {entry.impactRisk}/100 · {entry.impactedTargetIndexes.length} target{entry.impactedTargetIndexes.length === 1 ? "" : "s"}</em>}</div><strong>{entry.score}</strong><i>{entry.recommendation}</i></article>;
+        })}
+        {plan.entries.filter((entry) => entry.recommendation !== "keep").length > visibleEntries.length && <div className="auto-plan-cap">Showing the first {visibleEntries.length} actionable recommendations; the run replans after every rescan.</div>}
+      </div>
+      <details className="auto-advanced"><summary><span>Advanced decision model</span><small>Precisely tune evidence gates, score weights and rescan sensitivity</small></summary>
+        <div className="auto-advanced-grid">
+          <section><h3>Hard decision gates</h3><p>Every gate must pass before auto-acceptance, irrespective of the composite score.</p>
+            <AutoRange label="Accept score" value={settings.acceptScore} minimum={50} maximum={99} onChange={(value) => setValue("acceptScore", value)}/>
+            <AutoRange label="Reject score" value={settings.rejectScore} minimum={0} maximum={60} onChange={(value) => setValue("rejectScore", value)}/>
+            <AutoRange label="Supporting methods" value={settings.minimumSupportingMethods} minimum={1} maximum={7} onChange={(value) => setValue("minimumSupportingMethods", value)}/>
+            <label className="auto-select"><span>Maximum adjusted P</span><select value={settings.maximumCorrectedP} onChange={(event) => setValue("maximumCorrectedP", Number(event.target.value))}><option value={0.1}>0.10</option><option value={0.05}>0.05</option><option value={0.01}>0.01</option><option value={0.001}>0.001</option><option value={0.0001}>0.0001</option></select></label>
+            <AutoRange label="Informative sites" value={settings.minimumInformativeSites} minimum={0} maximum={200} step={4} onChange={(value) => setValue("minimumInformativeSites", value)}/>
+            <AutoRange label="Breakpoint uncertainty" value={settings.maximumBreakpointUncertainty} minimum={0.05} maximum={1} step={0.05} display={(value) => `${Math.round(value * 100)}% tract`} onChange={(value) => setValue("maximumBreakpointUncertainty", value)}/>
+            <AutoRange label="Parent-conflict ceiling" value={settings.maximumParentConflict} minimum={0.02} maximum={0.8} step={0.02} display={(value) => `${Math.round(value * 100)}%`} onChange={(value) => setValue("maximumParentConflict", value)}/>
+            <AutoRange label="Rate-density fold ceiling" value={settings.maximumRateFold} minimum={1.2} maximum={10} step={0.2} display={(value) => `${value.toFixed(1)}×`} onChange={(value) => setValue("maximumRateFold", value)}/>
+            <AutoSwitch label="Block high-risk warnings" detail="Misalignment, homoplasy, diffuse incompatibility, rate-shift and incomplete-scan flags prevent acceptance." checked={settings.blockSevereWarnings} onChange={(value) => setValue("blockSevereWarnings", value)}/>
+            <AutoSwitch label="Revisit analyst decisions" detail="Off by default: accepted and rejected events remain locked unless their evidence is stale." checked={settings.revisitReviewed} onChange={(value) => setValue("revisitReviewed", value)}/>
+          </section>
+          <section><h3>Composite score weights</h3><p>Weights are relative; setting a weight to zero removes that evidence family from the score.</p>
+            <AutoRange label="Method consensus" value={settings.consensusWeight} minimum={0} maximum={50} onChange={(value) => setValue("consensusWeight", value)}/>
+            <AutoRange label="Adjusted significance" value={settings.significanceWeight} minimum={0} maximum={50} onChange={(value) => setValue("significanceWeight", value)}/>
+            <AutoRange label="Informative-site depth" value={settings.informationWeight} minimum={0} maximum={50} onChange={(value) => setValue("informationWeight", value)}/>
+            <AutoRange label="Breakpoint precision" value={settings.breakpointWeight} minimum={0} maximum={50} onChange={(value) => setValue("breakpointWeight", value)}/>
+            <AutoRange label="False-positive diagnostics" value={settings.diagnosticsWeight} minimum={0} maximum={50} onChange={(value) => setValue("diagnosticsWeight", value)}/>
+            <div className="auto-score-note"><b>Safety invariant</b><span>Stale or uncalibrated evidence is never auto-accepted. The review band is intentionally preserved between the accept and reject thresholds.</span></div>
+          </section>
+          <section><h3>Dependency-aware rescanning</h3><p>The planner accumulates risk and pauses at the first barrier, withholds accepted mosaic sequences from parent search, rescans, then rebuilds the remaining plan from new signals.</p>
+            <label className="auto-select"><span>Rescan strategy</span><select value={settings.rescanStrategy} onChange={(event) => setValue("rescanStrategy", event.target.value as AutoResolveSettings["rescanStrategy"])}><option value="off">Off · decisions only</option><option value="targeted">Impacted recombinant targets only</option><option value="adaptive">Targeted unless impact is broad</option><option value="full">All unresolved targets</option></select></label>
+            <AutoRange label="Trigger risk" value={settings.rescanRiskThreshold} minimum={0} maximum={100} onChange={(value) => setValue("rescanRiskThreshold", value)}/>
+            <AutoRange label="Same-sequence overlap trigger" value={settings.overlapTriggerFraction} minimum={0} maximum={1} step={0.05} display={(value) => `${Math.round(value * 100)}%`} onChange={(value) => setValue("overlapTriggerFraction", value)}/>
+            <AutoRange label="Minimum queue gap" value={settings.minimumEventsBetweenRescans} minimum={1} maximum={25} display={(value) => `${value} event${value === 1 ? "" : "s"}`} onChange={(value) => setValue("minimumEventsBetweenRescans", value)}/>
+            <AutoRange label="Maximum rescan rounds" value={settings.maximumRescanRounds} minimum={0} maximum={8} onChange={(value) => setValue("maximumRescanRounds", value)}/>
+            <AutoRange label="Adaptive full-scan threshold" value={settings.adaptiveFullTargetFraction} minimum={0.05} maximum={1} step={0.05} display={(value) => `${Math.round(value * 100)}% sequences`} onChange={(value) => setValue("adaptiveFullTargetFraction", value)}/>
+            <AutoRange label="Same recombinant risk" value={settings.sameRecombinantRisk} minimum={0} maximum={100} onChange={(value) => setValue("sameRecombinantRisk", value)}/>
+            <AutoRange label="Recombinant-parent risk" value={settings.recombinantParentRisk} minimum={0} maximum={100} onChange={(value) => setValue("recombinantParentRisk", value)}/>
+            <AutoRange label="Shared-group risk" value={settings.groupedEventRisk} minimum={0} maximum={100} onChange={(value) => setValue("groupedEventRisk", value)}/>
+            <AutoRange label="Withdraw accepted-event risk" value={settings.acceptedWithdrawalRisk} minimum={0} maximum={100} onChange={(value) => setValue("acceptedWithdrawalRisk", value)}/>
+          </section>
+        </div>
+      </details>
+    </div>
+  </Panel>;
+}
+
+function ReconstructionWorkspace({ alignment, events, selectedId, onSelect, onDecision, onRescan, rescanning, autoResolveStatus, onAutoResolve }: {
   alignment: AlignmentData;
   events: RdpEvent[];
   selectedId: string | null;
@@ -1190,6 +1344,8 @@ function ReconstructionWorkspace({ alignment, events, selectedId, onSelect, onDe
   onDecision: (id: string, decision: EventDecision) => void;
   onRescan: () => void;
   rescanning: boolean;
+  autoResolveStatus: AutoResolveStatus;
+  onAutoResolve: (settings: AutoResolveSettings, profileLabel: string) => void;
 }) {
   const [queueLimit, setQueueLimit] = useState(250);
   const model = useMemo(() => buildReconstructionModel(events, alignment.length), [alignment.length, events]);
@@ -1227,6 +1383,7 @@ function ReconstructionWorkspace({ alignment, events, selectedId, onSelect, onDe
         ["5", "Global mosaic", `${accepted} accepted + fresh`, accepted > 0 && model.nextReviewIndex === null],
       ].map(([number, label, note, complete]) => <article className={complete ? "complete" : ""} key={String(label)}><span>{complete ? "✓" : number}</span><div><b>{label}</b><small>{note}</small></div></article>)}
     </div>
+    <AutoResolvePanel alignment={alignment} events={events} status={autoResolveStatus} rescanning={rescanning} onRun={onAutoResolve}/>
     {model.staleFromIndex !== null && <div className="reconstruction-warning"><strong>Downstream characterization may now be stale.</strong><span>E{model.staleFromIndex + 1} was edited after its evidence was calculated. RDP’s ordered workflow requires the remaining signals to be rescanned; {model.downstreamIndexes.length} later retained event{model.downstreamIndexes.length === 1 ? "" : "s"} are marked downstream, not silently treated as independent.{!canRescan && " Recalculate and accept the edited event before rescanning."}</span><button type="button" disabled={!canRescan} title={canRescan ? "Keep accepted fresh events and rescan unresolved targets" : "Recalculate and accept at least one event first"} onClick={onRescan}>Rescan unresolved sequences</button></div>}
     <Panel title="Ordered event queue" action={<span className="panel-caption">Inference/review order · not literal historical time</span>}>
       <div className="event-queue">
@@ -1237,7 +1394,7 @@ function ReconstructionWorkspace({ alignment, events, selectedId, onSelect, onDe
             <button type="button" className="queue-number" onClick={() => onSelect(event.id, "explore")}><span>E{eventIndex + 1}</span><small>{event.source === "wasm" ? "scan" : event.source === "manual" ? "manual" : "truth"}</small></button>
             <div className="queue-summary"><b>{alignment.sequences[event.recombinant]?.name ?? "Unknown recombinant"}</b><span>{formatEventRegion(event, alignment.length)} · {alignment.sequences[event.majorParent]?.name ?? "?"} ↔ {alignment.sequences[event.minorParent]?.name ?? "?"}</span><div>{event.groupId && <em>{event.groupId}</em>}{event.evidenceStale && <em className="stale">recalculate</em>}{downstream && <em className="downstream">downstream of edit</em>}{relationships.slice(0, 3).map((relationship, relationIndex) => { const otherIndex = relationship.fromIndex === eventIndex ? relationship.toIndex : relationship.fromIndex; return <em className={relationship.kind} key={`${relationship.kind}-${otherIndex}-${relationIndex}`}>{relationLabel(relationship.kind, otherIndex, relationship.overlapBases)}</em>; })}</div></div>
             <div className="queue-decision"><span className={`decision-label ${event.decision}`}>{event.decision}</span><button type="button" onClick={() => onSelect(event.id, "alignment")}>Alignment</button><button type="button" onClick={() => onSelect(event.id, "trees")}>Trees</button></div>
-            <div className="queue-review"><button type="button" className={event.decision === "rejected" ? "active reject" : "reject"} onClick={() => onDecision(event.id, event.decision === "rejected" ? "unreviewed" : "rejected")}>Reject</button><button type="button" className={event.decision === "accepted" ? "active accept" : "accept"} onClick={() => onDecision(event.id, event.decision === "accepted" ? "unreviewed" : "accepted")}>Accept</button></div>
+            <div className="queue-review"><button type="button" disabled={rescanning} className={event.decision === "rejected" ? "active reject" : "reject"} onClick={() => onDecision(event.id, event.decision === "rejected" ? "unreviewed" : "rejected")}>Reject</button><button type="button" disabled={rescanning} className={event.decision === "accepted" ? "active accept" : "accept"} onClick={() => onDecision(event.id, event.decision === "accepted" ? "unreviewed" : "accepted")}>Accept</button></div>
           </article>;
         })}{events.length > queueLimit && <button type="button" className="queue-load-more" onClick={() => setQueueLimit((current) => Math.min(events.length, current + 250))}>Show {formatInteger(Math.min(250, events.length - queueLimit))} more events · {formatInteger(events.length - queueLimit)} hidden</button>}
       </div>
@@ -1411,6 +1568,7 @@ export default function Home() {
   const [selectedMethod, setSelectedMethod] = useState<MethodName>("RDP");
   const [exportScope, setExportScope] = useState<ExportScope>("accepted-fresh");
   const [loadedExampleId, setLoadedExampleId] = useState<string | null>("tutorial-virus");
+  const [autoResolveStatus, setAutoResolveStatus] = useState<AutoResolveStatus>({ state: "idle", message: "Ready to preview", round: 0, processed: 0, accepted: 0, rejected: 0, reviewed: 0, rescans: 0 });
   const [auditLog, setAuditLog] = useState<ProjectAuditEntry[]>([{
     id: "project-audit-initial",
     timestamp: "2026-01-01T00:00:00.000Z",
@@ -1430,6 +1588,8 @@ export default function Home() {
   const annotationRef = useRef<HTMLInputElement>(null);
   const jobRef = useRef(0);
   const partialEventsRef = useRef<RdpEvent[]>([]);
+  const autoResolveSessionRef = useRef<AutoResolveSession | null>(null);
+  const autoResolveRunnerRef = useRef<((inputEvents: RdpEvent[], session: AutoResolveSession) => void) | null>(null);
 
   const stats = useMemo(() => alignmentStats(alignment), [alignment]);
   const selectedIndex = events.findIndex((event) => event.id === selectedId);
@@ -1465,6 +1625,8 @@ export default function Home() {
 
   const loadAlignment = useCallback((next: AlignmentData) => {
     workerRef.current?.terminate();
+    autoResolveSessionRef.current = null;
+    setAutoResolveStatus({ state: "idle", message: "Ready to preview", round: 0, processed: 0, accepted: 0, rejected: 0, reviewed: 0, rescans: 0 });
     setAlignment(next);
     setEvents([]);
     setUndoStack([]);
@@ -1487,6 +1649,8 @@ export default function Home() {
 
   const loadProject = useCallback((project: ReturnType<typeof parseProject>) => {
     workerRef.current?.terminate();
+    autoResolveSessionRef.current = null;
+    setAutoResolveStatus({ state: "idle", message: "Ready to preview", round: 0, processed: 0, accepted: 0, rejected: 0, reviewed: 0, rescans: 0 });
     setAlignment(project.alignment);
     setOptions(project.options);
     setEvents(project.events);
@@ -1568,7 +1732,13 @@ export default function Home() {
     }
   }, [alignment.length, showToast]);
 
-  const launchAnalysis = useCallback((excludedTargets: number[] = [], retainedEvents: RdpEvent[] = []) => {
+  const launchAnalysis = useCallback((config: AnalysisLaunchConfig = {}) => {
+    const excludedTargets = config.excludedTargets ?? [];
+    const excludedParents = config.excludedParents ?? [];
+    const retainedEvents = config.retainedEvents ?? [];
+    const filterResults = (candidateEvents: RdpEvent[]) => config.filterResolvedAgainst?.length
+      ? filterResolvedEventDuplicates(candidateEvents, config.filterResolvedAgainst, alignment.length)
+      : candidateEvents;
     workerRef.current?.terminate();
     const worker = new Worker(new URL("rdp-worker.js", document.baseURI), {
       type: "module",
@@ -1589,15 +1759,19 @@ export default function Home() {
         setProgress(payload.progress);
         setPhase(payload.phase);
       } else if (payload.type === "partial") {
-        partialEventsRef.current = retainedEvents.length ? [...retainedEvents, ...payload.events] : payload.events;
+        const partialEvents = filterResults(payload.events);
+        partialEventsRef.current = retainedEvents.length ? [...retainedEvents, ...partialEvents] : partialEvents;
       } else if (payload.type === "result") {
         partialEventsRef.current = [];
+        const resultEvents = filterResults(payload.events);
         const nextEvents = retainedEvents.length
-          ? [...retainedEvents, ...payload.events]
-          : payload.events;
+          ? [...retainedEvents, ...resultEvents]
+          : resultEvents;
         setEvents(nextEvents);
-        setUndoStack([]);
-        setRedoStack([]);
+        if (config.resetEditHistory !== false) {
+          setUndoStack([]);
+          setRedoStack([]);
+        }
         setSelectedId(nextEvents[0]?.id ?? null);
         setDistanceMatrix(payload.distance);
         setMetrics({
@@ -1612,12 +1786,18 @@ export default function Home() {
         setProgress(1);
         setPhase(`Complete · ${nextEvents.length} event${nextEvents.length === 1 ? "" : "s"}`);
         setRunState("complete");
-        appendAudit(retainedEvents.length ? "Completed unresolved-sequence rescan" : "Completed full scan", `${payload.comparisons.toLocaleString("en-US")} triplets tested; ${payload.events.length} new consensus hypotheses retained${retainedEvents.length ? ` alongside ${retainedEvents.length} accepted hypotheses` : ""}.`);
+        appendAudit(config.auditAction ?? (retainedEvents.length ? "Completed unresolved-sequence rescan" : "Completed full scan"), `${config.auditContext ? `${config.auditContext} ` : ""}${payload.comparisons.toLocaleString("en-US")} triplets tested; ${resultEvents.length} new consensus hypotheses retained${payload.events.length !== resultEvents.length ? ` after suppressing ${payload.events.length - resultEvents.length} duplicate of an accepted event` : ""}${retainedEvents.length ? ` alongside ${retainedEvents.length} preserved hypotheses` : ""}.`);
         worker.terminate();
-        showToast(payload.events.length ? `Scan complete: ${payload.events.length} new consensus event${payload.events.length === 1 ? "" : "s"}` : retainedEvents.length ? "Rescan complete: no additional events passed the filters" : "Scan complete: no events passed the current filters");
+        showToast(resultEvents.length ? `Scan complete: ${resultEvents.length} new consensus event${resultEvents.length === 1 ? "" : "s"}` : retainedEvents.length ? "Rescan complete: no additional events passed the filters" : "Scan complete: no events passed the current filters");
+        if (config.onComplete) window.setTimeout(() => config.onComplete?.(nextEvents), 0);
       } else if (payload.type === "error") {
         setRunState("error");
         setPhase(payload.message);
+        const autoSession = autoResolveSessionRef.current;
+        if (autoSession) {
+          autoResolveSessionRef.current = null;
+          setAutoResolveStatus({ state: "error", message: payload.message, round: autoSession.round, processed: autoSession.processed, accepted: autoSession.accepted, rejected: autoSession.rejected, reviewed: autoSession.reviewed, rescans: autoSession.rescans });
+        }
         worker.terminate();
         showToast(payload.message);
       }
@@ -1625,24 +1805,134 @@ export default function Home() {
     worker.onerror = () => {
       setRunState("error");
       setPhase("Analysis worker failed");
+      const autoSession = autoResolveSessionRef.current;
+      if (autoSession) {
+        autoResolveSessionRef.current = null;
+        setAutoResolveStatus({ state: "error", message: "The impacted-target rescan failed.", round: autoSession.round, processed: autoSession.processed, accepted: autoSession.accepted, rejected: autoSession.rejected, reviewed: autoSession.reviewed, rescans: autoSession.rescans });
+      }
       showToast("The local analysis worker stopped unexpectedly.");
     };
-    worker.postMessage({ type: "analyze", jobId, alignment, options, excludedTargets });
+    worker.postMessage({ type: "analyze", jobId, alignment, options, excludedTargets, excludedParents });
   }, [alignment, appendAudit, options, showToast]);
 
-  const runAnalysis = useCallback(() => launchAnalysis(), [launchAnalysis]);
+  const runAnalysis = useCallback(() => {
+    autoResolveSessionRef.current = null;
+    setAutoResolveStatus({ state: "idle", message: "Ready to preview", round: 0, processed: 0, accepted: 0, rejected: 0, reviewed: 0, rescans: 0 });
+    launchAnalysis();
+  }, [launchAnalysis]);
 
   const runIterativeAnalysis = useCallback(() => {
+    autoResolveSessionRef.current = null;
+    setAutoResolveStatus({ state: "idle", message: "Ready to preview", round: 0, processed: 0, accepted: 0, rejected: 0, reviewed: 0, rescans: 0 });
     const retained = events.filter((event) => event.decision === "accepted" && !event.evidenceStale);
     if (!retained.length) {
       showToast("Accept and recalculate at least one event before rescanning unresolved sequences");
       return;
     }
-    launchAnalysis([...new Set(retained.map((event) => event.recombinant))], retained);
+    launchAnalysis({ excludedTargets: [...new Set(retained.map((event) => event.recombinant))], retainedEvents: retained });
   }, [events, launchAnalysis, showToast]);
+
+  const continueAutoResolve = useCallback((inputEvents: RdpEvent[], session: AutoResolveSession) => {
+    if (inputEvents.length === 0) {
+      autoResolveSessionRef.current = null;
+      setAutoResolveStatus({ state: "complete", message: "No unresolved hypotheses remain.", round: session.round, processed: session.processed, accepted: session.accepted, rejected: session.rejected, reviewed: session.reviewed, rescans: session.rescans });
+      return;
+    }
+    const plan = planAutoResolution(inputEvents, alignment.length, session.settings);
+    const barrier = plan.barriers[0];
+    const throughEventIndex = barrier?.afterEventIndex ?? inputEvents.length - 1;
+    const timestamp = new Date().toISOString();
+    const applied = applyAutoResolutionPlan(inputEvents, plan, throughEventIndex, session.profileLabel, timestamp);
+    const processedNow = plan.entries.filter((entry) => entry.eventIndex <= throughEventIndex && entry.recommendation !== "keep").map((entry) => entry.eventId);
+    const newlyReviewed = plan.entries.filter((entry) => entry.eventIndex <= throughEventIndex && entry.recommendation === "review" && !session.processedEventIds.includes(entry.eventId)).length;
+    const processedEventIds = [...new Set([...session.processedEventIds, ...processedNow])];
+    const nextSession: AutoResolveSession = {
+      ...session,
+      processedEventIds,
+      processed: processedEventIds.length,
+      accepted: session.accepted + applied.accepted,
+      rejected: session.rejected + applied.rejected,
+      reviewed: session.reviewed + newlyReviewed,
+    };
+    setEvents(applied.events);
+    if (applied.changedIndexes.length) setSelectedId(applied.events[applied.changedIndexes[0]]?.id ?? selectedId);
+    appendAudit("Auto-resolved reconstruction queue", `${session.profileLabel} profile processed ${processedNow.length} eligible hypotheses through E${throughEventIndex + 1}: ${applied.accepted} accepted, ${applied.rejected} rejected, and ${newlyReviewed} newly held for analyst review.${barrier ? ` A ${barrier.risk}/100 dependency-risk barrier paused the queue.` : " No dependency-triggered rescan barrier remained."}`);
+
+    if (!barrier) {
+      autoResolveSessionRef.current = null;
+      setAutoResolveStatus({ state: "complete", message: applied.changedIndexes.length ? "Queue resolved as far as the configured evidence gates allow." : "No further automatic decisions pass the configured gates.", round: nextSession.round, processed: nextSession.processed, accepted: nextSession.accepted, rejected: nextSession.rejected, reviewed: nextSession.reviewed, rescans: nextSession.rescans });
+      showToast(`Auto-resolve complete · ${nextSession.accepted} accepted, ${nextSession.rejected} rejected, ${nextSession.reviewed} held`);
+      return;
+    }
+
+    if (session.rescans >= session.settings.maximumRescanRounds) {
+      autoResolveSessionRef.current = null;
+      setAutoResolveStatus({ state: "paused", message: `Paused at E${barrier.afterEventIndex + 1}: the configured rescan-round cap was reached.`, round: nextSession.round, processed: nextSession.processed, accepted: nextSession.accepted, rejected: nextSession.rejected, reviewed: nextSession.reviewed, rescans: nextSession.rescans });
+      appendAudit("Paused auto-resolution", `Stopped at dependency barrier E${barrier.afterEventIndex + 1} because the maximum of ${session.settings.maximumRescanRounds} rescan rounds was reached.`);
+      showToast("Auto-resolve paused at the configured rescan cap");
+      return;
+    }
+
+    const targetPlan = rescanTargetsForBarrier(barrier, alignment.sequences.length, session.settings);
+    const acceptedEvents = applied.events.filter((event) => event.decision === "accepted" && !event.evidenceStale);
+    const acceptedTargets = new Set(acceptedEvents.map((event) => event.recombinant));
+    const targetIndexes = targetPlan.targetIndexes;
+    if (targetIndexes.length === 0) {
+      autoResolveSessionRef.current = null;
+      setAutoResolveStatus({ state: "complete", message: "The predicted downstream targets are already resolved; no rescan was needed.", round: nextSession.round, processed: nextSession.processed, accepted: nextSession.accepted, rejected: nextSession.rejected, reviewed: nextSession.reviewed, rescans: nextSession.rescans });
+      return;
+    }
+    const targetSet = new Set(targetIndexes);
+    const preservedEvents = applied.events.filter((event) => {
+      if (event.decision === "accepted" && !event.evidenceStale) return true;
+      if (event.decision === "rejected") return true;
+      return !targetSet.has(event.recombinant);
+    });
+    const excludedTargets = Array.from({ length: alignment.sequences.length }, (_, index) => index)
+      .filter((index) => !targetSet.has(index));
+    const rescanningSession = { ...nextSession, rescans: nextSession.rescans + 1 };
+    autoResolveSessionRef.current = rescanningSession;
+    setAutoResolveStatus({ state: "rescanning", message: `${targetPlan.scope === "full" ? "Broad" : "Targeted"} rescan after E${barrier.afterEventIndex + 1}: ${targetIndexes.length} downstream target${targetIndexes.length === 1 ? "" : "s"}.`, round: rescanningSession.round, processed: rescanningSession.processed, accepted: rescanningSession.accepted, rejected: rescanningSession.rejected, reviewed: rescanningSession.reviewed, rescans: rescanningSession.rescans });
+    launchAnalysis({
+      excludedTargets,
+      excludedParents: [...acceptedTargets],
+      retainedEvents: preservedEvents,
+      filterResolvedAgainst: acceptedEvents,
+      resetEditHistory: false,
+      auditAction: "Completed auto-resolve dependency rescan",
+      auditContext: `${targetPlan.scope === "full" ? "Full unresolved-target" : "Impacted-target"} rescan after E${barrier.afterEventIndex + 1}; ${targetIndexes.length} targets selected by ${barrier.risk}/100 accumulated dependency risk, with ${acceptedTargets.size} accepted mosaic parent prox${acceptedTargets.size === 1 ? "y" : "ies"} excluded from parent search.`,
+      onComplete: (rescannedEvents) => {
+        const activeSession = autoResolveSessionRef.current;
+        if (!activeSession) return;
+        const nextRound = { ...activeSession, round: activeSession.round + 1 };
+        autoResolveSessionRef.current = nextRound;
+        setAutoResolveStatus({ state: "resolving", message: "Rescan complete; rebuilding the remaining queue plan.", round: nextRound.round, processed: nextRound.processed, accepted: nextRound.accepted, rejected: nextRound.rejected, reviewed: nextRound.reviewed, rescans: nextRound.rescans });
+        autoResolveRunnerRef.current?.(rescannedEvents, nextRound);
+      },
+    });
+  }, [alignment.length, alignment.sequences.length, appendAudit, launchAnalysis, selectedId, showToast]);
+  useEffect(() => {
+    autoResolveRunnerRef.current = continueAutoResolve;
+    return () => { autoResolveRunnerRef.current = null; };
+  }, [continueAutoResolve]);
+
+  const runAutoResolve = useCallback((settings: AutoResolveSettings, profileLabel: string) => {
+    if (runState === "running" || events.length === 0) return;
+    const session: AutoResolveSession = { settings: { ...settings }, profileLabel, round: 0, processedEventIds: [], processed: 0, accepted: 0, rejected: 0, reviewed: 0, rescans: 0 };
+    setUndoStack((current) => [...current.slice(-99), { label: `Run ${profileLabel} auto-resolve`, events, selectedId }]);
+    setRedoStack([]);
+    autoResolveSessionRef.current = session;
+    setAutoResolveStatus({ state: "resolving", message: `Processing the queue with the ${profileLabel} profile.`, round: 0, processed: 0, accepted: 0, rejected: 0, reviewed: 0, rescans: 0 });
+    continueAutoResolve(events, session);
+  }, [continueAutoResolve, events, runState, selectedId]);
 
   const cancelAnalysis = useCallback(() => {
     const partial = partialEventsRef.current;
+    const autoSession = autoResolveSessionRef.current;
+    if (autoSession) {
+      autoResolveSessionRef.current = null;
+      setAutoResolveStatus({ state: "paused", message: "Stopped by the analyst; completed decisions and recoverable partial results were preserved.", round: autoSession.round, processed: autoSession.processed, accepted: autoSession.accepted, rejected: autoSession.rejected, reviewed: autoSession.reviewed, rescans: autoSession.rescans });
+    }
     workerRef.current?.terminate();
     workerRef.current = null;
     jobRef.current += 1;
@@ -1662,6 +1952,10 @@ export default function Home() {
 
   const updateSelected = useCallback((patch: Partial<RdpEvent>, action = "Edited event") => {
     if (!selectedId) return;
+    if (autoResolveSessionRef.current) {
+      showToast("Stop auto-resolve before editing an event");
+      return;
+    }
     const currentEvent = events.find((event) => event.id === selectedId);
     if (!currentEvent) return;
     const unchanged = Object.entries(patch).every(([key, value]) => Object.is(currentEvent[key as keyof RdpEvent], value));
@@ -1699,9 +1993,13 @@ export default function Home() {
     setRedoStack([]);
     setEvents(nextEvents);
     appendAudit(action, changedFields ? `Changed ${changedFields}.` : "Updated the event hypothesis.", selectedId);
-  }, [appendAudit, events, selectedId]);
+  }, [appendAudit, events, selectedId, showToast]);
 
   const setEventDecision = useCallback((eventId: string, decision: EventDecision) => {
+    if (autoResolveSessionRef.current) {
+      showToast("Stop auto-resolve before changing a decision");
+      return;
+    }
     const currentEvent = events.find((event) => event.id === eventId);
     if (!currentEvent || currentEvent.decision === decision) return;
     const action = decision === "accepted" ? "Accepted event" : decision === "rejected" ? "Rejected event" : "Reset review decision";
@@ -1714,10 +2012,14 @@ export default function Home() {
     } : event));
     setSelectedId(eventId);
     appendAudit(action, `Decision changed to ${decision}.`, eventId);
-  }, [appendAudit, events, selectedId]);
+  }, [appendAudit, events, selectedId, showToast]);
 
   const recalculateSelected = useCallback(() => {
     if (!selectedEvent) return;
+    if (autoResolveSessionRef.current) {
+      showToast("Stop auto-resolve before recalculating an individual event");
+      return;
+    }
     workerRef.current?.terminate();
     const worker = new Worker(new URL("rdp-worker.js", document.baseURI), { type: "module", name: "rdp-event-recalculation" });
     workerRef.current = worker;
@@ -1755,6 +2057,10 @@ export default function Home() {
   }, [alignment, metrics?.comparisons, options, selectedEvent, showToast, updateSelected]);
 
   const undo = useCallback(() => {
+    if (autoResolveSessionRef.current) {
+      showToast("Stop auto-resolve before undoing the workflow");
+      return;
+    }
     const frame = undoStack.at(-1);
     if (!frame) return;
     setRedoStack((current) => [...current.slice(-99), { label: frame.label, events, selectedId }]);
@@ -1762,9 +2068,13 @@ export default function Home() {
     setEvents(frame.events);
     setSelectedId(frame.selectedId);
     appendAudit("Undo", `Restored state before: ${frame.label}.`, frame.selectedId ?? undefined);
-  }, [appendAudit, events, selectedId, undoStack]);
+  }, [appendAudit, events, selectedId, showToast, undoStack]);
 
   const redo = useCallback(() => {
+    if (autoResolveSessionRef.current) {
+      showToast("Stop auto-resolve before redoing the workflow");
+      return;
+    }
     const frame = redoStack.at(-1);
     if (!frame) return;
     setUndoStack((current) => [...current.slice(-99), { label: frame.label, events, selectedId }]);
@@ -1772,9 +2082,13 @@ export default function Home() {
     setEvents(frame.events);
     setSelectedId(frame.selectedId);
     appendAudit("Redo", `Reapplied: ${frame.label}.`, frame.selectedId ?? undefined);
-  }, [appendAudit, events, redoStack, selectedId]);
+  }, [appendAudit, events, redoStack, selectedId, showToast]);
 
   const createManualEvent = useCallback(() => {
+    if (autoResolveSessionRef.current) {
+      showToast("Stop auto-resolve before creating a manual event");
+      return;
+    }
     const start = Math.max(0, Math.floor(alignment.length * 0.25));
     const end = Math.max(start + 1, Math.floor(alignment.length * 0.5));
     const id = `manual-${Date.now()}`;
@@ -1807,10 +2121,14 @@ export default function Home() {
     setSelectedId(id);
     setTab("explore");
     appendAudit("Created manual event", `Initialized manual hypothesis ${id}.`, id);
-  }, [alignment.length, appendAudit, events, selectedId]);
+  }, [alignment.length, appendAudit, events, selectedId, showToast]);
 
   const duplicateSelected = useCallback(() => {
     if (!selectedEvent) return;
+    if (autoResolveSessionRef.current) {
+      showToast("Stop auto-resolve before duplicating an event");
+      return;
+    }
     const id = `manual-${Date.now()}`;
     const duplicate: RdpEvent = {
       ...selectedEvent,
@@ -1825,10 +2143,14 @@ export default function Home() {
     setEvents([...events, duplicate]);
     setSelectedId(id);
     appendAudit("Duplicated event", `Copied ${selectedEvent.id} to ${id}.`, id);
-  }, [appendAudit, events, selectedEvent, selectedId]);
+  }, [appendAudit, events, selectedEvent, selectedId, showToast]);
 
   const deleteSelected = useCallback(() => {
     if (!selectedEvent) return;
+    if (autoResolveSessionRef.current) {
+      showToast("Stop auto-resolve before deleting an event");
+      return;
+    }
     const index = events.findIndex((event) => event.id === selectedEvent.id);
     const remaining = events.filter((event) => event.id !== selectedEvent.id);
     setUndoStack((current) => [...current.slice(-99), { label: "Delete event", events, selectedId }]);
@@ -1836,7 +2158,7 @@ export default function Home() {
     setEvents(remaining);
     setSelectedId(remaining[Math.min(index, remaining.length - 1)]?.id ?? null);
     appendAudit("Deleted event", `Deleted ${selectedEvent.id}; complete event provenance remains in this project audit ledger.`, selectedEvent.id, JSON.stringify(selectedEvent));
-  }, [appendAudit, events, selectedEvent, selectedId]);
+  }, [appendAudit, events, selectedEvent, selectedId, showToast]);
 
   const navigateEvent = useCallback((direction: -1 | 1) => {
     if (!events.length) return;
@@ -2055,7 +2377,7 @@ export default function Home() {
               <Panel title="Event hypotheses" action={<div className="table-actions"><button className="small-button" type="button" onClick={createManualEvent}>＋ Manual event</button><button className="small-button" type="button" onClick={() => exportResults("csv")}><Icon name="download" size={14}/> CSV</button></div>}><EventTable alignment={alignment} events={events} selectedId={selectedId} onSelect={setSelectedId}/></Panel>
             </>}
 
-            {tab === "reconstruction" && <ReconstructionWorkspace alignment={alignment} events={events} selectedId={selectedId} onSelect={(id, view = "explore") => { setSelectedId(id); setTab(view); }} onDecision={setEventDecision} onRescan={runIterativeAnalysis} rescanning={runState === "running"}/>}
+            {tab === "reconstruction" && <ReconstructionWorkspace alignment={alignment} events={events} selectedId={selectedId} onSelect={(id, view = "explore") => { setSelectedId(id); setTab(view); }} onDecision={setEventDecision} onRescan={runIterativeAnalysis} rescanning={runState === "running"} autoResolveStatus={autoResolveStatus} onAutoResolve={runAutoResolve}/>}
 
             {tab === "trees" && <LocalTrees alignment={alignment} events={events} event={selectedEvent} onSelectEvent={setSelectedId}/>}
 

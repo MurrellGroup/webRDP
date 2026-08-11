@@ -44,8 +44,10 @@ simulation results, workflow parity, and browser-scale performance.
   duplication, deletion, IndexedDB autosave, and partial-scan checkpoints are
   operational. The ordered Global reconstruction queue, stale downstream
   propagation, mosaic map, possible-overprint links, and recombinant-parent
-  dependencies are operational; add full signal erasure/splitting and richer
-  ancestral-event propagation semantics.
+  dependencies are operational. A tunable heuristic now resolves fresh events
+  in order, holds ambiguous dependent branches, and schedules targeted/adaptive
+  rescans; calibrate it against authorized RDP5 outputs and add full signal
+  erasure/splitting plus richer ancestral-event propagation semantics.
 - Dedicated flank/tract/right-flank NJ comparison, nearest-context cohorts,
   role highlighting, linked leaf marking, connected SVG geometry, Newick
   export, circular breakpoint pair matrices and seeded hotspot permutations

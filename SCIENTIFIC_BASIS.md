@@ -35,7 +35,7 @@ can claim parity with RDP5.
 | Circular genomes | Opt-in dual-origin triplet scan, circular-breakpoint deduplication, native wrapping coordinates, plots, editing, and masking | Broader circular simulation corpus and RDP5 numerical comparison |
 | False-positive flags | Gap/boundary checks, bounded four-gamete incompatibility, seeded four-gamete proximity permutation, PHI-style contrast, local rate-density shift, and parent-conflict diagnostics exposed as review evidence | Exact PHI p-values, tree-conditioned homoplasy and broader challenge calibration |
 | Alignment verification | Base view plus arbitrary 2–6-parent affinity highlighting; unique/shared/novel/missing states; parent-informative-site filtering; event-parent defaults; bounded memory guard | Very-large alignment virtualization, codon/amino-acid overlays, and user studies |
-| Event verification and editing | Draggable/numeric breakpoints, seven selected-triplet method profiles, manual create/duplicate/delete, recombinant/parent reassignment, automatic ancestry groups, ordered review queue, downstream-stale propagation, unresolved-target rescans, global mosaic map, overprint/recombinant-parent links, scan-scope recalculation, undo/redo, partial recovery, IndexedDB autosave, and event/project audit trails with deletion tombstones | Full RDP signal erasure/splitting, historical direction inference, unknown-parent/reassortment/ancestral propagation parity, and user studies |
+| Event verification and editing | Draggable/numeric breakpoints, seven selected-triplet method profiles, manual create/duplicate/delete, recombinant/parent reassignment, automatic ancestry groups, ordered review queue, tunable heuristic auto-resolution, transitive dependency holds, targeted/adaptive rescans, downstream-stale propagation, global mosaic map, overprint/recombinant-parent links, scan-scope recalculation, undo/redo, partial recovery, IndexedDB autosave, and event/project audit trails with deletion tombstones | RDP5 auto-decision calibration, full RDP signal erasure/splitting, historical direction inference, unknown-parent/reassortment/ancestral propagation parity, and user studies |
 | Pairwise matrix and local topology contrast | Dense sequence p-distance matrix for up to 64 already-calculated sequences, closest-pair contrast, dedicated left/tract/right native NJ comparison, adaptive nearest context, linked leaf marking, continuous branch geometry with explicit zero-length nodes, cohort display, and Newick export | ML trees, clade operations, and exact SH/AU/RF matrices |
 | Genome-position pattern matrices | Symmetric breakpoint-pair counts with RDP4 Figure 2c semantics; split region matrix with observed tract-separation counts and analytical circular random-placement residuals; split sampled local p-distance-profile RMS/correlation-loss matrix | RDP4/RDP5 permutation calibration, SH/RF numerical parity, confidence overlays, and feature-association matrices |
 | Breakpoint density | Descriptive density and seeded uniform-null hotspot permutation, integrated with the dense breakpoint-pair matrix | RDP5 hot/cold-spot model parity and association covariates |
@@ -65,6 +65,30 @@ The reconstruction model exposes three relationships as hypotheses:
 be interpreted as proof that the exact historical donor was sampled. Linked
 marking in the regional trees and the parent-affinity alignment are verification
 aids for these assignments, not independent statistical tests.
+
+The 0.7 auto-resolver is an explicitly labeled decision-support heuristic, not
+a reverse-engineered RDP5 classifier. Automatic acceptance requires fresh,
+calibrated evidence to pass configurable method-count, adjusted-P,
+informative-site, breakpoint-uncertainty, parent-conflict, rate-density,
+diffuse-incompatibility, and warning gates. A weighted score only acts inside
+those gates. Ambiguous or stale hypotheses remain for the analyst; when such a
+hypothesis has a strong dependency footprint, its causally linked downstream
+branch is also held while independent branches may continue.
+
+After a changed decision, the runner estimates downstream impact only from
+explicit relationships: tract overlap in the same recombinant, use of a
+resolved recombinant as a later parent proxy, reciprocal nested-parent use,
+and shared co-recombinant groups. Crossing the configured risk threshold
+creates a barrier. The remaining queue is not processed until an impacted-only,
+adaptive, or full unresolved-target rescan completes and the plan is rebuilt.
+During that rescan, accepted recombinant sequences are excluded from the parent
+pool so their mosaic structure cannot be reused as if it were a clean parent;
+they may still be rescanned as targets to expose additional events. Close
+same-parent rediscoveries of accepted tracts are suppressed, while nested and
+alternative-parent hypotheses are retained. Parent-pool exclusion is a
+conservative browser heuristic, not RDP's full component-sequence disassembly.
+This mirrors the iterative disassembly/rescan rationale described for RDP4
+without claiming numerical or historical-direction parity with RDP5.
 
 ## Engine design
 

@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-const [page, styles] = await Promise.all([
+const [page, styles, worker] = await Promise.all([
   readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
   readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+  readFile(new URL("../public/rdp-worker.js", import.meta.url), "utf8"),
 ]);
 
 test("workspace owns vertical scrolling and generic panels expand without leaking paint", () => {
@@ -36,6 +37,23 @@ test("alignment highlighter, reconstruction, and connected tree renderer are wir
   assert.match(page, /buildReconstructionModel/);
   assert.match(page, /className="tree-branches"/);
   assert.match(page, /layoutNeighborJoiningTree/);
+});
+
+test("global reconstruction exposes tunable ordered auto-resolution and dependency rescans", () => {
+  assert.match(page, /Heuristic auto-resolver/);
+  assert.match(page, /conservative/);
+  assert.match(page, /balanced/);
+  assert.match(page, /aggressive/);
+  assert.match(page, /Advanced decision model/);
+  assert.match(page, /planAutoResolution/);
+  assert.match(page, /applyAutoResolutionPlan/);
+  assert.match(page, /rescanTargetsForBarrier/);
+  assert.match(page, /filterResolvedEventDuplicates/);
+  assert.match(page, /Impacted recombinant targets only/);
+  assert.match(page, /Revisit analyst decisions/);
+  assert.match(worker, /excludedParents/);
+  assert.match(styles, /\.auto-resolve-shell\s*\{[^}]*display:\s*grid/s);
+  assert.match(styles, /\.auto-advanced-grid\s*\{[^}]*grid-template-columns:\s*repeat\(3/s);
 });
 
 test("RDP-style genome-position matrices replace the event-similarity grid", () => {

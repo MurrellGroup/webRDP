@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { affinityDescription, classifyParentAffinity, parentInformativeSites } from "../app/alignment-highlighter";
 import { buildReconstructionModel, eventOverlapBases } from "../app/reconstruction";
 import { computeBreakpointPairDensity, computeLocalDiscordanceMatrices, computeRegionSeparationMatrices, eventContainsPosition } from "../app/pattern-matrices";
+import { AUTO_RESOLVE_PRESETS, applyAutoResolutionPlan, filterResolvedEventDuplicates, planAutoResolution, rescanTargetsForBarrier } from "../app/auto-resolve";
 import type { RdpEvent } from "../app/rdp-core";
 import { layoutNeighborJoiningTree } from "../app/tree-layout";
 
@@ -68,6 +69,83 @@ assert.equal(reconstruction.nextReviewIndex, 0);
 assert.ok(reconstruction.relationships.some((relationship) => relationship.kind === "possible-overprint" && relationship.overlapBases === 120));
 assert.ok(reconstruction.relationships.some((relationship) => relationship.kind === "event-group"));
 assert.ok(reconstruction.relationships.some((relationship) => relationship.kind === "recombinant-parent"));
+
+const evidenceMethods = ["RDP", "GENECONV", "BootScan", "MaxChi", "Chimaera", "SiScan", "3Seq"] as const;
+const evidence = (supporting: number, correctedP: number): RdpEvent["evidence"] => evidenceMethods.map((method, index) => ({
+  method,
+  pValue: correctedP / 2,
+  correctedP,
+  score: index < supporting ? 0.9 : 0.1,
+  supported: index < supporting,
+  statistic: index < supporting ? 12 : 1,
+  statisticLabel: "test statistic",
+  calibration: "deterministic fixture",
+}));
+const strongEvent = makeEvent(20, {
+  recombinant: 0,
+  start: 100,
+  end: 500,
+  confidenceStart: [98, 102],
+  confidenceEnd: [498, 502],
+  evidence: evidence(5, 1e-8),
+  informativeSites: 140,
+  decision: "unreviewed",
+  diagnostics: { tractVariableDensity: 0.2, backgroundVariableDensity: 0.18, rateRatio: 1.1, parentConflictRate: 0.02, parentDiscriminatingSites: 140, diffuseIncompatibility: false },
+});
+const dependentEvent = makeEvent(21, {
+  recombinant: 3,
+  majorParent: 0,
+  minorParent: 2,
+  start: 600,
+  end: 850,
+  confidenceStart: [598, 602],
+  confidenceEnd: [848, 852],
+  evidence: evidence(5, 1e-7),
+  informativeSites: 120,
+  decision: "unreviewed",
+  diagnostics: { tractVariableDensity: 0.2, backgroundVariableDensity: 0.19, rateRatio: 1.05, parentConflictRate: 0.01, parentDiscriminatingSites: 120, diffuseIncompatibility: false },
+});
+const weakEvent = makeEvent(22, {
+  recombinant: 2,
+  evidence: evidence(0, 0.8),
+  informativeSites: 3,
+  decision: "unreviewed",
+  warnings: ["Possible misalignment artefact"],
+  diagnostics: { tractVariableDensity: 0.9, backgroundVariableDensity: 0.05, rateRatio: 18, parentConflictRate: 0.8, parentDiscriminatingSites: 3, diffuseIncompatibility: true },
+});
+const conservativePlan = planAutoResolution([strongEvent, dependentEvent, weakEvent], 1_000, AUTO_RESOLVE_PRESETS.conservative);
+assert.equal(conservativePlan.entries[0].recommendation, "accept");
+assert.equal(conservativePlan.entries[1].recommendation, "accept");
+assert.equal(conservativePlan.entries[2].recommendation, "reject");
+assert.equal(conservativePlan.barriers[0].afterEventIndex, 0, "recombinant-parent use must stop the ordered queue after its causal event");
+assert.deepEqual(conservativePlan.barriers[0].impactedTargetIndexes, [2, 3]);
+const firstAutoBatch = applyAutoResolutionPlan([strongEvent, dependentEvent, weakEvent], conservativePlan, conservativePlan.barriers[0].afterEventIndex, "conservative", "2026-08-11T00:00:00.000Z");
+assert.equal(firstAutoBatch.events[0].decision, "accepted");
+assert.equal(firstAutoBatch.events[1].decision, "unreviewed", "events beyond a rescan barrier must remain untouched");
+assert.match(firstAutoBatch.events[0].history.at(-1)?.summary ?? "", /score/);
+assert.deepEqual(rescanTargetsForBarrier(conservativePlan.barriers[0], 10, AUTO_RESOLVE_PRESETS.conservative), { targetIndexes: [2, 3], scope: "targeted" });
+const filteredRescan = filterResolvedEventDuplicates([
+  makeEvent(30, { recombinant: 0, majorParent: 1, minorParent: 2, start: 102, end: 498 }),
+  makeEvent(31, { recombinant: 0, majorParent: 1, minorParent: 2, start: 220, end: 320 }),
+  makeEvent(32, { recombinant: 0, majorParent: 1, minorParent: 3, start: 102, end: 498 }),
+], [strongEvent], 1_000);
+assert.deepEqual(filteredRescan.map((event) => event.id), ["event-31", "event-32"], "rescans suppress only close same-parent duplicates, not nested or alternative-parent hypotheses");
+const noRescanPlan = planAutoResolution([strongEvent, dependentEvent], 1_000, { ...AUTO_RESOLVE_PRESETS.conservative, rescanStrategy: "off" });
+assert.equal(noRescanPlan.barriers.length, 0);
+
+const moderateEvent = makeEvent(23, {
+  evidence: evidence(2, 0.05),
+  informativeSites: 20,
+  decision: "unreviewed",
+  diagnostics: { tractVariableDensity: 0.2, backgroundVariableDensity: 0.18, rateRatio: 1.15, parentConflictRate: 0.04, parentDiscriminatingSites: 20, diffuseIncompatibility: false },
+});
+assert.notEqual(planAutoResolution([moderateEvent], 1_000, AUTO_RESOLVE_PRESETS.conservative).entries[0].recommendation, "accept");
+assert.equal(planAutoResolution([moderateEvent], 1_000, AUTO_RESOLVE_PRESETS.aggressive).entries[0].recommendation, "accept");
+assert.equal(planAutoResolution([{ ...strongEvent, evidenceStale: true }], 1_000, AUTO_RESOLVE_PRESETS.aggressive).entries[0].recommendation, "review");
+const blockedDependentPlan = planAutoResolution([{ ...strongEvent, evidenceStale: true }, dependentEvent], 1_000, AUTO_RESOLVE_PRESETS.conservative);
+assert.equal(blockedDependentPlan.entries[1].recommendation, "review");
+assert.match(blockedDependentPlan.entries[1].reasons.at(-1) ?? "", /blocked because unresolved E1/);
+assert.equal(planAutoResolution([{ ...strongEvent, decision: "accepted" }], 1_000, AUTO_RESOLVE_PRESETS.conservative).entries[0].recommendation, "keep");
 
 const circular = makeEvent(3, { start: 900, end: 120, wraps: true });
 const origin = makeEvent(4, { start: 20, end: 80 });
