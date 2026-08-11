@@ -205,7 +205,7 @@ function finalizeAlignment(
   const mismatch = sequences.find((record) => record.sequence.length !== length);
   if (mismatch) {
     throw new Error(
-      `Sequences must already be aligned. “${mismatch.name}” has ${mismatch.sequence.length.toLocaleString()} sites; expected ${length.toLocaleString()}.`,
+      `Sequences must already be aligned. “${mismatch.name}” has ${mismatch.sequence.length.toLocaleString("en-US")} sites; expected ${length.toLocaleString("en-US")}.`,
     );
   }
   return { name, format, sequences, length, createdAt: Date.now(), features: [] };
@@ -443,7 +443,7 @@ export function makeDemoAlignment(): AlignmentData {
   const gamma = mutate(ancestor, 0.11, 31);
   const mosaic = mutate(alpha.slice(0, 782) + beta.slice(782, 1538) + alpha.slice(1538), 0.006, 43);
   const mosaic2 = mutate(alpha.slice(0, 795) + beta.slice(795, 1531) + alpha.slice(1531), 0.011, 47);
-  return finalizeAlignment("Mosaic virus tutorial · 12 × 2,400 nt", "generated", [
+  const alignment = finalizeAlignment("Mosaic virus tutorial · 12 × 2,400 nt", "generated", [
     { name: "Mosaic-X", sequence: mosaic, role: "query" },
     { name: "Mosaic-Y", sequence: mosaic2, role: "query" },
     { name: "Alpha-01", sequence: alpha, role: "reference" },
@@ -457,6 +457,7 @@ export function makeDemoAlignment(): AlignmentData {
     { name: "Alpha-04", sequence: mutate(alpha, 0.021, 73), role: "reference" },
     { name: "Beta-04", sequence: mutate(beta, 0.022, 79), role: "reference" },
   ]);
+  return { ...alignment, createdAt: 1_767_225_600_000 };
 }
 
 export function demoEvent(): RdpEvent {
@@ -537,12 +538,12 @@ export function formatEventRegion(
   length: number,
 ): string {
   if (event.wraps && event.start > event.end) {
-    const tail = `${(event.start + 1).toLocaleString()}–${length.toLocaleString()}`;
+    const tail = `${(event.start + 1).toLocaleString("en-US")}–${length.toLocaleString("en-US")}`;
     return event.end > 0
-      ? `${tail} ↻ 1–${event.end.toLocaleString()}`
+      ? `${tail} ↻ 1–${event.end.toLocaleString("en-US")}`
       : `${tail} ↻ origin`;
   }
-  return `${(event.start + 1).toLocaleString()}–${event.end.toLocaleString()}`;
+  return `${(event.start + 1).toLocaleString("en-US")}–${event.end.toLocaleString("en-US")}`;
 }
 
 function identityCounts(

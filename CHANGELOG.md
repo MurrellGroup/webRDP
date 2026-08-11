@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.6.0 — 2026-08-11
+
+- Replaced competing nested panel caps with a single desktop workspace scroll
+  owner; panels now grow naturally, while intentional data grids retain local
+  scrolling. Every titled panel can expand to an accessible full-screen view.
+- Added a multi-parent alignment highlighter with arbitrary 2–6 parent sets,
+  unique/shared/novel/missing affinity states, informative-site filtering,
+  density controls, sticky labels, and bounded large-alignment behavior.
+- Added a Global reconstruction workspace implementing an ordered RDP-style
+  review queue, downstream stale propagation, rescan prompts, collection-wide
+  mosaic map, event grouping, possible overprinting, recombinant-parent
+  dependencies, and direct alignment/tree verification links.
+- Replaced tree line fragments with a connected cumulative-distance SVG layout,
+  explicit joints and zero-length nodes; added linked leaf marking across all
+  regional trees and layout regression tests.
+- Eliminated ambient locale/time-zone text from server rendering, fixed the
+  deterministic tutorial timestamp, and added byte-identical double-SSR and
+  hydration-risk regressions for React error #418.
+- Expanded the five-step guide, scientific ledger, feature audit, and tutorial
+  references to describe ordered review, rescan, nesting, and parent-proxy
+  limitations explicitly.
+
 ## 0.5.1 — 2026-08-11
 
 - Made every reusable analysis panel own an explicit bounded scroll body on

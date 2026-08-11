@@ -38,6 +38,8 @@ jobs:
         run: |
           npm run wasm:build
           npm run test:wasm
+          npm run test:ui
+          npm run lint
           npm run bench:gate
 
       - name: Build base-path-safe static application

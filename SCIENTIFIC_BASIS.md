@@ -34,13 +34,36 @@ can claim parity with RDP5.
 | Breakpoint polishing | Candidate-seeded, windowless two-state HMM/Viterbi path with local χ² fallback | BURT 2–20-state step-up fitting, random-start training, EM, and confidence-interval parity |
 | Circular genomes | Opt-in dual-origin triplet scan, circular-breakpoint deduplication, native wrapping coordinates, plots, editing, and masking | Broader circular simulation corpus and RDP5 numerical comparison |
 | False-positive flags | Gap/boundary checks, bounded four-gamete incompatibility, seeded four-gamete proximity permutation, PHI-style contrast, local rate-density shift, and parent-conflict diagnostics exposed as review evidence | Exact PHI p-values, tree-conditioned homoplasy and broader challenge calibration |
-| Event verification and editing | Draggable/numeric breakpoints, seven selected-triplet method profiles, manual create/duplicate/delete, recombinant/parent reassignment, automatic ancestry groups, unresolved-target rescans, scan-scope recalculation, undo/redo, partial recovery, IndexedDB autosave, and event/project audit trails with deletion tombstones | User studies and explicit unknown-parent/reassortment/ancestral propagation parity |
-| Pairwise matrix and local topology contrast | Pairwise matrix, closest-pair contrast, dedicated left/tract/right native NJ comparison, adaptive nearest context, role highlighting, cohort display, and Newick export | ML trees and SH/AU/RF matrices |
+| Alignment verification | Base view plus arbitrary 2–6-parent affinity highlighting; unique/shared/novel/missing states; parent-informative-site filtering; event-parent defaults; bounded memory guard | Very-large alignment virtualization, codon/amino-acid overlays, and user studies |
+| Event verification and editing | Draggable/numeric breakpoints, seven selected-triplet method profiles, manual create/duplicate/delete, recombinant/parent reassignment, automatic ancestry groups, ordered review queue, downstream-stale propagation, unresolved-target rescans, global mosaic map, overprint/recombinant-parent links, scan-scope recalculation, undo/redo, partial recovery, IndexedDB autosave, and event/project audit trails with deletion tombstones | Full RDP signal erasure/splitting, historical direction inference, unknown-parent/reassortment/ancestral propagation parity, and user studies |
+| Pairwise matrix and local topology contrast | Pairwise matrix, closest-pair contrast, dedicated left/tract/right native NJ comparison, adaptive nearest context, linked leaf marking, continuous branch geometry with explicit zero-length nodes, cohort display, and Newick export | ML trees, clade operations, and SH/AU/RF matrices |
 | Breakpoint density | Descriptive density, circular-aware pair matrix and seeded uniform-null hotspot permutation | RDP5 hot/cold-spot model parity and association covariates |
 | Recombination-free outputs | Remove, mask, CDS-phase-aware mask, split and partition, including wrapping tracts | More frame/feature edge cases and every RDP5 export variant |
 | Project/results output | Restorable `.rdpweb` schema 0.5, legacy schema import, immutable project audit ledger, annotations, edit history, diagnostics, circular/HMM provenance, CSV, and a same-engine Node batch runner | Long-term migration corpus, analysis manifests and RDP5 project conversion |
 | Annotation | GFF3, GenBank FEATURES and BED import; mapped feature track and GFF3 export | ORF calling, multi-record mapping and richer feature analyses |
 | PDB/SCHEMA, LDHat, ancestral inference | Not implemented | Separate workstreams |
+
+## Ordered event reconstruction semantics
+
+The 0.6 workflow follows the public RDP5 manual’s distinction between raw
+signals and unique events. It treats the array order as characterization/review
+order, not as literal historical time. Earlier edits to recombinant identity,
+parent proxies, breakpoints, circular status, or event grouping mark the edited
+hypothesis and later retained characterizations stale. The safe export path then
+excludes them until recalculation or an unresolved-sequence rescan.
+
+The reconstruction model exposes three relationships as hypotheses:
+
+1. overlapping tracts in the same recombinant are labeled as possible
+   overprinting, never automatically asserted as historical direction;
+2. a sequence that is itself recombinant and is used as a parent elsewhere is
+   labeled as a recombinant-parent dependency; and
+3. a shared analyst group labels co-recombinant descendants.
+
+“Major parent” and “minor parent” remain sampled proxy relatives. They must not
+be interpreted as proof that the exact historical donor was sampled. Linked
+marking in the regional trees and the parent-affinity alignment are verification
+aids for these assignments, not independent statistical tests.
 
 ## Engine design
 
@@ -106,6 +129,10 @@ partitions, but only after browser memory/merge-order benchmarks show a net win.
 - Martin DP. *RDP5 Instruction Manual.* Detailed settings, displays, method
   descriptions, and step-by-step workflow.
   https://web.cbio.uct.ac.za/~darren/RDP5Manual.pdf
+- Sattar MN et al. 2025. *Recombination Analysis of Geminiviruses Using RDP.*
+  Methods in Molecular Biology. Practical dataset preparation, event
+  characterization, and recombination-free output workflow.
+  https://pubmed.ncbi.nlm.nih.gov/40064777/
 - Lemey P, Posada D. 2009. *Introduction to recombination detection.* In *The
   Phylogenetic Handbook*, 2nd ed., pp. 493–518.
   https://doi.org/10.1017/CBO9780511819049.017

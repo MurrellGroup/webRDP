@@ -80,6 +80,14 @@ display matrix without allocating an N² matrix.
   per-recombinant guard, and discovery checkpoints at most 100 partial
   candidates so stopping a long job can recover useful hypotheses without an
   unbounded message or render cost.
+- Parent-affinity indexing is a tight O(LP) string scan for P ≤ 6 and is
+  disabled above two million sites; coordinate-window highlighting remains
+  available without allocating an all-site index.
+- Global reconstruction derives parent dependencies through sequence/group
+  indexes instead of comparing every event pair. The queue pages 250 events,
+  mosaic rendering caps at 300 recombinant rows, dependency rendering caps at
+  500, and derived relationships are bounded at 20,000 while the project keeps
+  every event.
 
 ## Next optimization gates
 

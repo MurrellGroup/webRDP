@@ -42,11 +42,18 @@ simulation results, workflow parity, and browser-scale performance.
 - Grouping/ungrouping, recombinant/parent reassignment, unresolved-sequence
   rescans, undo/redo, per-event history, an immutable project ledger,
   duplication, deletion, IndexedDB autosave, and partial-scan checkpoints are
-  operational; add richer ancestral-event propagation semantics.
+  operational. The ordered Global reconstruction queue, stale downstream
+  propagation, mosaic map, possible-overprint links, and recombinant-parent
+  dependencies are operational; add full signal erasure/splitting and richer
+  ancestral-event propagation semantics.
 - Dedicated flank/tract/right-flank NJ comparison, nearest-context cohorts,
-  role highlighting, Newick export, circular breakpoint pair matrices and
-  seeded hotspot permutations are operational; ML, RF/SH/AU and association
-  tests remain.
+  role highlighting, linked leaf marking, connected SVG geometry, Newick
+  export, circular breakpoint pair matrices and seeded hotspot permutations
+  are operational; ML, RF/SH/AU, clade editing and association tests remain.
+- Arbitrary 2–6-parent alignment affinity highlighting, shared/novel/missing
+  states, informative-site filtering, coordinate navigation and bounded
+  large-alignment behavior are operational; add amino-acid/codon overlays and
+  scalable overview minimaps.
 - GenBank/GFF3/BED annotations, feature-coordinate mapping, GFF3 export and
   CDS-phase-aware masking are operational; add ORF calling and complex
   circular/multi-record feature mappings.

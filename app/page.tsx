@@ -42,8 +42,16 @@ import {
 } from "./rdp-core";
 import { EXAMPLE_DATASETS, ExampleDataset } from "./example-datasets";
 import { AutosaveRecord, clearAutosave, loadAutosave, saveAutosave } from "./local-project-store";
+import {
+  affinityDescription,
+  classifyParentAffinity,
+  parentInformativeSites,
+} from "./alignment-highlighter";
+import { formatClockTime, formatDateTime, formatInteger } from "./format";
+import { buildReconstructionModel, type ReconstructionRelationship } from "./reconstruction";
+import { layoutNeighborJoiningTree } from "./tree-layout";
 
-type Tab = "explore" | "trees" | "alignment" | "patterns" | "export" | "methods";
+type Tab = "explore" | "reconstruction" | "trees" | "alignment" | "patterns" | "export" | "methods";
 type RunState = "idle" | "running" | "complete" | "error";
 type ExportScope = "accepted-fresh" | "all-fresh" | "all-retained";
 
@@ -116,6 +124,14 @@ const REFERENCES = [
     authors: "Martin et al.",
     href: "https://doi.org/10.1093/ve/veaa087",
     note: "Automation, false-positive flags, query/reference mode, recombination-free exports, and performance.",
+  },
+  {
+    year: "2025",
+    tag: "Tutorial",
+    title: "Recombination Analysis of Geminiviruses Using RDP",
+    authors: "Sattar et al.",
+    href: "https://pubmed.ncbi.nlm.nih.gov/40064777/",
+    note: "Current practical protocol spanning dataset preparation, event characterization, and recombination-free outputs.",
   },
   {
     year: "2017",
@@ -249,6 +265,9 @@ function Icon({ name, size = 18 }: { name: string; size?: number }) {
     settings: <><circle cx="12" cy="12" r="3" /><path d="M19 13.5V10.5l-2-.7-.5-1.2.9-1.9-2.1-2.1-1.9.9-1.2-.5-.7-2h-3l-.7 2-1.2.5-1.9-.9-2.1 2.1.9 1.9-.5 1.2-2 .7v3l2 .7.5 1.2-.9 1.9 2.1 2.1 1.9-.9 1.2.5.7 2h3l.7-2 1.2-.5 1.9.9 2.1-2.1-.9-1.9.5-1.2z" /></>,
     undo: <><path d="M9 7 4 12l5 5"/><path d="M5 12h8a6 6 0 0 1 6 6"/></>,
     redo: <><path d="m15 7 5 5-5 5"/><path d="M19 12h-8a6 6 0 0 0-6 6"/></>,
+    expand: <><path d="M9 4H4v5M15 4h5v5M20 15v5h-5M4 15v5h5"/><path d="m4 9 5-5m6 0 5 5m0 6-5 5M9 20l-5-5"/></>,
+    collapse: <><path d="M9 9H4V4M15 9h5V4M20 15h-5v5M4 15h5v5"/><path d="m4 4 5 5m6 0 5-5m0 16-5-5M9 15l-5 5"/></>,
+    star: <path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-2.9-5.6 2.9 1.1-6.2L3 9.6l6.2-.9z" />,
   };
   return (
     <svg className="icon" viewBox="0 0 24 24" width={size} height={size} aria-hidden="true">
@@ -284,14 +303,32 @@ function Panel({ title, action, children, className = "" }: {
   children: ReactNode;
   className?: string;
 }) {
-  return (
-    <section className={`panel ${className}`}>
-      <div className="panel-title"><h2>{title}</h2>{action}</div>
+  const [expanded, setExpanded] = useState(false);
+  const panelRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (!expanded) return;
+    const previousFocus = document.activeElement as HTMLElement | null;
+    const close = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") setExpanded(false);
+    };
+    document.body.classList.add("panel-is-expanded");
+    window.addEventListener("keydown", close);
+    panelRef.current?.focus();
+    return () => {
+      document.body.classList.remove("panel-is-expanded");
+      window.removeEventListener("keydown", close);
+      previousFocus?.focus();
+    };
+  }, [expanded]);
+  return <>
+    {expanded && <button type="button" className="panel-expanded-backdrop" aria-label={`Close expanded ${title}`} onClick={() => setExpanded(false)}/>}
+    <section ref={panelRef} tabIndex={expanded ? -1 : undefined} className={`panel ${expanded ? "panel-expanded" : ""} ${className}`}>
+      <div className="panel-title"><h2>{title}</h2><div className="panel-actions">{action}<button type="button" className="panel-expand-button" aria-label={`${expanded ? "Exit full screen for" : "Expand"} ${title}`} aria-expanded={expanded} title={expanded ? "Exit full screen (Esc)" : "Expand panel to full screen"} onClick={() => setExpanded((current) => !current)}><Icon name={expanded ? "collapse" : "expand"} size={15}/></button></div></div>
       <div className="panel-body" tabIndex={0} role="region" aria-label={`${title} content`}>
         {children}
       </div>
     </section>
-  );
+  </>;
 }
 
 function EvidencePlot({ alignment, event, window, circular, onUpdate }: {
@@ -380,7 +417,7 @@ function EvidencePlot({ alignment, event, window, circular, onUpdate }: {
         <text x="5" y={top + innerHeight} className="axis-label">{Math.round(yMin * 100)}%</text>
         {[0, 0.25, 0.5, 0.75, 1].map((fraction) => (
           <text key={fraction} x={left + fraction * innerWidth} y={height - 8} textAnchor={fraction === 0 ? "start" : fraction === 1 ? "end" : "middle"} className="axis-label">
-            {Math.round(fraction * alignment.length).toLocaleString()}
+            {Math.round(fraction * alignment.length).toLocaleString("en-US")}
           </text>
         ))}
       </svg>
@@ -407,7 +444,7 @@ function Overview({ alignment, events, selectedId, onSelect }: {
   return (
     <div className="overview">
       <div className="overview-axis">
-        <span>1</span><span>{Math.round(alignment.length * 0.25).toLocaleString()}</span><span>{Math.round(alignment.length * 0.5).toLocaleString()}</span><span>{Math.round(alignment.length * 0.75).toLocaleString()}</span><span>{alignment.length.toLocaleString()} nt</span>
+        <span>1</span><span>{Math.round(alignment.length * 0.25).toLocaleString("en-US")}</span><span>{Math.round(alignment.length * 0.5).toLocaleString("en-US")}</span><span>{Math.round(alignment.length * 0.75).toLocaleString("en-US")}</span><span>{alignment.length.toLocaleString("en-US")} nt</span>
       </div>
       <div className="overview-scroll">
         {displayedIndexes.map((index) => {
@@ -433,7 +470,7 @@ function Overview({ alignment, events, selectedId, onSelect }: {
             </div>
           );
         })}
-        {displayedIndexes.length < alignment.sequences.length && <div className="overview-cap">Showing {displayedIndexes.length.toLocaleString()} sequences, including every sequence with a retained event. Use Sequence roles search for the rest.</div>}
+        {displayedIndexes.length < alignment.sequences.length && <div className="overview-cap">Showing {displayedIndexes.length.toLocaleString("en-US")} sequences, including every sequence with a retained event. Use Sequence roles search for the rest.</div>}
       </div>
     </div>
   );
@@ -609,7 +646,7 @@ function MethodSpecificPlot({ alignment, event, method, window }: { alignment: A
       <text x={4} y={top + 5} className="axis-label">{maximum.toPrecision(3)}</text>
       <text x={4} y={height - bottom} className="axis-label">{minimum.toPrecision(3)}</text>
       <text x={left} y={height - 7} className="axis-label">1</text>
-      <text x={width - right} y={height - 7} textAnchor="end" className="axis-label">{alignment.length.toLocaleString()}</text>
+      <text x={width - right} y={height - 7} textAnchor="end" className="axis-label">{alignment.length.toLocaleString("en-US")}</text>
     </svg>
     <p>This bounded profile is calculated only for the selected triplet and is intended for visual review. The saved p-value above comes from the worker statistic and its documented calibration.</p>
   </div>;
@@ -655,32 +692,100 @@ function MethodEvidencePanel({ alignment, event, window, selectedMethod, onSelec
 function AlignmentViewer({ alignment, event }: { alignment: AlignmentData; event: RdpEvent | null }) {
   const initial = event ? Math.max(0, event.start - 45) : 0;
   const [cursor, setCursor] = useState(initial);
-  const width = 96;
-  const end = Math.min(alignment.length, cursor + width);
-  const visibleLimit = Math.min(200, alignment.sequences.length);
-  const indexes = event
-    ? [...new Set([event.recombinant, event.majorParent, event.minorParent, ...Array.from({ length: visibleLimit }, (_, index) => index)])]
-    : Array.from({ length: visibleLimit }, (_, index) => index);
+  const [mode, setMode] = useState<"bases" | "affinity">(event ? "affinity" : "bases");
+  const [columnCount, setColumnCount] = useState<48 | 96 | 144>(96);
+  const [informativeOnly, setInformativeOnly] = useState(Boolean(event));
+  const [parentIndexes, setParentIndexes] = useState<number[]>(() => {
+    const suggested = event ? [event.majorParent, event.minorParent] : [0, 1];
+    return [...new Set(suggested)].filter((index) => index >= 0 && index < alignment.sequences.length).slice(0, 6);
+  });
+  const parentColors = ["#39b99b", "#ff7655", "#a778d2", "#4c8ed9", "#d69b35", "#65a857"];
+  const informativeSupported = alignment.length <= 2_000_000;
+  const informativeSites = useMemo(() => mode === "affinity" && informativeOnly && informativeSupported
+    ? parentInformativeSites(alignment.sequences.map((record) => record.sequence), parentIndexes, alignment.length)
+    : null, [alignment.length, alignment.sequences, informativeOnly, informativeSupported, mode, parentIndexes]);
+  const lowerBound = (values: number[], target: number) => {
+    let left = 0;
+    let right = values.length;
+    while (left < right) {
+      const middle = (left + right) >>> 1;
+      if (values[middle] < target) left = middle + 1;
+      else right = middle;
+    }
+    return left;
+  };
+  const informativeStart = informativeSites ? Math.min(lowerBound(informativeSites, cursor), Math.max(0, informativeSites.length - 1)) : 0;
+  const shownSites = informativeSites
+    ? informativeSites.slice(informativeStart, informativeStart + columnCount)
+    : Array.from({ length: Math.min(columnCount, alignment.length - cursor) }, (_, offset) => cursor + offset);
+  const visibleLimit = Math.min(250, alignment.sequences.length);
+  const suggestedIndexes = event ? [event.recombinant, event.majorParent, event.minorParent] : [];
+  const indexes = [...new Set([...parentIndexes, ...suggestedIndexes, ...Array.from({ length: visibleLimit }, (_, index) => index)])];
+  const firstSite = shownSites[0] ?? cursor;
+  const lastSite = shownSites.at(-1) ?? cursor;
+  const parentSlotBySequence = new Map(parentIndexes.map((sequenceIndex, parentSlot) => [sequenceIndex, parentSlot]));
   const baseClass = (base: string) => `base base-${base === "-" ? "gap" : "ACGT".includes(base) ? base : "amb"}`;
+  const move = (direction: -1 | 1) => {
+    if (informativeSites?.length) {
+      const next = Math.max(0, Math.min(informativeSites.length - 1, informativeStart + direction * columnCount));
+      setCursor(informativeSites[next]);
+      return;
+    }
+    setCursor((current) => Math.max(0, Math.min(Math.max(0, alignment.length - columnCount), current + direction * columnCount)));
+  };
+  const setParent = (sequenceIndex: number) => {
+    setParentIndexes((current) => {
+      if (current.includes(sequenceIndex)) return current.length > 2 ? current.filter((index) => index !== sequenceIndex) : current;
+      return current.length < 6 ? [...current, sequenceIndex] : [...current.slice(1), sequenceIndex];
+    });
+  };
+  const resetSuggestedParents = () => {
+    if (!event) return;
+    setParentIndexes([...new Set([event.majorParent, event.minorParent])]);
+    setMode("affinity");
+    setInformativeOnly(true);
+  };
   return (
-    <Panel title="Nucleotide alignment" action={<span className="panel-caption">Sites {cursor + 1}–{end}</span>}>
-      <div className="alignment-toolbar">
-        <button type="button" className="small-button" onClick={() => setCursor(Math.max(0, cursor - width))}>← Previous</button>
-        <input aria-label="Alignment position" type="range" min={0} max={Math.max(0, alignment.length - width)} value={cursor} onChange={(eventValue) => setCursor(Number(eventValue.target.value))} />
-        <button type="button" className="small-button" onClick={() => setCursor(Math.min(alignment.length - width, cursor + width))}>Next →</button>
+    <Panel title="Nucleotide alignment" action={<span className="panel-caption">{informativeSites ? `${shownSites.length} parent-informative columns · ` : "Sites "}{formatInteger(firstSite + 1)}–{formatInteger(lastSite + 1)}</span>}>
+      <div className="alignment-modebar">
+        <div><span className="control-label">Display</span><Segmented value={mode} options={[{ value: "bases", label: "Base colors" }, { value: "affinity", label: "Parent highlighter" }]} onChange={setMode}/></div>
+        <label className="alignment-check"><input type="checkbox" checked={informativeOnly} disabled={mode !== "affinity" || !informativeSupported} onChange={(value) => setInformativeOnly(value.target.checked)}/><span>Parent-informative sites only</span></label>
+        <label className="alignment-zoom"><span>Columns</span><select value={columnCount} onChange={(value) => setColumnCount(Number(value.target.value) as 48 | 96 | 144)}><option value={48}>48 · large</option><option value={96}>96 · medium</option><option value={144}>144 · compact</option></select></label>
+        {event && <button type="button" className="small-button" onClick={resetSuggestedParents}>Use inferred parents</button>}
       </div>
-      <div className="alignment-grid" role="region" aria-label="Scrollable sequence alignment">
-        <div className="alignment-ruler"><span />{Array.from({ length: end - cursor }, (_, offset) => <i key={offset}>{(cursor + offset + 1) % 10 === 0 ? "·" : ""}</i>)}</div>
+      <div className="parent-picker">
+        <div className="parent-picker-copy"><b>Selected parents</b><span>Click the star beside any sequence to add or remove it. Two to six parents can be compared.</span></div>
+        <div className="parent-chips">{parentIndexes.map((sequenceIndex, parentSlot) => <button type="button" key={sequenceIndex} style={{ "--parent-color": parentColors[parentSlot] } as React.CSSProperties} onClick={() => setParent(sequenceIndex)} disabled={parentIndexes.length <= 2} title={parentIndexes.length <= 2 ? "At least two parents are required" : "Remove parent"}><i/>{alignment.sequences[sequenceIndex]?.name ?? `Sequence ${sequenceIndex + 1}`}<span>×</span></button>)}</div>
+        <select aria-label="Add a parent sequence" value="" disabled={parentIndexes.length >= 6} onChange={(value) => { if (value.target.value) setParent(Number(value.target.value)); }}><option value="">＋ Add parent…</option>{alignment.sequences.map((record, index) => parentIndexes.includes(index) ? null : <option key={index} value={index}>{record.name}</option>)}</select>
+      </div>
+      {mode === "affinity" && <div className="affinity-legend"><span className="legend-intro">Target cell matches:</span>{parentIndexes.map((sequenceIndex, parentSlot) => <span key={sequenceIndex}><i style={{ background: parentColors[parentSlot] }}/>{alignment.sequences[sequenceIndex].name}</span>)}<span><i className="shared"/>multiple parents</span><span><i className="novel"/>none / novel</span><span><i className="missing"/>gap / ambiguous</span></div>}
+      {!informativeSupported && mode === "affinity" && <div className="alignment-large-note">Informative-only indexing is disabled above 2,000,000 sites to keep memory bounded; highlighter colors remain available in coordinate windows.</div>}
+      <div className="alignment-toolbar">
+        <button type="button" className="small-button" onClick={() => move(-1)}>← Previous</button>
+        <input aria-label="Alignment position" type="range" min={0} max={Math.max(0, alignment.length - 1)} value={Math.min(cursor, Math.max(0, alignment.length - 1))} onChange={(eventValue) => setCursor(Number(eventValue.target.value))} />
+        <button type="button" className="small-button" onClick={() => move(1)}>Next →</button>
+      </div>
+      <div className={`alignment-grid ${mode === "affinity" ? "affinity-mode" : ""}`} role="region" aria-label="Scrollable sequence alignment">
+        <div className="alignment-ruler" style={{ gridTemplateColumns: `190px repeat(${shownSites.length}, 10px)`, minWidth: `${190 + shownSites.length * 10}px` }}><span />{shownSites.map((site) => <i key={site} title={`Site ${formatInteger(site + 1)}`}>{(site + 1) % 10 === 0 ? "·" : ""}</i>)}</div>
+        {informativeSites?.length === 0 && <div className="alignment-no-sites"><b>No parent-informative columns</b><span>The selected parents have no callable A/C/G/T differences. Add a more divergent parent or turn off informative-only filtering.</span></div>}
         {indexes.map((sequenceIndex) => {
           const record = alignment.sequences[sequenceIndex];
           const relation = event?.recombinant === sequenceIndex ? "Recombinant" : event?.majorParent === sequenceIndex ? "Major parent" : event?.minorParent === sequenceIndex ? "Minor parent" : "";
+          const parentSlot = parentSlotBySequence.get(sequenceIndex);
           return (
-            <div className={`alignment-row ${relation ? "relevant" : ""}`} key={`${record.name}-${sequenceIndex}`}>
-              <span title={`${record.name}${relation ? ` · ${relation}` : ""}`}><b>{record.name}</b><small>{relation}</small></span>
-              {[...record.sequence.slice(cursor, end)].map((base, offset) => <i key={offset} className={baseClass(base)}>{base}</i>)}
+            <div className={`alignment-row ${relation ? "relevant" : ""} ${parentSlot !== undefined ? "parent-source" : ""}`} style={{ gridTemplateColumns: `190px repeat(${shownSites.length}, 10px)`, minWidth: `${190 + shownSites.length * 10}px`, borderLeftColor: parentSlot !== undefined ? parentColors[parentSlot] : "transparent" }} key={`${record.name}-${sequenceIndex}`}>
+              <div className="alignment-label" title={`${record.name}${relation ? ` · ${relation}` : ""}`}><button type="button" className={parentSlot !== undefined ? "parent-toggle active" : "parent-toggle"} style={parentSlot !== undefined ? { color: parentColors[parentSlot] } : undefined} aria-pressed={parentSlot !== undefined} title={parentSlot !== undefined && parentIndexes.length <= 2 ? "At least two parents are required" : parentSlot !== undefined ? "Remove from parent set" : "Add to parent set"} aria-label={`${parentSlot !== undefined ? "Remove" : "Use"} ${record.name} ${parentSlot !== undefined ? "from" : "as"} parent set`} onClick={() => setParent(sequenceIndex)}><Icon name="star" size={12}/></button><span><b>{record.name}</b><small>{parentSlot !== undefined ? `Parent ${parentSlot + 1}${relation ? ` · ${relation}` : ""}` : relation}</small></span></div>
+              {shownSites.map((site) => {
+                const base = record.sequence[site];
+                if (mode !== "affinity" || parentSlot !== undefined) return <i key={site} className={`${baseClass(base)} ${parentSlot !== undefined ? `parent-base parent-${parentSlot}` : ""}`} style={parentSlot !== undefined ? { background: parentColors[parentSlot] } : undefined} title={`${record.name} · site ${formatInteger(site + 1)} · ${base}`}>{base}</i>;
+                const affinity = classifyParentAffinity(base, parentIndexes.map((index) => alignment.sequences[index]?.sequence[site]));
+                const uniqueSlot = affinity.kind === "unique" ? affinity.parentSlots[0] : null;
+                return <i key={site} className={`base affinity-${affinity.kind}${uniqueSlot !== null ? ` affinity-parent-${uniqueSlot}` : ""}`} style={uniqueSlot !== null ? { background: parentColors[uniqueSlot] } : undefined} title={`${record.name} · site ${formatInteger(site + 1)} · ${base} · ${affinityDescription(affinity, parentIndexes.map((index) => alignment.sequences[index].name))}`}>{base}</i>;
+              })}
             </div>
           );
         })}
+        {indexes.length < alignment.sequences.length && <div className="alignment-cap">Showing {formatInteger(indexes.length)} of {formatInteger(alignment.sequences.length)} sequences. Parent selections and event sequences are always retained; use the role filter below for the full collection.</div>}
       </div>
     </Panel>
   );
@@ -692,7 +797,7 @@ function AnnotationPanel({ alignment, onOpen }: { alignment: AlignmentData; onOp
     {features.length === 0 ? <div className="empty-state compact">Import annotations to map genes, CDS features, and named regions onto event coordinates.</div> : <>
       <div className="annotation-track">{features.slice(0, 2_000).map((feature, index) => <button type="button" key={feature.id} title={`${feature.name} · ${feature.type} · ${feature.start + 1}–${feature.end} (${feature.strand})`} style={{ left: `${feature.start / alignment.length * 100}%`, width: `${Math.max(0.5, (feature.end - feature.start) / alignment.length * 100)}%`, top: `${8 + (index % 4) * 20}px` }}><span>{feature.name}</span></button>)}</div>
       <div className="annotation-list">{features.slice(0, 200).map((feature) => <div key={`row-${feature.id}`}><b>{feature.name}</b><span>{feature.type}</span><code>{feature.start + 1}–{feature.end}{feature.strand !== "." ? ` · ${feature.strand}` : ""}</code></div>)}</div>
-      {features.length > 200 && <p className="annotation-overflow">Showing the first 200 of {features.length.toLocaleString()} features.</p>}
+      {features.length > 200 && <p className="annotation-overflow">Showing the first 200 of {features.length.toLocaleString("en-US")} features.</p>}
     </>}
   </Panel>;
 }
@@ -764,56 +869,32 @@ function TopologyCards({ alignment, event }: { alignment: AlignmentData; event: 
 function ChallengeDiagnostics({ diagnostics, event }: { diagnostics?: AlignmentDiagnostics; event: RdpEvent | null }) {
   if (!diagnostics) return <div className="empty-state compact">Run a scan to calculate bounded four-gamete and rate-variation diagnostics.</div>;
   const values = [
-    ["Four-gamete incompatible", `${(diagnostics.fourGameteFraction * 100).toFixed(1)}%`, `${diagnostics.incompatibleSitePairs.toLocaleString()} / ${diagnostics.testedSitePairs.toLocaleString()} sampled site pairs`],
+    ["Four-gamete incompatible", `${(diagnostics.fourGameteFraction * 100).toFixed(1)}%`, `${diagnostics.incompatibleSitePairs.toLocaleString("en-US")} / ${diagnostics.testedSitePairs.toLocaleString("en-US")} sampled site pairs`],
     ["Proximity permutation", formatP(diagnostics.proximityPermutationP), `One-sided four-gamete distance-clustering test · Δ ${(diagnostics.proximityStatistic * 100).toFixed(2)} points · ${diagnostics.proximityPermutationReplicates} seeded permutations`],
     ["Near / far contrast", diagnostics.proximityRatio.toFixed(2), "Incompatibility ratio; related to PHI’s question but not a PHI implementation"],
     ["Canonical coverage", `${((1 - diagnostics.ambiguityFraction) * 100).toFixed(2)}%`, `${diagnostics.sampledSequences} sequences × ${diagnostics.sampledBiallelicSites} biallelic sites sampled`],
     ["Tract rate ratio", event ? event.diagnostics.rateRatio.toFixed(2) : "—", event ? `${(event.diagnostics.tractVariableDensity * 100).toFixed(1)}% tract vs ${(event.diagnostics.backgroundVariableDensity * 100).toFixed(1)}% background variable sites` : "Select an event"],
-    ["Parent-conflict rate", event ? `${(event.diagnostics.parentConflictRate * 100).toFixed(1)}%` : "—", event ? `${event.diagnostics.parentDiscriminatingSites.toLocaleString()} parent-discriminating tract sites` : "Select an event"],
+    ["Parent-conflict rate", event ? `${(event.diagnostics.parentConflictRate * 100).toFixed(1)}%` : "—", event ? `${event.diagnostics.parentDiscriminatingSites.toLocaleString("en-US")} parent-discriminating tract sites` : "Select an event"],
   ];
   return <div className="diagnostic-grid">{values.map(([label, value, note]) => <article key={label}><span>{label}</span><b>{value}</b><small>{note}</small></article>)}</div>;
 }
 
-function TreeSvg({ root, roles = {} }: { root: NeighborJoiningNode; roles?: Record<string, "recombinant" | "major" | "minor"> }) {
-  const leafCount = (node: NeighborJoiningNode): number => node.children?.length
-    ? node.children.reduce((total, child) => total + leafCount(child), 0)
-    : 1;
-  const farthest = (node: NeighborJoiningNode, distance = 0): number => {
-    const here = distance + node.length;
-    return node.children?.length ? Math.max(...node.children.map((child) => farthest(child, here))) : here;
-  };
-  const width = 720;
-  const leaves = leafCount(root);
-  const height = Math.max(150, leaves * 22 + 24);
-  const left = 18;
-  const labelWidth = 180;
-  const scale = (width - left - labelWidth) / Math.max(0.000001, farthest(root));
-  const edges: Array<{ x1: number; y1: number; x2: number; y2: number }> = [];
-  const labels: Array<{ x: number; y: number; name: string }> = [];
-  let leaf = 0;
-  function place(node: NeighborJoiningNode, parentDistance: number): { x: number; y: number } {
-    const distance = parentDistance + node.length;
-    const x = left + distance * scale;
-    if (!node.children?.length) {
-      const y = 14 + (leaf + 0.5) * ((height - 24) / Math.max(1, leaves));
-      leaf += 1;
-      labels.push({ x: x + 5, y, name: node.name ?? "unnamed" });
-      return { x, y };
-    }
-    const children = node.children.map((child) => place(child, distance));
-    const y = children.reduce((sum, child) => sum + child.y, 0) / children.length;
-    const childYs = children.map((child) => child.y);
-    edges.push({ x1: x, y1: Math.min(...childYs), x2: x, y2: Math.max(...childYs) });
-    children.forEach((child) => edges.push({ x1: x, y1: child.y, x2: child.x, y2: child.y }));
-    return { x, y };
-  }
-  place(root, 0);
-  return <div className="tree-svg-wrap"><svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Neighbor-joining tree">{edges.map((edge, index) => <line key={index} {...edge}/>) }{labels.map((label) => <text className={roles[label.name] ? `tree-label-${roles[label.name]}` : undefined} key={`${label.name}-${label.y}`} x={label.x} y={label.y + 3}>{label.name}</text>)}</svg></div>;
+function TreeSvg({ root, roles = {}, markedNames = [], onToggleMark }: { root: NeighborJoiningNode; roles?: Record<string, "recombinant" | "major" | "minor">; markedNames?: string[]; onToggleMark?: (name: string) => void }) {
+  const layout = useMemo(() => layoutNeighborJoiningTree(root), [root]);
+  return <div className="tree-svg-wrap">
+    <svg viewBox={`0 0 ${layout.width} ${layout.height}`} role="img" aria-label="Connected neighbor-joining tree">
+      <path className="tree-branches" d={layout.path}/>
+      {layout.joints.map((joint, index) => <circle className="tree-joint" key={`${joint.x}-${joint.y}-${index}`} cx={joint.x} cy={joint.y} r="1.8"/>)}
+      {layout.labels.map((label) => <g key={`${label.name}-${label.y}`} className={markedNames.includes(label.name) ? "tree-leaf-marked" : undefined}>{markedNames.includes(label.name) && <circle className="tree-mark" cx={label.x - 4} cy={label.y} r="4"/>}<text role={onToggleMark ? "button" : undefined} tabIndex={onToggleMark ? 0 : undefined} aria-label={onToggleMark ? `${markedNames.includes(label.name) ? "Unmark" : "Mark"} ${label.name} across every tree` : undefined} className={`${roles[label.name] ? `tree-label-${roles[label.name]}` : ""} ${markedNames.includes(label.name) ? "tree-label-marked" : ""}`} x={label.x} y={label.y + 3} onClick={() => onToggleMark?.(label.name)} onKeyDown={(keyEvent) => { if (onToggleMark && (keyEvent.key === "Enter" || keyEvent.key === " ")) { keyEvent.preventDefault(); onToggleMark(label.name); } }}>{label.name}</text></g>)}
+    </svg>
+    {layout.zeroLengthBranches > 0 && <div className="tree-zero-note">{layout.zeroLengthBranches} zero-length branch{layout.zeroLengthBranches === 1 ? "" : "es"} collapse at a drawn node; all descendants remain connected.</div>}
+  </div>;
 }
 
 function LocalTrees({ alignment, events, event, onSelectEvent }: { alignment: AlignmentData; events: RdpEvent[]; event: RdpEvent | null; onSelectEvent: (id: string) => void }) {
   const [cohortSize, setCohortSize] = useState(14);
   const [cohortMode, setCohortMode] = useState<"nearest" | "first">("nearest");
+  const [markedNames, setMarkedNames] = useState<string[]>([]);
   const trees = useMemo(() => {
     if (!event) return null;
     const triad = [event.recombinant, event.majorParent, event.minorParent];
@@ -845,6 +926,7 @@ function LocalTrees({ alignment, events, event, onSelectEvent }: { alignment: Al
   const minor = alignment.sequences[event.minorParent].name;
   const roles: Record<string, "recombinant" | "major" | "minor"> = { [recombinant]: "recombinant", [major]: "major", [minor]: "minor" };
   const allNewick = trees.regions.map((region) => `[${region.label}]\n${region.tree.newick}`).join("\n\n");
+  const toggleMark = (name: string) => setMarkedNames((current) => current.includes(name) ? current.filter((candidate) => candidate !== name) : [...current, name]);
   return <div className="tree-explorer">
     <div className="tree-hero">
       <div><span className="eyebrow">Selected recombination hypothesis</span><h1>{recombinant}</h1><p>Does the recombinant move from the major-parent neighborhood in its flanks to the minor-parent neighborhood inside the proposed tract?</p></div>
@@ -858,12 +940,97 @@ function LocalTrees({ alignment, events, event, onSelectEvent }: { alignment: Al
       <label><span>Event hypothesis</span><select value={event.id} onChange={(value) => onSelectEvent(value.target.value)}>{events.map((candidate, index) => <option value={candidate.id} key={candidate.id}>E{index + 1} · {alignment.sequences[candidate.recombinant].name} · {formatEventRegion(candidate, alignment.length)}</option>)}</select></label>
       <label><span>Context sequences</span><select value={cohortSize} onChange={(value) => setCohortSize(Number(value.target.value))}>{[8, 14, 20, 24].filter((count) => count <= Math.max(8, alignment.sequences.length)).map((count) => <option value={count} key={count}>Up to {count}</option>)}</select></label>
       <label><span>Cohort strategy</span><select value={cohortMode} onChange={(value) => setCohortMode(value.target.value as "nearest" | "first")}><option value="nearest">Nearest to event triad</option><option value="first">First sequences in alignment</option></select></label>
-      <button type="button" className="small-button" onClick={() => download(`rdp-event-${event.id}-local-trees.nwk`, allNewick)}>All Newick ↓</button>
+      <div className="tree-toolbar-actions"><button type="button" className="small-button" onClick={() => download(`rdp-event-${event.id}-local-trees.nwk`, allNewick)}>All Newick ↓</button><button type="button" className="small-button" disabled={!markedNames.length} onClick={() => setMarkedNames([])}>Clear marks</button></div>
     </div>
+    <div className="tree-mark-help"><b>Linked marking</b><span>Click any leaf name—or a cohort chip below—to mark that sequence in every regional tree. This makes topology switches much easier to track.</span><div>{markedNames.map((name) => <button type="button" key={name} onClick={() => toggleMark(name)}>{name} ×</button>)}</div></div>
     <TopologyCards alignment={alignment} event={event}/>
-    <div className={`tree-comparison regions-${trees.regions.length}`}>{trees.regions.map((item) => <article key={item.label} className={item.highlight ? "tract-tree" : ""}><div><div><b>{item.label}</b><span>{item.segments.map(([start, end]) => `${start + 1}–${end}`).join(" + ")}</span></div><button type="button" onClick={() => download(`rdp-${item.slug}.nwk`, item.tree.newick)}>Newick ↓</button></div><TreeSvg root={item.tree.root} roles={roles}/><code title={item.tree.newick}>{item.tree.newick}</code></article>)}</div>
-    <div className="tree-cohort"><strong>Tree cohort · {trees.selected.length} sequences</strong><div>{trees.selected.map((index) => <span className={index === event.recombinant ? "recombinant" : index === event.majorParent ? "major" : index === event.minorParent ? "minor" : ""} key={index}>{alignment.sequences[index].name}</span>)}</div></div>
+    <div className={`tree-comparison regions-${trees.regions.length}`}>{trees.regions.map((item) => <article key={item.label} className={item.highlight ? "tract-tree" : ""}><div><div><b>{item.label}</b><span>{item.segments.map(([start, end]) => `${start + 1}–${end}`).join(" + ")}</span></div><button type="button" onClick={() => download(`rdp-${item.slug}.nwk`, item.tree.newick)}>Newick ↓</button></div><TreeSvg root={item.tree.root} roles={roles} markedNames={markedNames} onToggleMark={toggleMark}/><code title={item.tree.newick}>{item.tree.newick}</code></article>)}</div>
+    <div className="tree-cohort"><strong>Tree cohort · {trees.selected.length} sequences</strong><div>{trees.selected.map((index) => { const name = alignment.sequences[index].name; return <button type="button" aria-pressed={markedNames.includes(name)} onClick={() => toggleMark(name)} className={`${index === event.recombinant ? "recombinant" : index === event.majorParent ? "major" : index === event.minorParent ? "minor" : ""} ${markedNames.includes(name) ? "marked" : ""}`} key={index}>{name}</button>; })}</div></div>
     <div className="tree-caveat"><strong>Exploratory local phylogenies</strong><span>Neighbor-joining on uncorrected canonical-site p-distances, with at most 8,192 sampled sites per comparison. These trees are interactive verification aids—not ML trees, topology tests, or independent proof of recombination.</span></div>
+  </div>;
+}
+
+function ReconstructionWorkspace({ alignment, events, selectedId, onSelect, onDecision, onRescan, rescanning }: {
+  alignment: AlignmentData;
+  events: RdpEvent[];
+  selectedId: string | null;
+  onSelect: (id: string, view?: "explore" | "trees" | "alignment") => void;
+  onDecision: (id: string, decision: EventDecision) => void;
+  onRescan: () => void;
+  rescanning: boolean;
+}) {
+  const [queueLimit, setQueueLimit] = useState(250);
+  const model = useMemo(() => buildReconstructionModel(events, alignment.length), [alignment.length, events]);
+  const relationsByEvent = useMemo(() => {
+    const map = new Map<number, ReconstructionRelationship[]>();
+    model.relationships.forEach((relationship) => {
+      map.set(relationship.fromIndex, [...(map.get(relationship.fromIndex) ?? []), relationship]);
+      map.set(relationship.toIndex, [...(map.get(relationship.toIndex) ?? []), relationship]);
+    });
+    return map;
+  }, [model.relationships]);
+  const accepted = events.filter((event) => event.decision === "accepted" && !event.evidenceStale).length;
+  const reviewed = events.filter((event) => event.decision !== "unreviewed").length;
+  const grouped = events.filter((event) => event.groupId).length;
+  const canRescan = accepted > 0 && !rescanning;
+  const relationLabel = (kind: "possible-overprint" | "recombinant-parent" | "event-group", otherIndex: number, overlapBases: number) => {
+    if (kind === "possible-overprint") return `possible overprint with E${otherIndex + 1} · ${formatInteger(overlapBases)} nt`;
+    if (kind === "recombinant-parent") return `recombinant-parent dependency · E${otherIndex + 1}`;
+    return `same co-recombinant group as E${otherIndex + 1}`;
+  };
+  return <div className="reconstruction-workspace">
+    <div className="reconstruction-hero">
+      <div><span className="eyebrow">Global event reconstruction</span><h1>Build the collection-level mosaic in review order.</h1><p>Desktop RDP separates raw signals from unique events, reviews the strongest events first, groups co-recombinant descendants, then rescans after edits. This workspace makes that dependency chain explicit.</p></div>
+      <div className="reconstruction-hero-actions">
+        <button type="button" className="run-button" disabled={model.nextReviewIndex === null} onClick={() => model.nextReviewIndex !== null && onSelect(events[model.nextReviewIndex].id, "explore")}>{model.nextReviewIndex === null ? "Review complete" : `Review next · E${model.nextReviewIndex + 1}`} <span>→</span></button>
+        <button type="button" className="open-button" disabled={!canRescan} onClick={onRescan}>↻ Rescan unresolved</button>
+      </div>
+    </div>
+    <div className="reconstruction-stages" aria-label="Event reconstruction workflow">
+      {[
+        ["1", "Scan", events.length ? `${events.length} signals retained` : "Run the multi-method scan", events.length > 0],
+        ["2", "Reconcile", grouped ? `${grouped} grouped hypotheses` : "Group shared ancestry", grouped > 0 || events.length <= 1],
+        ["3", "Review in order", `${reviewed}/${events.length} decided`, events.length > 0 && reviewed === events.length],
+        ["4", "Rescan after edits", model.staleFromIndex === null ? "No stale edit chain" : `Required from E${model.staleFromIndex + 1}`, model.staleFromIndex === null],
+        ["5", "Global mosaic", `${accepted} accepted + fresh`, accepted > 0 && model.nextReviewIndex === null],
+      ].map(([number, label, note, complete]) => <article className={complete ? "complete" : ""} key={String(label)}><span>{complete ? "✓" : number}</span><div><b>{label}</b><small>{note}</small></div></article>)}
+    </div>
+    {model.staleFromIndex !== null && <div className="reconstruction-warning"><strong>Downstream characterization may now be stale.</strong><span>E{model.staleFromIndex + 1} was edited after its evidence was calculated. RDP’s ordered workflow requires the remaining signals to be rescanned; {model.downstreamIndexes.length} later retained event{model.downstreamIndexes.length === 1 ? "" : "s"} are marked downstream, not silently treated as independent.{!canRescan && " Recalculate and accept the edited event before rescanning."}</span><button type="button" disabled={!canRescan} title={canRescan ? "Keep accepted fresh events and rescan unresolved targets" : "Recalculate and accept at least one event first"} onClick={onRescan}>Rescan unresolved sequences</button></div>}
+    <Panel title="Ordered event queue" action={<span className="panel-caption">Inference/review order · not literal historical time</span>}>
+      <div className="event-queue">
+        {events.length === 0 ? <div className="empty-state compact">Run a scan or create a manual hypothesis to begin event reconstruction.</div> : events.slice(0, queueLimit).map((event, eventIndex) => {
+          const relationships = relationsByEvent.get(eventIndex) ?? [];
+          const downstream = model.downstreamIndexes.includes(eventIndex);
+          return <article key={event.id} className={`${event.id === selectedId ? "selected" : ""} ${event.decision} ${event.evidenceStale ? "stale" : ""}`}>
+            <button type="button" className="queue-number" onClick={() => onSelect(event.id, "explore")}><span>E{eventIndex + 1}</span><small>{event.source === "wasm" ? "scan" : event.source === "manual" ? "manual" : "truth"}</small></button>
+            <div className="queue-summary"><b>{alignment.sequences[event.recombinant]?.name ?? "Unknown recombinant"}</b><span>{formatEventRegion(event, alignment.length)} · {alignment.sequences[event.majorParent]?.name ?? "?"} ↔ {alignment.sequences[event.minorParent]?.name ?? "?"}</span><div>{event.groupId && <em>{event.groupId}</em>}{event.evidenceStale && <em className="stale">recalculate</em>}{downstream && <em className="downstream">downstream of edit</em>}{relationships.slice(0, 3).map((relationship, relationIndex) => { const otherIndex = relationship.fromIndex === eventIndex ? relationship.toIndex : relationship.fromIndex; return <em className={relationship.kind} key={`${relationship.kind}-${otherIndex}-${relationIndex}`}>{relationLabel(relationship.kind, otherIndex, relationship.overlapBases)}</em>; })}</div></div>
+            <div className="queue-decision"><span className={`decision-label ${event.decision}`}>{event.decision}</span><button type="button" onClick={() => onSelect(event.id, "alignment")}>Alignment</button><button type="button" onClick={() => onSelect(event.id, "trees")}>Trees</button></div>
+            <div className="queue-review"><button type="button" className={event.decision === "rejected" ? "active reject" : "reject"} onClick={() => onDecision(event.id, event.decision === "rejected" ? "unreviewed" : "rejected")}>Reject</button><button type="button" className={event.decision === "accepted" ? "active accept" : "accept"} onClick={() => onDecision(event.id, event.decision === "accepted" ? "unreviewed" : "accepted")}>Accept</button></div>
+          </article>;
+        })}{events.length > queueLimit && <button type="button" className="queue-load-more" onClick={() => setQueueLimit((current) => Math.min(events.length, current + 250))}>Show {formatInteger(Math.min(250, events.length - queueLimit))} more events · {formatInteger(events.length - queueLimit)} hidden</button>}
+      </div>
+    </Panel>
+    <Panel title="Global mosaic map" action={<span className="panel-caption">All retained events · nested tracts use separate lanes</span>}>
+      <div className="global-mosaic">
+        <div className="mosaic-axis"><span>1</span><span>{formatInteger(Math.round(alignment.length / 2))}</span><span>{formatInteger(alignment.length)} nt</span></div>
+        {model.sequenceRows.length === 0 ? <div className="empty-state compact">Retained events will be assembled into sequence-level mosaics here.</div> : model.sequenceRows.slice(0, 300).map((row) => <div className="mosaic-row" key={row.sequenceIndex}><button type="button" title={alignment.sequences[row.sequenceIndex]?.name}>{alignment.sequences[row.sequenceIndex]?.name ?? `Sequence ${row.sequenceIndex + 1}`}</button><div className="mosaic-track">{row.eventIndexes.flatMap((eventIndex, laneIndex) => {
+          const event = events[eventIndex];
+          return eventSegments(event, alignment.length).map(([start, end], segmentIndex) => <button type="button" key={`${event.id}-${segmentIndex}`} className={`${event.decision} ${event.evidenceStale ? "stale" : ""} ${event.id === selectedId ? "selected" : ""}`} style={{ left: `${start / alignment.length * 100}%`, width: `${Math.max(.45, (end - start) / alignment.length * 100)}%`, top: `${4 + (laneIndex % 4) * 9}px` }} title={`E${eventIndex + 1} · ${formatEventRegion(event, alignment.length)} · ${event.decision}`} onClick={() => onSelect(event.id, "explore")}><span>E{eventIndex + 1}</span></button>);
+        })}</div></div>)}{model.sequenceRows.length > 300 && <div className="mosaic-cap">Showing the first 300 recombinant sequences; project export retains all {formatInteger(model.sequenceRows.length)}.</div>}
+      </div>
+    </Panel>
+    <div className="reconstruction-bottom-grid">
+      <Panel title="Nested events & parent dependencies" action={<span className="panel-caption">Hypotheses to verify in trees</span>}>
+        <div className="dependency-list">{model.relationships.length === 0 ? <div className="empty-state compact">No overlapping, grouped, or recombinant-parent dependencies are currently inferred.</div> : model.relationships.slice(0, 500).map((relationship, index) => {
+          const from = events[relationship.fromIndex];
+          const to = events[relationship.toIndex];
+          return <button type="button" key={`${relationship.kind}-${relationship.fromIndex}-${relationship.toIndex}-${index}`} onClick={() => onSelect(to.id, "trees")}><span className={relationship.kind}>{relationship.kind === "possible-overprint" ? "Overlap" : relationship.kind === "recombinant-parent" ? "Nested parent" : "Event group"}</span><b>E{relationship.fromIndex + 1} → E{relationship.toIndex + 1}</b><small>{relationship.kind === "possible-overprint" ? `${alignment.sequences[to.recombinant]?.name} shares ${formatInteger(relationship.overlapBases)} tract bases; test possible overprinting.` : relationship.kind === "recombinant-parent" ? `${alignment.sequences[from.recombinant]?.name} is used as a parent proxy in another event.` : `${from.groupId} links co-recombinant descendants.`}</small><i>Compare trees →</i></button>;
+        })}{(model.relationships.length > 500 || model.relationshipsTruncated) && <div className="dependency-cap">Showing 500 of {model.relationshipsTruncated ? "at least " : ""}{formatInteger(model.relationships.length)} derived relationships to keep the interface responsive{model.relationshipsTruncated ? "; derivation is capped at 20,000 relationships" : ""}.</div>}</div>
+      </Panel>
+      <Panel title="How to reconstruct defensibly" action={<a className="panel-help-link" href="https://web.cbio.uct.ac.za/~darren/RDP5Manual.pdf" target="_blank" rel="noreferrer">RDP5 manual ↗</a>}>
+        <ol className="reconstruction-guide"><li><b>Start with the strongest/earliest characterized signal.</b><span>Later assignments can depend on how earlier recombinant descendants were grouped.</span></li><li><b>Verify the alignment and all three local trees.</b><span>Track the recombinant, major proxy, and minor proxy across tract and background trees.</span></li><li><b>Group co-recombinant descendants and annotate nesting.</b><span>A sampled “parent” is a proxy relative, not necessarily the historical donor.</span></li><li><b>After breakpoint, parent, recombinant, or grouping edits, rescan.</b><span>Do not trust the untouched tail of the queue as if it were independent of the edit.</span></li><li><b>Accept a global mosaic only after the queue is resolved.</b><span>Exported provenance keeps rejected alternatives, edits, and the project ledger.</span></li></ol>
+      </Panel>
+    </div>
   </div>;
 }
 
@@ -894,7 +1061,7 @@ function ExampleLibrary({ onClose, onLoad }: { onClose: () => void; onLoad: (exa
     <div className="example-grid">{visible.map((example) => <article key={example.id} className={`complexity-${example.complexity.toLowerCase().replace(" ", "-")}`}>
       <div className="example-card-head"><span>{example.complexity}</span><small>{example.organism}</small></div>
       <h3>{example.title}</h3>
-      <div className="example-size"><b>{example.sequenceCount.toLocaleString()}</b><span>sequences</span><b>{example.length.toLocaleString()}</b><span>sites</span></div>
+      <div className="example-size"><b>{example.sequenceCount.toLocaleString("en-US")}</b><span>sequences</span><b>{example.length.toLocaleString("en-US")}</b><span>sites</span></div>
       <p>{example.description}</p>
       <div className="example-tags">{example.tags.map((tag) => <span key={tag}>{tag}</span>)}</div>
       <details><summary>Known truth · {example.truth.length} item{example.truth.length === 1 ? "" : "s"}</summary><div>{example.truth.map((truth, index) => <p key={`${truth.recombinant}-${index}`}><b>{truth.recombinant}</b><span>{truth.donor} · {truth.region}</span><small>{truth.note}</small></p>)}</div></details>
@@ -949,7 +1116,7 @@ function Inspector({ alignment, event, onDecision, onUpdate, onNavigate, onDupli
       {(event.alternativeParents?.length ?? 0) > 0 && <div className="alternative-parents"><span>Alternative minor parents retained by deduplication</span><div>{event.alternativeParents?.map((index) => <button type="button" key={index} onClick={() => onUpdate({ minorParent: index }, `Selected alternative minor parent ${alignment.sequences[index]?.name}`)}>{alignment.sequences[index]?.name ?? `Sequence ${index + 1}`}</button>)}</div></div>}
       {event.evidenceStale && <div className="stale-box"><strong>Evidence needs recalculation</strong><span>Assignments or breakpoints changed after the scan. The saved method statistics remain visible for comparison but no longer describe this edited hypothesis.</span><button type="button" onClick={onRecalculate} disabled={recalculating}>{recalculating ? "Recalculating…" : "Recalculate this exact hypothesis"}</button></div>}
       <div className="inspector-section">
-        <div className="section-heading"><h3>Breakpoint interval</h3><span className="mono">{eventLength(event, alignment.length).toLocaleString()} nt{event.wraps ? " · ↻" : ""}</span></div>
+        <div className="section-heading"><h3>Breakpoint interval</h3><span className="mono">{eventLength(event, alignment.length).toLocaleString("en-US")} nt{event.wraps ? " · ↻" : ""}</span></div>
         <div className="breakpoint-inputs">
           <label>Start<input type="number" min={event.wraps ? event.end + 2 : 1} max={event.wraps ? alignment.length : event.end} value={event.start + 1} onChange={(value) => {
             const requested = Number(value.target.value) - 1;
@@ -966,7 +1133,7 @@ function Inspector({ alignment, event, onDecision, onUpdate, onNavigate, onDupli
             onUpdate({ end, confidenceEnd: [end, end], breakpointModel: { method: "manual", informativeSites: event.informativeSites } }, "Edited right breakpoint");
           }}/><small>{event.confidenceEnd[0] + 1}–{event.confidenceEnd[1]}</small></label>
         </div>
-        {event.breakpointModel && <div className="breakpoint-model"><b>{event.breakpointModel.method === "two-state-hmm" ? "Windowless two-state HMM" : event.breakpointModel.method === "manual" ? "Manually edited" : "Local χ² refinement"}</b><span>{event.breakpointModel.informativeSites.toLocaleString()} informative sites{event.breakpointModel.stateSwitches !== undefined ? ` · ${event.breakpointModel.stateSwitches} state switches` : ""}</span></div>}
+        {event.breakpointModel && <div className="breakpoint-model"><b>{event.breakpointModel.method === "two-state-hmm" ? "Windowless two-state HMM" : event.breakpointModel.method === "manual" ? "Manually edited" : "Local χ² refinement"}</b><span>{event.breakpointModel.informativeSites.toLocaleString("en-US")} informative sites{event.breakpointModel.stateSwitches !== undefined ? ` · ${event.breakpointModel.stateSwitches} state switches` : ""}</span></div>}
         <button className="text-button" type="button" onClick={() => {
           const nextStart = event.end === alignment.length ? 0 : event.end;
           const nextEnd = event.start;
@@ -998,7 +1165,7 @@ function Inspector({ alignment, event, onDecision, onUpdate, onNavigate, onDupli
       {event.warnings.length > 0 && <div className="warning-box"><strong>Review flags</strong>{event.warnings.map((warning) => <span key={warning}>{warning}</span>)}</div>}
       <div className="inspector-section">
         <label className="note-label">Analyst note<textarea key={`${event.id}-${event.note}`} rows={3} defaultValue={event.note} onBlur={(value) => { if (value.target.value !== event.note) onUpdate({ note: value.target.value }, "Edited analyst note"); }} placeholder="Record why this hypothesis was accepted, changed, or rejected…" /></label>
-        <details className="event-history"><summary>Audit trail · {event.history.length} entr{event.history.length === 1 ? "y" : "ies"}</summary><div>{[...event.history].reverse().map((entry) => <article key={entry.id}><b>{entry.action}</b><span>{entry.summary}</span><time dateTime={entry.timestamp}>{new Date(entry.timestamp).toLocaleString()}</time></article>)}</div></details>
+        <details className="event-history"><summary>Audit trail · {event.history.length} entr{event.history.length === 1 ? "y" : "ies"}</summary><div>{[...event.history].reverse().map((entry) => <article key={entry.id}><b>{entry.action}</b><span>{entry.summary}</span><time dateTime={entry.timestamp}>{formatDateTime(entry.timestamp)}</time></article>)}</div></details>
       </div>
       <div className="decision-actions">
         <button type="button" className={event.decision === "rejected" ? "reject active" : "reject"} onClick={() => onDecision(event.decision === "rejected" ? "unreviewed" : "rejected")}><Icon name="close" size={16}/> Reject <kbd>X</kbd></button>
@@ -1099,7 +1266,7 @@ export default function Home() {
       id: `project-audit-load-${Date.now()}`,
       timestamp: new Date().toISOString(),
       action: "Loaded alignment",
-      summary: `${next.sequences.length.toLocaleString()} sequences × ${next.length.toLocaleString()} sites loaded locally.`,
+      summary: `${next.sequences.length.toLocaleString("en-US")} sequences × ${next.length.toLocaleString("en-US")} sites loaded locally.`,
     }]);
     showToast(`${next.sequences.length} aligned sequences loaded locally`);
   }, [showToast]);
@@ -1140,7 +1307,7 @@ export default function Home() {
         id: `project-audit-example-${Date.now()}`,
         timestamp: new Date().toISOString(),
         action: "Generated example dataset",
-        summary: `${example.title}: ${example.sequenceCount.toLocaleString()} synthetic sequences × ${example.length.toLocaleString()} sites.`,
+        summary: `${example.title}: ${example.sequenceCount.toLocaleString("en-US")} synthetic sequences × ${example.length.toLocaleString("en-US")} sites.`,
       }]);
       showToast(`${example.title} generated locally · ready to scan`);
     }, 0);
@@ -1152,7 +1319,7 @@ export default function Home() {
       loadProject(parseProject(JSON.stringify(autosaveCandidate.project)));
       setAutosaveCandidate(null);
       setLastAutosavedAt(autosaveCandidate.savedAt);
-      appendAudit("Restored browser autosave", `Recovered the local project saved ${new Date(autosaveCandidate.savedAt).toLocaleString()}.`);
+      appendAudit("Restored browser autosave", `Recovered the local project saved ${formatDateTime(autosaveCandidate.savedAt)}.`);
     } catch (error) {
       showToast(error instanceof Error ? error.message : "The local autosave could not be restored.");
     }
@@ -1181,7 +1348,7 @@ export default function Home() {
     try {
       const features = parseGenomeAnnotations(await file.text(), file.name, alignment.length);
       setAlignment((current) => ({ ...current, features }));
-      showToast(`${features.length.toLocaleString()} annotations mapped to alignment coordinates`);
+      showToast(`${features.length.toLocaleString("en-US")} annotations mapped to alignment coordinates`);
     } catch (error) {
       showToast(error instanceof Error ? error.message : "Could not parse annotations.");
     }
@@ -1231,7 +1398,7 @@ export default function Home() {
         setProgress(1);
         setPhase(`Complete · ${nextEvents.length} event${nextEvents.length === 1 ? "" : "s"}`);
         setRunState("complete");
-        appendAudit(retainedEvents.length ? "Completed unresolved-sequence rescan" : "Completed full scan", `${payload.comparisons.toLocaleString()} triplets tested; ${payload.events.length} new consensus hypotheses retained${retainedEvents.length ? ` alongside ${retainedEvents.length} accepted hypotheses` : ""}.`);
+        appendAudit(retainedEvents.length ? "Completed unresolved-sequence rescan" : "Completed full scan", `${payload.comparisons.toLocaleString("en-US")} triplets tested; ${payload.events.length} new consensus hypotheses retained${retainedEvents.length ? ` alongside ${retainedEvents.length} accepted hypotheses` : ""}.`);
         worker.terminate();
         showToast(payload.events.length ? `Scan complete: ${payload.events.length} new consensus event${payload.events.length === 1 ? "" : "s"}` : retainedEvents.length ? "Rescan complete: no additional events passed the filters" : "Scan complete: no events passed the current filters");
       } else if (payload.type === "error") {
@@ -1285,7 +1452,7 @@ export default function Home() {
     if (!currentEvent) return;
     const unchanged = Object.entries(patch).every(([key, value]) => Object.is(currentEvent[key as keyof RdpEvent], value));
     if (unchanged) return;
-    const scientificFields = new Set(["recombinant", "majorParent", "minorParent", "start", "end", "wraps"]);
+    const scientificFields = new Set(["recombinant", "majorParent", "minorParent", "start", "end", "wraps", "groupId"]);
     const makesEvidenceStale = Object.keys(patch).some((key) => scientificFields.has(key));
     const normalizedPatch: Partial<RdpEvent> = makesEvidenceStale ? {
       ...patch,
@@ -1293,21 +1460,46 @@ export default function Home() {
       confidenceEnd: patch.confidenceEnd ?? [patch.end ?? currentEvent.end, patch.end ?? currentEvent.end],
     } : patch;
     const changedFields = Object.keys(patch).filter((key) => key !== "breakpointModel").join(", ");
-    const nextEvents = events.map((event) => event.id === selectedId ? {
-      ...event,
-      ...normalizedPatch,
-      evidenceStale: normalizedPatch.evidenceStale ?? (event.evidenceStale || makesEvidenceStale),
-      history: [...(event.history ?? []), {
-        id: `audit-${Date.now()}-${event.history?.length ?? 0}`,
-        timestamp: new Date().toISOString(),
-        action,
-        summary: changedFields ? `Changed ${changedFields}.` : "Updated the event hypothesis.",
-      }],
-    } : event);
+    const selectedOrder = events.findIndex((event) => event.id === selectedId);
+    const downstreamWarning = `Review-order dependency: an earlier event (E${selectedOrder + 1}) changed; rescan unresolved signals before relying on this characterization.`;
+    const nextEvents = events.map((event, eventIndex) => {
+      if (event.id === selectedId) return {
+        ...event,
+        ...normalizedPatch,
+        evidenceStale: normalizedPatch.evidenceStale ?? (event.evidenceStale || makesEvidenceStale),
+        history: [...(event.history ?? []), {
+          id: `audit-${Date.now()}-${event.history?.length ?? 0}`,
+          timestamp: new Date().toISOString(),
+          action,
+          summary: changedFields ? `Changed ${changedFields}.` : "Updated the event hypothesis.",
+        }],
+      };
+      if (makesEvidenceStale && eventIndex > selectedOrder && event.decision !== "rejected") return {
+        ...event,
+        evidenceStale: true,
+        warnings: event.warnings.includes(downstreamWarning) ? event.warnings : [...event.warnings, downstreamWarning],
+      };
+      return event;
+    });
     setUndoStack((current) => [...current.slice(-99), { label: action, events, selectedId }]);
     setRedoStack([]);
     setEvents(nextEvents);
     appendAudit(action, changedFields ? `Changed ${changedFields}.` : "Updated the event hypothesis.", selectedId);
+  }, [appendAudit, events, selectedId]);
+
+  const setEventDecision = useCallback((eventId: string, decision: EventDecision) => {
+    const currentEvent = events.find((event) => event.id === eventId);
+    if (!currentEvent || currentEvent.decision === decision) return;
+    const action = decision === "accepted" ? "Accepted event" : decision === "rejected" ? "Rejected event" : "Reset review decision";
+    setUndoStack((current) => [...current.slice(-99), { label: action, events, selectedId }]);
+    setRedoStack([]);
+    setEvents((current) => current.map((event) => event.id === eventId ? {
+      ...event,
+      decision,
+      history: [...event.history, { id: `audit-${Date.now()}-${event.history.length}`, timestamp: new Date().toISOString(), action, summary: `Decision changed to ${decision}.` }],
+    } : event));
+    setSelectedId(eventId);
+    appendAudit(action, `Decision changed to ${decision}.`, eventId);
   }, [appendAudit, events, selectedId]);
 
   const recalculateSelected = useCallback(() => {
@@ -1591,8 +1783,8 @@ export default function Home() {
             <section className="dataset-card">
               <div className="dataset-heading"><span className="eyebrow">Dataset</span><div><button type="button" onClick={() => setExamplesOpen(true)}>Examples</button><button type="button" onClick={() => setPasteOpen(true)}>Paste</button></div></div>
               <h2 title={alignment.name}>{alignment.name}</h2>
-              <div className="dataset-stats"><span><b>{alignment.sequences.length}</b> sequences</span><span><b>{alignment.length.toLocaleString()}</b> sites</span><span title={stats.sampled ? "Stratified estimate for responsive large-data loading" : "Exact count"}><b>{stats.sampled ? "≈" : ""}{stats.variableSites.toLocaleString()}</b> variable</span><span title={stats.sampled ? "Stratified sequence/site estimate" : "Exact mean"}><b>{stats.sampled ? "≈" : ""}{(stats.meanIdentity * 100).toFixed(1)}%</b> mean ID</span></div>
-              <div className="quality-line"><i style={{ width: `${Math.max(2, 100 - ((stats.gaps + stats.ambiguities) / (alignment.length * alignment.sequences.length)) * 100)}%` }}/><span>{stats.gaps + stats.ambiguities === 0 ? "No gaps or ambiguities" : `${(stats.gaps + stats.ambiguities).toLocaleString()} gaps / ambiguities`}</span></div>
+              <div className="dataset-stats"><span><b>{alignment.sequences.length}</b> sequences</span><span><b>{alignment.length.toLocaleString("en-US")}</b> sites</span><span title={stats.sampled ? "Stratified estimate for responsive large-data loading" : "Exact count"}><b>{stats.sampled ? "≈" : ""}{stats.variableSites.toLocaleString("en-US")}</b> variable</span><span title={stats.sampled ? "Stratified sequence/site estimate" : "Exact mean"}><b>{stats.sampled ? "≈" : ""}{(stats.meanIdentity * 100).toFixed(1)}%</b> mean ID</span></div>
+              <div className="quality-line"><i style={{ width: `${Math.max(2, 100 - ((stats.gaps + stats.ambiguities) / (alignment.length * alignment.sequences.length)) * 100)}%` }}/><span>{stats.gaps + stats.ambiguities === 0 ? "No gaps or ambiguities" : `${(stats.gaps + stats.ambiguities).toLocaleString("en-US")} gaps / ambiguities`}</span></div>
               <button type="button" className="example-link" onClick={() => setExamplesOpen(true)}>{loadedExampleId ? `Loaded example · ${EXAMPLE_DATASETS.find((example) => example.id === loadedExampleId)?.complexity ?? "synthetic"} · browse library` : "Browse synthetic examples and stress tests"}</button>
             </section>
 
@@ -1627,13 +1819,13 @@ export default function Home() {
               </div></details>
             </section>
           </div>
-          <div className="sidebar-footer"><span>{runState === "running" ? phase : metrics ? `${metrics.comparisons.toLocaleString()} triplets · ${(metrics.elapsedMs / 1000).toFixed(2)} s` : "Ready for local analysis"}</span><small>{lastAutosavedAt ? `Browser autosaved ${new Date(lastAutosavedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : metrics?.engine ?? "Worker-isolated · autosave initializing"}</small></div>
+          <div className="sidebar-footer"><span>{runState === "running" ? phase : metrics ? `${metrics.comparisons.toLocaleString("en-US")} triplets · ${(metrics.elapsedMs / 1000).toFixed(2)} s` : "Ready for local analysis"}</span><small>{lastAutosavedAt ? `Browser autosaved ${formatClockTime(lastAutosavedAt)}` : metrics?.engine ?? "Worker-isolated · autosave initializing"}</small></div>
         </aside>
 
         <section className="workspace">
-          {autosaveCandidate && <div className="autosave-banner"><div><strong>Unsaved local project found</strong><span>{autosaveCandidate.project.alignment.name} · {autosaveCandidate.project.events.length} hypotheses · saved {new Date(autosaveCandidate.savedAt).toLocaleString()}</span></div><button type="button" onClick={dismissAutosave}>Start fresh</button><button type="button" className="restore" onClick={restoreAutosave}>Restore autosave</button></div>}
+          {autosaveCandidate && <div className="autosave-banner"><div><strong>Unsaved local project found</strong><span>{autosaveCandidate.project.alignment.name} · {autosaveCandidate.project.events.length} hypotheses · saved {formatDateTime(autosaveCandidate.savedAt)}</span></div><button type="button" onClick={dismissAutosave}>Start fresh</button><button type="button" className="restore" onClick={restoreAutosave}>Restore autosave</button></div>}
           <nav className="tabs" aria-label="Analysis views">
-            {(["explore", "trees", "alignment", "patterns", "export", "methods"] as Tab[]).map((item) => <button type="button" key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>{item === "explore" ? "Events & evidence" : item === "trees" ? "⑂ Local trees" : item === "alignment" ? "Alignment" : item === "patterns" ? "Patterns & matrices" : item === "export" ? "Export" : "Methods & papers"}{item === "explore" && events.length > 0 && <span>{events.length}</span>}</button>)}
+            {(["explore", "reconstruction", "trees", "alignment", "patterns", "export", "methods"] as Tab[]).map((item) => <button type="button" key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>{item === "explore" ? "Events & evidence" : item === "reconstruction" ? "Global reconstruction" : item === "trees" ? "⑂ Local trees" : item === "alignment" ? "Alignment" : item === "patterns" ? "Patterns & matrices" : item === "export" ? "Export" : "Methods & papers"}{item === "explore" && events.length > 0 && <span>{events.length}</span>}{item === "reconstruction" && events.some((event) => event.evidenceStale) && <span>!</span>}</button>)}
           </nav>
 
           <div className="workspace-content">
@@ -1649,6 +1841,8 @@ export default function Home() {
               <Panel title="Event hypotheses" action={<div className="table-actions"><button className="small-button" type="button" onClick={createManualEvent}>＋ Manual event</button><button className="small-button" type="button" onClick={() => exportResults("csv")}><Icon name="download" size={14}/> CSV</button></div>}><EventTable alignment={alignment} events={events} selectedId={selectedId} onSelect={setSelectedId}/></Panel>
             </>}
 
+            {tab === "reconstruction" && <ReconstructionWorkspace alignment={alignment} events={events} selectedId={selectedId} onSelect={(id, view = "explore") => { setSelectedId(id); setTab(view); }} onDecision={setEventDecision} onRescan={runIterativeAnalysis} rescanning={runState === "running"}/>}
+
             {tab === "trees" && <LocalTrees alignment={alignment} events={events} event={selectedEvent} onSelectEvent={setSelectedId}/>}
 
             {tab === "alignment" && <>
@@ -1656,7 +1850,7 @@ export default function Home() {
               <AnnotationPanel alignment={alignment} onOpen={() => annotationRef.current?.click()}/>
               <Panel title="Sequence roles & reference groups" action={<div className="role-actions"><input className="role-filter" aria-label="Filter sequence roles" placeholder="Find a sequence…" value={roleFilter} onChange={(event) => setRoleFilter(event.target.value)}/><button type="button" className="small-button" onClick={autoGroupReferences}>Auto-group by name</button></div>}>
                 <div className="role-help">Groups diversify the fast parent shortlist. References can also be tested as recombinants from Advanced controls.</div>
-                <div className="role-list">{matchingRoleRows.slice(0, 500).map(({ record, index }) => <div key={`${record.name}-${index}`}><span className={`role-dot ${record.role ?? "both"}`}>{record.role === "query" ? "Q" : record.role === "reference" ? "R" : "B"}</span><b>{record.name}</b><input className="reference-group-input" aria-label={`Reference group for ${record.name}`} placeholder="Unassigned group" value={record.referenceGroup ?? ""} disabled={record.role === "query"} onChange={(value) => setAlignment((current) => ({ ...current, sequences: current.sequences.map((candidate, candidateIndex) => candidateIndex === index ? { ...candidate, referenceGroup: value.target.value || undefined } : candidate) }))}/><code>{record.sequence.length.toLocaleString()} nt</code><button type="button" onClick={() => setAlignment((current) => ({ ...current, sequences: current.sequences.map((candidate, candidateIndex) => candidateIndex === index ? { ...candidate, role: candidate.role === "query" ? "reference" : candidate.role === "reference" ? "both" : "query" } : candidate) }))}>{record.role === "query" ? "Query" : record.role === "reference" ? "Reference" : "Both"}</button></div>)}</div>
+                <div className="role-list">{matchingRoleRows.slice(0, 500).map(({ record, index }) => <div key={`${record.name}-${index}`}><span className={`role-dot ${record.role ?? "both"}`}>{record.role === "query" ? "Q" : record.role === "reference" ? "R" : "B"}</span><b>{record.name}</b><input className="reference-group-input" aria-label={`Reference group for ${record.name}`} placeholder="Unassigned group" value={record.referenceGroup ?? ""} disabled={record.role === "query"} onChange={(value) => setAlignment((current) => ({ ...current, sequences: current.sequences.map((candidate, candidateIndex) => candidateIndex === index ? { ...candidate, referenceGroup: value.target.value || undefined } : candidate) }))}/><code>{record.sequence.length.toLocaleString("en-US")} nt</code><button type="button" onClick={() => setAlignment((current) => ({ ...current, sequences: current.sequences.map((candidate, candidateIndex) => candidateIndex === index ? { ...candidate, role: candidate.role === "query" ? "reference" : candidate.role === "reference" ? "both" : "query" } : candidate) }))}>{record.role === "query" ? "Query" : record.role === "reference" ? "Reference" : "Both"}</button></div>)}</div>
                 {matchingRoleRows.length > 500 && <p className="role-overflow">Showing the first 500 matches. Refine the sequence-name filter to edit another role.</p>}
               </Panel>
             </>}
@@ -1670,7 +1864,7 @@ export default function Home() {
                   const count = events.filter((event) => event.decision !== "rejected" && ((event.start >= start && event.start < end) || (event.end >= start && event.end < end))).length;
                   const max = Math.max(1, ...Array.from({ length: 48 }, (_, other) => events.filter((event) => event.decision !== "rejected" && ((event.start >= (other / 48) * alignment.length && event.start < ((other + 1) / 48) * alignment.length) || (event.end >= (other / 48) * alignment.length && event.end < ((other + 1) / 48) * alignment.length))).length));
                   return <i key={bin} title={`${Math.round(start) + 1}–${Math.round(end)}: ${count} breakpoints`} style={{ height: `${Math.max(2, (count / max) * 100)}%` }}/>} )}</div>
-                <div className="density-axis"><span>1</span><span>{Math.round(alignment.length / 2).toLocaleString()}</span><span>{alignment.length.toLocaleString()} nt</span></div>
+                <div className="density-axis"><span>1</span><span>{Math.round(alignment.length / 2).toLocaleString("en-US")}</span><span>{alignment.length.toLocaleString("en-US")} nt</span></div>
                 <div className="hotspot-result"><span><b>{hotspot.observedMaximum}</b> maximum breakpoints / bin</span><span><b>{hotspot.expectedPerBin.toFixed(2)}</b> expected under uniform null</span><span><b>{formatP(hotspot.empiricalP)}</b> empirical hotspot p · {hotspot.replicates} replicates</span></div>
               </Panel>
               <Panel title="Breakpoint pair matrix" action={<span className="panel-caption">Circular-aware · first 32 retained events</span>}><BreakpointMatrix alignment={alignment} events={events} onSelect={setSelectedId}/></Panel>
@@ -1687,7 +1881,7 @@ export default function Home() {
                 <article><span className="export-icon">÷</span><h3>Split mosaic sequences</h3><p>Disassemble recombinants at in-scope breakpoints.</p><button disabled={!exportableEvents.length} type="button" onClick={() => exportClean("split")}><Icon name="download"/> FASTA</button></article>
                 <article><span className="export-icon">▤</span><h3>Breakpoint partitions</h3><p>Create non-overlapping sub-alignments bounded by in-scope breakpoints.</p><button disabled={!exportableEvents.length} type="button" onClick={() => exportClean("partition")}><Icon name="download"/> FASTA set</button></article>
               </div>
-              <Panel title="Results & provenance"><><div className="provenance-actions"><button type="button" onClick={() => exportResults("json")}><Icon name="download"/> Restorable project <small>.rdpweb 0.5 · all events + immutable project ledger</small></button><button type="button" onClick={() => exportResults("csv")}><Icon name="download"/> Event table CSV <small>all hypotheses, one event per row</small></button><button type="button" onClick={() => download("rdp-web-input.fasta", toFasta(alignment.sequences))}><Icon name="download"/> Input FASTA <small>normalized alignment</small></button></div><div className="run-provenance"><span><b>{auditLog.length}</b> project audit entries</span>{metrics && <><span><b>{metrics.comparisons.toLocaleString()}</b> triplets</span><span><b>{metrics.elapsedMs.toFixed(1)} ms</b> wall time</span><span><b>{metrics.matrixMode ?? "exact"}</b> parent screen</span>{metrics.timing && <span><b>{metrics.timing.distanceMs.toFixed(1)} / {metrics.timing.scanMs.toFixed(1)} / {metrics.timing.statisticsMs.toFixed(1)} / {(metrics.timing.diagnosticsMs ?? 0).toFixed(1)} ms</b> distance / scan / evidence / diagnostics</span>}</>}</div><details className="project-ledger"><summary>Project audit ledger · {auditLog.length} entries</summary><div>{[...auditLog].reverse().slice(0, 100).map((entry) => <article key={entry.id}><div><b>{entry.action}</b>{entry.eventSnapshot && <em>event tombstone saved</em>}</div><span>{entry.summary}</span><time dateTime={entry.timestamp}>{new Date(entry.timestamp).toLocaleString()}</time></article>)}</div></details></></Panel>
+              <Panel title="Results & provenance"><><div className="provenance-actions"><button type="button" onClick={() => exportResults("json")}><Icon name="download"/> Restorable project <small>.rdpweb schema 0.5 · all events + immutable project ledger</small></button><button type="button" onClick={() => exportResults("csv")}><Icon name="download"/> Event table CSV <small>all hypotheses, one event per row</small></button><button type="button" onClick={() => download("rdp-web-input.fasta", toFasta(alignment.sequences))}><Icon name="download"/> Input FASTA <small>normalized alignment</small></button></div><div className="run-provenance"><span><b>{auditLog.length}</b> project audit entries</span>{metrics && <><span><b>{metrics.comparisons.toLocaleString("en-US")}</b> triplets</span><span><b>{metrics.elapsedMs.toFixed(1)} ms</b> wall time</span><span><b>{metrics.matrixMode ?? "exact"}</b> parent screen</span>{metrics.timing && <span><b>{metrics.timing.distanceMs.toFixed(1)} / {metrics.timing.scanMs.toFixed(1)} / {metrics.timing.statisticsMs.toFixed(1)} / {(metrics.timing.diagnosticsMs ?? 0).toFixed(1)} ms</b> distance / scan / evidence / diagnostics</span>}</>}</div><details className="project-ledger"><summary>Project audit ledger · {auditLog.length} entries</summary><div>{[...auditLog].reverse().slice(0, 100).map((entry) => <article key={entry.id}><div><b>{entry.action}</b>{entry.eventSnapshot && <em>event tombstone saved</em>}</div><span>{entry.summary}</span><time dateTime={entry.timestamp}>{formatDateTime(entry.timestamp)}</time></article>)}</div></details></></Panel>
             </>}
 
             {tab === "methods" && <>
@@ -1714,17 +1908,19 @@ export default function Home() {
       {examplesOpen && <ExampleLibrary onClose={() => setExamplesOpen(false)} onLoad={loadExample}/>}
       {pasteOpen && <div className="modal-backdrop" role="presentation" onMouseDown={() => setPasteOpen(false)}><section className="modal paste-modal" role="dialog" aria-modal="true" aria-labelledby="paste-title" onMouseDown={(event) => event.stopPropagation()}><button className="modal-close" type="button" onClick={() => setPasteOpen(false)} aria-label="Close"><Icon name="close"/></button><span className="eyebrow">Local import</span><h2 id="paste-title">Paste an aligned dataset</h2><p>FASTA, CLUSTAL, sequential/interleaved PHYLIP, and NEXUS MATRIX are recognized. Sequences are parsed in your browser.</p><textarea autoFocus spellCheck={false} value={pasteText} onChange={(event) => setPasteText(event.target.value)} placeholder={">sequence_A\nACGTACGT…\n>sequence_B\nACGTTCGT…"}/><div className="modal-actions"><button type="button" className="ghost-button" onClick={() => setPasteOpen(false)}>Cancel</button><button type="button" className="run-button" onClick={() => { try { loadAlignment(parseAlignment(pasteText)); setPasteOpen(false); setPasteText(""); } catch (error) { showToast(error instanceof Error ? error.message : "Could not parse alignment"); } }}>Load alignment</button></div></section></div>}
 
-      {tutorialOpen && <div className="modal-backdrop" role="presentation" onMouseDown={() => setTutorialOpen(false)}><section className="modal tutorial-modal" role="dialog" aria-modal="true" aria-labelledby="tutorial-title" onMouseDown={(event) => event.stopPropagation()}><button className="modal-close" type="button" onClick={() => setTutorialOpen(false)} aria-label="Close"><Icon name="close"/></button><div className="tutorial-rail">{["Load", "Scan", "Verify", "Export"].map((step, index) => <button type="button" key={step} className={index === tutorialStep ? "active" : index < tutorialStep ? "done" : ""} onClick={() => setTutorialStep(index)}><span>{index < tutorialStep ? "✓" : index + 1}</span>{step}</button>)}</div><div className="tutorial-body"><span className="eyebrow">RDP5-style workflow · {tutorialStep + 1}/4</span><h2 id="tutorial-title">{["Start from a defensible alignment.", "Screen with multiple signals.", "Treat every event as a hypothesis.", "Remove the signal you reviewed."][tutorialStep]}</h2><p>{[
+      {tutorialOpen && <div className="modal-backdrop" role="presentation" onMouseDown={() => setTutorialOpen(false)}><section className="modal tutorial-modal" role="dialog" aria-modal="true" aria-labelledby="tutorial-title" onMouseDown={(event) => event.stopPropagation()}><button className="modal-close" type="button" onClick={() => setTutorialOpen(false)} aria-label="Close"><Icon name="close"/></button><div className="tutorial-rail">{["Load", "Scan", "Verify", "Reconstruct", "Export"].map((step, index) => <button type="button" key={step} className={index === tutorialStep ? "active" : index < tutorialStep ? "done" : ""} onClick={() => setTutorialStep(index)}><span>{index < tutorialStep ? "✓" : index + 1}</span>{step}</button>)}</div><div className="tutorial-body"><span className="eyebrow">RDP5-style workflow · {tutorialStep + 1}/5</span><h2 id="tutorial-title">{["Start from a defensible alignment.", "Screen with multiple signals.", "Treat every event as a hypothesis.", "Reconstruct the global mosaic in order.", "Remove only the signals you retained."][tutorialStep]}</h2><p>{[
         "Use homologous, pre-aligned nucleotide sequences. Inspect divergent and gap-rich regions: misalignment is a major source of false positives. Mark query/reference roles only when that design is biologically justified.",
         "The fast mode prunes parent candidates with a WebAssembly distance pass before triplet scans. Use exhaustive mode for small definitive analyses; require concordance across methods and retain multiple-testing correction.",
-        "For each event, compare identity curves, breakpoint localization, parental assignments, local topologies, method p-values, and alignment quality. Accept, reject, or edit—then record the rationale.",
-        "Choose whether to remove recombinant sequences, mask fragments, split mosaics, or partition the alignment. Export the project JSON with parameters and review decisions for provenance.",
-      ][tutorialStep]}</p><div className="tutorial-tip"><b>{["Current dataset", "Performance", "Keyboard", "Reproducibility"][tutorialStep]}</b><span>{[
-        `${alignment.sequences.length} sequences × ${alignment.length.toLocaleString()} sites are loaded; the included tutorial has a known tract at 783–1,538.`,
+        "For each event, compare the parent-affinity alignment, breakpoint localization, parental assignments, all local trees, method p-values, and alignment quality. Accept, reject, or edit—then record the rationale.",
+        "Review the strongest/earliest characterized event first. Group co-recombinant descendants, inspect possible overprinting and recombinant-parent dependencies, and rescan unresolved signals after any scientific edit.",
+        "Choose whether to remove recombinant sequences, mask fragments, split mosaics, or partition the alignment. Export the restorable project with parameters, rejected alternatives, and review decisions for provenance.",
+      ][tutorialStep]}</p><div className="tutorial-tip"><b>{["Current dataset", "Performance", "Keyboard", "Review order", "Reproducibility"][tutorialStep]}</b><span>{[
+        `${alignment.sequences.length} sequences × ${alignment.length.toLocaleString("en-US")} sites are loaded; the included tutorial has a known tract at 783–1,538.`,
         "Heavy computation runs in a worker, so plots and controls stay responsive. Stop cancels immediately.",
         "J/K: next/previous event · A: accept · X: reject · ⌘/Ctrl+Enter: run.",
+        "An earlier edit can invalidate later characterizations. The Global reconstruction tab marks that dependency and keeps stale events out of safe exports.",
         "The project JSON records the normalized alignment, options, evidence, warnings, notes, and decisions.",
-      ][tutorialStep]}</span></div><div className="modal-actions"><button type="button" className="ghost-button" disabled={tutorialStep === 0} onClick={() => setTutorialStep((current) => Math.max(0, current - 1))}>Back</button>{tutorialStep < 3 ? <button type="button" className="run-button" onClick={() => setTutorialStep((current) => current + 1)}>Continue <span>→</span></button> : <button type="button" className="run-button" onClick={() => { setTutorialOpen(false); setTab("explore"); }}>Open workbench</button>}</div></div></section></div>}
+      ][tutorialStep]}</span></div><div className="modal-actions"><button type="button" className="ghost-button" disabled={tutorialStep === 0} onClick={() => setTutorialStep((current) => Math.max(0, current - 1))}>Back</button>{tutorialStep < 4 ? <button type="button" className="run-button" onClick={() => setTutorialStep((current) => current + 1)}>Continue <span>→</span></button> : <button type="button" className="run-button" onClick={() => { setTutorialOpen(false); setTab("reconstruction"); }}>Open reconstruction</button>}</div></div></section></div>}
 
       {dragging && <div className="drop-overlay"><Icon name="upload" size={32}/><strong>Drop data or a saved project to open it locally</strong><span>FASTA · CLUSTAL · PHYLIP · NEXUS · RDPWEB</span></div>}
       {toast && <div className="toast" role="status">{toast}</div>}

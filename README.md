@@ -4,10 +4,13 @@ RDP Web is a local-first, browser-based recombination analysis workbench. It
 combines optimized WebAssembly kernels with an interactive workflow for
 alignment/project import, method-specific screening, event verification,
 breakpoint editing, matrices/topology checks, and recombination-aware exports.
-Version 0.5 adds a dedicated local-tree explorer, a truth-annotated synthetic
-dataset library, explicit method-by-method result interpretation, reliable
-scrolling and responsive navigation, safe-by-default fresh/accepted exports,
-scan-scope event recalculation, and a project-level audit ledger. The exact
+Version 0.6 adds a collection-level event reconstruction workspace, arbitrary
+multi-parent alignment highlighting, linked and continuously connected local
+trees, full-screen analysis panels, deterministic hydration-safe rendering,
+and a single reliable workspace scrolling model. The truth-annotated synthetic
+dataset library, method-by-method result interpretation, safe-by-default
+fresh/accepted exports, scan-scope event recalculation, and project audit ledger
+remain available. The exact
 bounded 3SEQ calibration, seeded p-distance bootstrapping, challenge
 diagnostics, breakpoint matrices, annotation workflows, and WebAssembly worker
 architecture remain available.
@@ -55,6 +58,7 @@ edits.
 
 ```sh
 npm run test:wasm
+npm run test:ui
 npm run bench:wasm -- 100 10000
 npm run lint
 ```
@@ -78,7 +82,9 @@ bootstraps, sampled large-dataset parent selection, windowless two-state HMM
 breakpoint localization, origin-spanning circular events, rate-variation and
 gap-block challenges, exact manual-event recalculation, NJ/hotspot routines, a
 513-sequence large-path integration fixture, annotation-aware masking, and
-lossless `.rdpweb` project round-trips.
+lossless `.rdpweb` project round-trips, parent-affinity classification,
+ordered/nested event reconstruction, connected tree geometry, global scroll
+ownership, full-screen panel controls, and deterministic server rendering.
 
 ## Current status
 
