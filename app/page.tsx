@@ -50,6 +50,12 @@ import {
 import { formatClockTime, formatDateTime, formatInteger } from "./format";
 import { buildReconstructionModel, type ReconstructionRelationship } from "./reconstruction";
 import { layoutNeighborJoiningTree } from "./tree-layout";
+import {
+  computeBreakpointPairDensity,
+  computeLocalDiscordanceMatrices,
+  computeRegionSeparationMatrices,
+  eventContainsPosition,
+} from "./pattern-matrices";
 
 type Tab = "explore" | "reconstruction" | "trees" | "alignment" | "patterns" | "export" | "methods";
 type RunState = "idle" | "running" | "complete" | "error";
@@ -437,10 +443,20 @@ function Overview({ alignment, events, selectedId, onSelect }: {
   selectedId: string | null;
   onSelect: (id: string) => void;
 }) {
-  const displayedIndexes = [...new Set([
-    ...events.map((event) => event.recombinant),
+  const eventsByRecombinant = useMemo(() => {
+    const index = new Map<number, RdpEvent[]>();
+    events.forEach((event) => {
+      if (event.decision === "rejected") return;
+      const existing = index.get(event.recombinant);
+      if (existing) existing.push(event);
+      else index.set(event.recombinant, [event]);
+    });
+    return index;
+  }, [events]);
+  const displayedIndexes = useMemo(() => [...new Set([
+    ...eventsByRecombinant.keys(),
     ...Array.from({ length: Math.min(400, alignment.sequences.length) }, (_, index) => index),
-  ])].sort((left, right) => left - right);
+  ])].sort((left, right) => left - right), [alignment.sequences.length, eventsByRecombinant]);
   return (
     <div className="overview">
       <div className="overview-axis">
@@ -449,7 +465,7 @@ function Overview({ alignment, events, selectedId, onSelect }: {
       <div className="overview-scroll">
         {displayedIndexes.map((index) => {
           const sequence = alignment.sequences[index];
-          const sequenceEvents = events.filter((event) => event.recombinant === index && event.decision !== "rejected");
+          const sequenceEvents = eventsByRecombinant.get(index) ?? [];
           return (
             <div className="sequence-track" key={`${sequence.name}-${index}`}>
               <button className="sequence-name" type="button" title={sequence.name}>{sequence.name}</button>
@@ -802,22 +818,238 @@ function AnnotationPanel({ alignment, onOpen }: { alignment: AlignmentData; onOp
   </Panel>;
 }
 
+interface HeatmapLayer {
+  values: Float32Array;
+  label: string;
+  minimum: number;
+  maximum: number;
+  colors: string[];
+  logarithmic?: boolean;
+  format: (value: number) => string;
+}
+
+const COUNT_COLORS = ["#f7faf8", "#dcebe7", "#9bcfc3", "#4e9d97", "#356a82", "#26345d"];
+const DISCORDANCE_COLORS = ["#f7f9f8", "#e2e2ec", "#b9b3d5", "#8179b4", "#594789", "#382757"];
+const RESIDUAL_COLORS = ["#b64d72", "#e59aaa", "#f1d8d8", "#eef1ef", "#b8ded8", "#5ea99f", "#176d78"];
+
+function parseHexColor(color: string): [number, number, number] {
+  return [Number.parseInt(color.slice(1, 3), 16), Number.parseInt(color.slice(3, 5), 16), Number.parseInt(color.slice(5, 7), 16)];
+}
+
+function interpolateColors(colors: string[], fraction: number): string {
+  const bounded = Math.max(0, Math.min(1, fraction));
+  const position = bounded * (colors.length - 1);
+  const leftIndex = Math.min(colors.length - 1, Math.floor(position));
+  const rightIndex = Math.min(colors.length - 1, leftIndex + 1);
+  const local = position - leftIndex;
+  const left = parseHexColor(colors[leftIndex]);
+  const right = parseHexColor(colors[rightIndex]);
+  const channels = left.map((channel, index) => Math.round(channel + (right[index] - channel) * local));
+  return `rgb(${channels[0]} ${channels[1]} ${channels[2]})`;
+}
+
+function layerColor(layer: HeatmapLayer, value: number): string {
+  const span = Math.max(1e-12, layer.maximum - layer.minimum);
+  const linear = Math.max(0, Math.min(1, (value - layer.minimum) / span));
+  const normalized = layer.logarithmic && layer.minimum === 0
+    ? Math.log1p(Math.max(0, value)) / Math.log1p(Math.max(1e-12, layer.maximum))
+    : linear;
+  return interpolateColors(layer.colors, normalized);
+}
+
+function matrixBinLabel(bin: number, resolution: number, length: number): string {
+  const start = Math.floor((bin / resolution) * length) + 1;
+  const end = Math.max(start, Math.floor(((bin + 1) / resolution) * length));
+  return `${formatInteger(start)}–${formatInteger(end)}`;
+}
+
+function GenomePositionHeatmap({
+  resolution,
+  length,
+  upperLayer,
+  lowerLayer,
+  ariaLabel,
+  onActivate,
+}: {
+  resolution: number;
+  length: number;
+  upperLayer: HeatmapLayer;
+  lowerLayer?: HeatmapLayer;
+  ariaLabel: string;
+  onActivate?: (row: number, column: number) => void;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [activeCell, setActiveCell] = useState<{ row: number; column: number } | null>(null);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const draw = () => {
+      const logicalSize = Math.max(420, Math.round(canvas.getBoundingClientRect().width || 640));
+      const pixelRatio = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+      canvas.width = Math.round(logicalSize * pixelRatio);
+      canvas.height = Math.round(logicalSize * pixelRatio);
+      const context = canvas.getContext("2d", { alpha: false });
+      if (!context) return;
+      context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+      context.fillStyle = "#ffffff";
+      context.fillRect(0, 0, logicalSize, logicalSize);
+      const cellSize = logicalSize / resolution;
+      for (let row = 0; row < resolution; row += 1) {
+        for (let column = 0; column < resolution; column += 1) {
+          if (lowerLayer && row === column) {
+            context.fillStyle = "#ffffff";
+          } else {
+            const layer = lowerLayer && row > column ? lowerLayer : upperLayer;
+            context.fillStyle = layerColor(layer, layer.values[row * resolution + column] ?? 0);
+          }
+          context.fillRect(column * cellSize, row * cellSize, Math.ceil(cellSize + 0.15), Math.ceil(cellSize + 0.15));
+        }
+      }
+      if (lowerLayer) {
+        context.strokeStyle = "rgb(255 255 255 / 92%)";
+        context.lineWidth = Math.max(2, logicalSize / 180);
+        context.beginPath();
+        context.moveTo(0, 0);
+        context.lineTo(logicalSize, logicalSize);
+        context.stroke();
+      }
+    };
+    draw();
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(draw);
+    observer?.observe(canvas);
+    window.addEventListener("resize", draw);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", draw);
+    };
+  }, [lowerLayer, resolution, upperLayer]);
+
+  const updatePointer = (clientX: number, clientY: number) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const bounds = canvas.getBoundingClientRect();
+    const column = Math.max(0, Math.min(resolution - 1, Math.floor(((clientX - bounds.left) / bounds.width) * resolution)));
+    const row = Math.max(0, Math.min(resolution - 1, Math.floor(((clientY - bounds.top) / bounds.height) * resolution)));
+    setActiveCell({ row, column });
+  };
+  const activeLayer = activeCell
+    ? lowerLayer && activeCell.row > activeCell.column ? lowerLayer : upperLayer
+    : null;
+  const activeValue = activeCell && activeLayer ? activeLayer.values[activeCell.row * resolution + activeCell.column] ?? 0 : null;
+  const ticks = [0, 0.25, 0.5, 0.75, 1].map((fraction) => formatInteger(Math.max(1, Math.round(fraction * length))));
+  return <div className="genome-heatmap">
+    <div className="genome-heatmap-axis top" aria-hidden="true">{ticks.map((tick, index) => <span key={`${tick}-${index}`}>{tick}</span>)}</div>
+    <div className="genome-heatmap-y-axis" aria-hidden="true">{ticks.map((tick, index) => <span key={`${tick}-${index}`}>{tick}</span>)}</div>
+    <div className="genome-heatmap-canvas-wrap">
+      <canvas
+        ref={canvasRef}
+        className="genome-heatmap-canvas"
+        role="img"
+        tabIndex={0}
+        aria-label={ariaLabel}
+        onPointerMove={(event) => updatePointer(event.clientX, event.clientY)}
+        onPointerLeave={() => setActiveCell(null)}
+        onClick={() => activeCell && onActivate?.(activeCell.row, activeCell.column)}
+        onFocus={() => setActiveCell((current) => current ?? { row: Math.floor(resolution / 2), column: Math.floor(resolution / 2) })}
+        onKeyDown={(event) => {
+          const current = activeCell ?? { row: Math.floor(resolution / 2), column: Math.floor(resolution / 2) };
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            onActivate?.(current.row, current.column);
+            return;
+          }
+          const movement: Record<string, [number, number]> = { ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] };
+          const delta = movement[event.key];
+          if (!delta) return;
+          event.preventDefault();
+          setActiveCell({ row: Math.max(0, Math.min(resolution - 1, current.row + delta[0])), column: Math.max(0, Math.min(resolution - 1, current.column + delta[1])) });
+        }}
+      >Genome-position matrix. Use a browser with canvas support.</canvas>
+      {activeCell && <><i className="matrix-crosshair horizontal" style={{ top: `${((activeCell.row + 0.5) / resolution) * 100}%` }}/><i className="matrix-crosshair vertical" style={{ left: `${((activeCell.column + 0.5) / resolution) * 100}%` }}/></>}
+    </div>
+    <div className="genome-heatmap-readout" aria-live="polite">{activeCell && activeLayer && activeValue !== null ? <><b>{activeLayer.label}</b><span>x {matrixBinLabel(activeCell.column, resolution, length)}</span><span>y {matrixBinLabel(activeCell.row, resolution, length)}</span><code>{activeLayer.format(activeValue)}</code>{onActivate && <em>Click / Enter to select a matching event</em>}</> : <><b>Inspect the matrix</b><span>Hover, focus, or use arrow keys for exact window coordinates.</span></>}</div>
+    <div className={`genome-heatmap-legends ${lowerLayer ? "split" : ""}`}>
+      <div><span>{upperLayer.label}</span><i style={{ background: `linear-gradient(90deg, ${upperLayer.colors.join(", ")})` }}/><small>{upperLayer.format(upperLayer.minimum)}</small><small>{upperLayer.format(upperLayer.maximum)}</small></div>
+      {lowerLayer && <div><span>{lowerLayer.label}</span><i style={{ background: `linear-gradient(90deg, ${lowerLayer.colors.join(", ")})` }}/><small>{lowerLayer.format(lowerLayer.minimum)}</small><small>{lowerLayer.format(lowerLayer.maximum)}</small></div>}
+    </div>
+  </div>;
+}
+
+function RdpPatternMatrices({ alignment, events, onSelect }: { alignment: AlignmentData; events: RdpEvent[]; onSelect: (id: string) => void }) {
+  const [resolution, setResolution] = useState<48 | 64 | 96>(96);
+  const [scope, setScope] = useState<"retained" | "accepted">("retained");
+  const [cohortSize, setCohortSize] = useState<12 | 18 | 24>(18);
+  const scopedEvents = useMemo(() => events.filter((event) => event.decision !== "rejected" && (scope === "retained" || (event.decision === "accepted" && !event.evidenceStale))), [events, scope]);
+  const effectiveResolution = scopedEvents.length > 2_000 ? Math.min(48, resolution) : scopedEvents.length > 500 ? Math.min(64, resolution) : resolution;
+  const breakpointPairs = useMemo(() => computeBreakpointPairDensity(scopedEvents, alignment.length, effectiveResolution), [alignment.length, effectiveResolution, scopedEvents]);
+  const regionSeparation = useMemo(() => computeRegionSeparationMatrices(scopedEvents, alignment.length, effectiveResolution), [alignment.length, effectiveResolution, scopedEvents]);
+  const localDiscordance = useMemo(() => computeLocalDiscordanceMatrices(alignment.sequences.map((record) => record.sequence), alignment.length, effectiveResolution, cohortSize), [alignment.length, alignment.sequences, cohortSize, effectiveResolution]);
+  const boundaryBin = (position: number) => Math.max(0, Math.min(effectiveResolution - 1, Math.floor((Math.max(0, Math.min(alignment.length - 1, position)) / Math.max(1, alignment.length)) * effectiveResolution)));
+  const selectBreakpointPair = (row: number, column: number) => {
+    const match = scopedEvents.find((event) => {
+      const start = boundaryBin(event.start);
+      const end = boundaryBin(event.end >= alignment.length ? alignment.length - 1 : event.end);
+      return (start === row && end === column) || (start === column && end === row);
+    });
+    if (match) onSelect(match.id);
+  };
+  const selectSeparatingEvent = (row: number, column: number) => {
+    const rowPosition = ((row + 0.5) / effectiveResolution) * alignment.length;
+    const columnPosition = ((column + 0.5) / effectiveResolution) * alignment.length;
+    const match = scopedEvents.find((event) => eventContainsPosition(event, rowPosition) !== eventContainsPosition(event, columnPosition));
+    if (match) onSelect(match.id);
+  };
+  const integer = (value: number) => `${formatInteger(Math.round(value))} event${Math.round(value) === 1 ? "" : "s"}`;
+  const signed = (value: number) => `${value >= 0 ? "+" : ""}${value.toFixed(2)} z`;
+  return <>
+    <div className="matrix-suite-header">
+      <div><span className="eyebrow">RDP-style genome pattern matrices</span><h1>Read recombination across genomic coordinates—not event IDs.</h1><p>The matrix semantics and triangular layouts follow the dense views in RDP4 Figure 2. The palettes are perceptually ordered and avoid the original rainbow scale.</p></div>
+      <div className="matrix-suite-controls">
+        <label><span>Event scope</span><select value={scope} onChange={(event) => setScope(event.target.value as "retained" | "accepted")}><option value="retained">All retained hypotheses</option><option value="accepted">Accepted + fresh only</option></select></label>
+        <label><span>Matrix bins</span><select value={resolution} onChange={(event) => setResolution(Number(event.target.value) as 48 | 64 | 96)}><option value={48}>48 · fast overview</option><option value={64}>64 · balanced</option><option value={96}>96 · high density</option></select></label>
+        <label><span>Distance cohort</span><select value={cohortSize} onChange={(event) => setCohortSize(Number(event.target.value) as 12 | 18 | 24)}><option value={12}>12 sequences</option><option value={18}>18 sequences</option><option value={24}>24 sequences</option></select></label>
+        <a href="https://academic.oup.com/ve/article/1/1/vev003/2568683" target="_blank" rel="noreferrer">RDP4 Figure 2 ↗</a>
+      </div>
+      <div className="matrix-suite-status"><span><b>{formatInteger(scopedEvents.length)}</b> events aggregated</span><span><b>{effectiveResolution} × {effectiveResolution}</b> genomic bins</span><span><b>{formatInteger(localDiscordance.pairCount)}</b> sequence pairs / window</span>{effectiveResolution !== resolution && <span className="limited"><b>Adaptive cap</b> resolution reduced for interactive speed</span>}</div>
+    </div>
+    <div className="matrix-suite-grid">
+      <Panel title="Breakpoint-pair density" action={<span className="panel-caption">RDP4 Fig. 2c semantics · symmetric endpoint counts</span>}>
+        <div className="matrix-card-body">
+          <GenomePositionHeatmap resolution={effectiveResolution} length={alignment.length} ariaLabel="Breakpoint-pair counts by genomic position on both axes" upperLayer={{ values: breakpointPairs.values, label: "Breakpoint-pair count", minimum: 0, maximum: Math.max(1, breakpointPairs.maximum), colors: COUNT_COLORS, logarithmic: true, format: integer }} onActivate={selectBreakpointPair}/>
+          <div className="matrix-interpretation"><b>Paired hotspots become symmetric islands.</b><p>Every event contributes its inferred start/end bin and the mirrored end/start bin. Empty space stays quiet; single events remain visible through logarithmic colour scaling.</p></div>
+        </div>
+      </Panel>
+      <Panel title="Recombination region separation" action={<span className="panel-caption">Observed counts above · tract-placement residuals below</span>}>
+        <div className="matrix-card-body">
+          <GenomePositionHeatmap resolution={effectiveResolution} length={alignment.length} ariaLabel="Split triangular recombination region matrix by genomic position" upperLayer={{ values: regionSeparation.observed, label: "Upper · events separating windows", minimum: 0, maximum: Math.max(1, regionSeparation.maximumObserved), colors: COUNT_COLORS, logarithmic: true, format: integer }} lowerLayer={{ values: regionSeparation.standardizedResidual, label: "Lower · excess / deficit vs random tracts", minimum: -Math.max(2.5, Math.min(6, regionSeparation.maximumAbsoluteResidual)), maximum: Math.max(2.5, Math.min(6, regionSeparation.maximumAbsoluteResidual)), colors: RESIDUAL_COLORS, format: signed }} onActivate={selectSeparatingEvent}/>
+          <div className="matrix-interpretation"><b>Upper triangle is observed; lower triangle is comparative.</b><p>The lower half uses a circular random-placement null that preserves every tract length. Teal means more separation than expected; rose means less. It is a fast analytical analogue, not a claim of numerical RDP4 permutation parity.</p></div>
+        </div>
+      </Panel>
+      <Panel title="Local distance-profile discordance" className="matrix-wide" action={<span className="panel-caption">Fast PDDM-style phylogenetic signal proxy</span>}>
+        <div className="matrix-card-body wide">
+          <GenomePositionHeatmap resolution={effectiveResolution} length={alignment.length} ariaLabel="Split triangular local distance-profile discordance matrix by genomic position" upperLayer={{ values: localDiscordance.rmsDeviation, label: "Upper · RMS p-distance deviation", minimum: 0, maximum: Math.max(0.001, localDiscordance.maximumRmsDeviation), colors: DISCORDANCE_COLORS, format: (value) => value.toFixed(4) }} lowerLayer={{ values: localDiscordance.correlationLoss, label: "Lower · 1 − profile correlation", minimum: 0, maximum: Math.max(0.05, localDiscordance.maximumCorrelationLoss), colors: DISCORDANCE_COLORS, format: (value) => value.toFixed(3) }}/>
+          <div className="matrix-interpretation"><b>Blocks expose regions with internally consistent but mutually discordant ancestry signals.</b><p>Each genomic window is represented by {formatInteger(localDiscordance.pairCount)} sampled pairwise distance values from {localDiscordance.sequenceIndexes.length} evenly distributed sequences and at most {localDiscordance.sampledSitesPerWindow} sites. RDP4 Figure 2e used SH and Robinson–Foulds matrices; this browser-fast view deliberately labels its distance-profile proxies.</p></div>
+        </div>
+      </Panel>
+    </div>
+  </>;
+}
+
 function DistanceMatrix({ alignment, matrix }: { alignment: AlignmentData; matrix: number[] }) {
-  const count = Math.min(24, alignment.sequences.length);
-  const fullMatrix = matrix.length === alignment.sequences.length ** 2;
-  const compactMatrix = matrix.length === count ** 2;
+  const sourceDimension = Number.isInteger(Math.sqrt(matrix.length)) ? Math.sqrt(matrix.length) : 0;
+  const count = Math.min(64, alignment.sequences.length, sourceDimension || 32);
+  const sourceStride = matrix.length === alignment.sequences.length ** 2 ? alignment.sequences.length : sourceDimension;
   const valueAt = (row: number, column: number) => {
-    if (fullMatrix) return matrix[row * alignment.sequences.length + column] ?? 0;
-    if (compactMatrix) return matrix[row * count + column] ?? 0;
+    if (sourceStride >= count) return matrix[row * sourceStride + column] ?? 0;
     return 1 - pairwiseIdentitySampled(alignment.sequences[row].sequence, alignment.sequences[column].sequence);
   };
   const values = Array.from({ length: count ** 2 }, (_, flatIndex) => valueAt(Math.floor(flatIndex / count), flatIndex % count));
   const max = Math.max(0.001, ...values);
   return (
     <div className="matrix-layout">
-      <div className="heatmap" style={{ gridTemplateColumns: `104px repeat(${count}, minmax(18px, 1fr))` }}>
+      <div className="heatmap" style={{ gridTemplateColumns: `110px repeat(${count}, 11px)` }}>
         <span />
-        {alignment.sequences.slice(0, count).map((record) => <span className="column-label" key={record.name} title={record.name}>{record.name.slice(0, 3)}</span>)}
+        {alignment.sequences.slice(0, count).map((record, index) => <span className="column-label" key={record.name} title={record.name}>{index % Math.max(1, Math.ceil(count / 32)) === 0 ? index + 1 : ""}</span>)}
         {alignment.sequences.slice(0, count).flatMap((record, row) => [
           <span className="row-label" key={`label-${record.name}`} title={record.name}>{record.name}</span>,
           ...alignment.sequences.slice(0, count).map((_, column) => {
@@ -827,7 +1059,7 @@ function DistanceMatrix({ alignment, matrix }: { alignment: AlignmentData; matri
           }),
         ])}
       </div>
-      <div className="matrix-key"><span>Identical</span><i /><span>{(max * 100).toFixed(1)}% divergent</span></div>
+      <div className="matrix-key"><span>{formatInteger(count)} sequences · identical</span><i /><span>{(max * 100).toFixed(1)}% divergent</span></div>
     </div>
   );
 }
@@ -1032,24 +1264,6 @@ function ReconstructionWorkspace({ alignment, events, selectedId, onSelect, onDe
       </Panel>
     </div>
   </div>;
-}
-
-function BreakpointMatrix({ alignment, events, onSelect }: { alignment: AlignmentData; events: RdpEvent[]; onSelect: (id: string) => void }) {
-  const visible = events.filter((event) => event.decision !== "rejected").slice(0, 32);
-  if (!visible.length) return <div className="empty-state compact">Retained events will appear as a breakpoint-pair similarity matrix.</div>;
-  const circularDistance = (left: number, right: number) => {
-    const distance = Math.abs(left - right);
-    return Math.min(distance, alignment.length - distance);
-  };
-  const similarity = (left: RdpEvent, right: RdpEvent) => {
-    const direct = circularDistance(left.start, right.start) + circularDistance(left.end % alignment.length, right.end % alignment.length);
-    const reversed = circularDistance(left.start, right.end % alignment.length) + circularDistance(left.end % alignment.length, right.start);
-    return 1 - Math.min(1, Math.min(direct, reversed) / Math.max(1, alignment.length));
-  };
-  return <div className="breakpoint-matrix" style={{ gridTemplateColumns: `88px repeat(${visible.length}, 18px)` }}><span/>{visible.map((_, index) => <b key={`column-${index}`}>{index + 1}</b>)}{visible.flatMap((event, row) => [<span key={`row-${event.id}`} title={alignment.sequences[event.recombinant].name}>E{row + 1} · {alignment.sequences[event.recombinant].name}</span>, ...visible.map((other, column) => {
-    const value = similarity(event, other);
-    return <button type="button" key={`${event.id}-${other.id}`} title={`Events ${row + 1} × ${column + 1}: ${(value * 100).toFixed(1)}% breakpoint similarity`} onClick={() => onSelect(event.id)} style={{ background: `color-mix(in srgb, #168d79 ${Math.round(value * 88)}%, #f1f4f2)` }}/>
-  })])}</div>;
 }
 
 function ExampleLibrary({ onClose, onLoad }: { onClose: () => void; onLoad: (example: ExampleDataset) => void }) {
@@ -1856,7 +2070,7 @@ export default function Home() {
             </>}
 
             {tab === "patterns" && <>
-              <Panel title="Pairwise p-distance matrix" action={<span className="panel-caption">Uncorrected · canonical sites</span>}><DistanceMatrix alignment={alignment} matrix={distanceMatrix}/></Panel>
+              <RdpPatternMatrices alignment={alignment} events={events} onSelect={setSelectedId}/>
               <Panel title="Breakpoint density" action={<span className="panel-caption">Uniform-location null · seed {options.randomSeed}</span>}>
                 <div className="density-chart">{Array.from({ length: 48 }, (_, bin) => {
                   const start = (bin / 48) * alignment.length;
@@ -1867,7 +2081,7 @@ export default function Home() {
                 <div className="density-axis"><span>1</span><span>{Math.round(alignment.length / 2).toLocaleString("en-US")}</span><span>{alignment.length.toLocaleString("en-US")} nt</span></div>
                 <div className="hotspot-result"><span><b>{hotspot.observedMaximum}</b> maximum breakpoints / bin</span><span><b>{hotspot.expectedPerBin.toFixed(2)}</b> expected under uniform null</span><span><b>{formatP(hotspot.empiricalP)}</b> empirical hotspot p · {hotspot.replicates} replicates</span></div>
               </Panel>
-              <Panel title="Breakpoint pair matrix" action={<span className="panel-caption">Circular-aware · first 32 retained events</span>}><BreakpointMatrix alignment={alignment} events={events} onSelect={setSelectedId}/></Panel>
+              <Panel title="Pairwise sequence p-distance" action={<span className="panel-caption">Sequence × sequence · first 24 · canonical sites</span>}><DistanceMatrix alignment={alignment} matrix={distanceMatrix}/></Panel>
               <Panel title="False-positive challenge diagnostics" action={<span className="panel-caption">Review evidence · never a hidden veto</span>}><ChallengeDiagnostics diagnostics={metrics?.diagnostics} event={selectedEvent}/></Panel>
             </>}
 

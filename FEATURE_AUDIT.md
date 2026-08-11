@@ -1,13 +1,14 @@
-# Feature audit — 0.6.0 checkpoint
+# Feature audit — 0.6.1 checkpoint
 
 This ledger separates product completeness from scientific parity. “Resolved”
 means the defect is implemented and covered by a local regression or build
 check. It does not imply numerical equivalence to the proprietary Windows RDP
 package.
 
-| Audit item | 0.6.0 state | Evidence / remaining gate |
+| Audit item | 0.6.1 state | Evidence / remaining gate |
 | --- | --- | --- |
 | Center page or Export view cannot scroll | **Resolved systemically** | The center workspace is the desktop vertical scroll owner. Generic panels grow in document flow instead of imposing a viewport cap; only genuinely data-heavy grids, ledgers, trees, and queues have intentional local scrolling. Below 980 px, scrolling returns to `body`. Source and rendered-CSS regressions enforce the ownership model. |
+| Recombination-map rows escape their box and cover later panels | **Resolved structurally** | Every panel is now an isolated clipping boundary without a height cap. The map has a definite 240–420 px scroll viewport with layout/paint containment; expanded mode hands its full content to the panel-body scroll owner. Regression tests require all three containment layers. |
 | A panel is too short to inspect comfortably | **Resolved** | Every reusable titled `Panel` has an accessible full-screen control, backdrop dismissal, Escape handling, focus restoration, body scroll locking, and its own expanded scroll body. |
 | Alignment viewer is too primitive | **Resolved for multi-parent review** | Base mode and parent-affinity mode; any 2–6 sequences can be selected as parents; unique-parent, multi-parent/shared, none/novel, and missing/ambiguous states are visually distinct. Parent-informative-only columns, three zoom densities, linked event-parent defaults, sticky labels, coordinate tooltips, large-alignment memory guard, and unit tests are included. |
 | Complex/nested event workflow is unclear | **Resolved at workflow/UI level; engine propagation remains partial** | New Global reconstruction tab with five-stage RDP-style workflow, ordered review queue, stale/downstream propagation after scientific edits, unresolved-sequence rescan, global per-sequence mosaic map, co-recombinant groups, possible-overprint relationships, recombinant-parent dependencies, and tree/alignment deep links. Full RDP signal erasure/splitting, ancestral-event disassembly, and automated historical direction inference remain parity work. |
@@ -16,6 +17,7 @@ package.
 | Method result ownership is unclear | **Resolved** | Seven named method tabs expose support decision, raw and adjusted p, correction scope, method statistic, calibration, limitation, source paper, and a method-specific profile. |
 | React minified error #418 | **Resolved with deterministic SSR text** | Ambient locale/time-zone formatting was removed from rendered dates and times; numeric locale is explicit; the initial tutorial timestamp is fixed; two identical SSR requests must be byte-identical; a static regression forbids unqualified locale formatting. |
 | Only one small example | **Resolved** | Eight deterministic, truth-annotated synthetic datasets cover a clean triplet, tutorial virus, larger virus family, circular ssDNA family, segmented family, nested/overlapping mosaics, an 80 kb bacterial core-genome HGT panel, and a 520-genome stress panel. Empirical genomes remain intentionally unbundled pending dataset licensing and provenance. |
+| Pattern “heatmaps” are sparse or use the wrong axes | **Resolved for the primary RDP4-style views** | Breakpoint pairs are now genomic-position × genomic-position endpoint counts rather than event similarity. A split region matrix shows observed tract separation counts and signed circular-null residuals; a split local-discordance matrix shows RMS p-distance deviation and profile-correlation loss. Canvas rendering, 48/64/96-bin control, exact hover/keyboard readouts, event activation, and sequential/diverging palettes preserve figure-level density. Exact RDP4 SH/RF/permutation numerical parity remains open and is explicitly not claimed. |
 | Unsafe export silently includes stale or unreviewed events | **Resolved** | Sequence-changing outputs default to accepted + fresh. “All fresh” and an explicitly unsafe retained override are visible; rejected hypotheses remain preserved in project/CSV provenance. Earlier scientific edits mark the dependent queue stale. |
 | Edited-event multiple testing silently becomes one test | **Resolved** | Recalculation retains original scan multiplicity. Holm edits use a labeled conservative family correction until a full rescan can re-rank hypotheses. |
 | Breakpoint confidence remains stale after edits | **Resolved** | Scientific edits collapse old bounds to exact analyst coordinates, mark the event and later review-order dependencies stale, and require recalculation/rescan. |
@@ -33,7 +35,7 @@ package.
 
 ## Current release judgment
 
-Version 0.6.0 is a substantially more coherent and testable **scientific
+Version 0.6.1 is a substantially more coherent and testable **scientific
 alpha**, not a validated drop-in RDP5 replacement. The next highest-value work
 remains independent candidate discovery and numerical comparison fixtures for
 each primary method, followed by full signal-erasure/ancestral-event propagation

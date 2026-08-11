@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { affinityDescription, classifyParentAffinity, parentInformativeSites } from "../app/alignment-highlighter";
 import { buildReconstructionModel, eventOverlapBases } from "../app/reconstruction";
+import { computeBreakpointPairDensity, computeLocalDiscordanceMatrices, computeRegionSeparationMatrices, eventContainsPosition } from "../app/pattern-matrices";
 import type { RdpEvent } from "../app/rdp-core";
 import { layoutNeighborJoiningTree } from "../app/tree-layout";
 
@@ -71,5 +72,32 @@ assert.ok(reconstruction.relationships.some((relationship) => relationship.kind 
 const circular = makeEvent(3, { start: 900, end: 120, wraps: true });
 const origin = makeEvent(4, { start: 20, end: 80 });
 assert.equal(eventOverlapBases(circular, origin, 1_000), 60);
+assert.equal(eventContainsPosition(circular, 950), true);
+assert.equal(eventContainsPosition(circular, 60), true);
+assert.equal(eventContainsPosition(circular, 500), false);
+
+const pairDensity = computeBreakpointPairDensity([
+  makeEvent(5, { start: 100, end: 300 }),
+  makeEvent(6, { start: 100, end: 300 }),
+], 1_000, 10);
+assert.equal(pairDensity.values[1 * 10 + 3], 2);
+assert.equal(pairDensity.values[3 * 10 + 1], 2);
+assert.equal(pairDensity.maximum, 2);
+
+const separation = computeRegionSeparationMatrices([makeEvent(7, { start: 200, end: 600 })], 1_000, 10);
+assert.equal(separation.observed[0 * 10 + 2], 1);
+assert.equal(separation.observed[2 * 10 + 4], 0);
+assert.ok([...separation.standardizedResidual].every(Number.isFinite));
+
+const discordance = computeLocalDiscordanceMatrices([
+  "A".repeat(80),
+  `${"A".repeat(40)}${"C".repeat(40)}`,
+  `${"C".repeat(40)}${"A".repeat(40)}`,
+  "C".repeat(80),
+], 80, 4, 4, 20);
+assert.equal(discordance.pairCount, 6);
+assert.ok(discordance.maximumRmsDeviation > 0);
+assert.ok(discordance.maximumCorrelationLoss > 0);
+assert.deepEqual([...discordance.rmsDeviation], [...discordance.rmsDeviation].map((value, index, values) => values[(index % 4) * 4 + Math.floor(index / 4)]));
 
 console.log("interaction model checks passed");

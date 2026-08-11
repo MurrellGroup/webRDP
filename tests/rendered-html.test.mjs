@@ -47,13 +47,14 @@ test("renders deterministic development HTML with preview metadata", async () =>
   assert.equal(await secondResponse.text(), html, "SSR output must be byte-identical for identical requests");
 });
 
-test("the application has one workspace scroll owner and expandable panels", () => {
+test("the application has one workspace scroll owner, paint-contained panels, and expandable panels", () => {
   const css = fs.readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(css, /\.app-shell\s*\{[^}]*height:\s*100dvh[^}]*min-height:\s*0[^}]*overflow:\s*hidden/s);
   assert.match(css, /\.workbench\s*\{[^}]*min-height:\s*0[^}]*overflow:\s*hidden/s);
   assert.match(css, /\.workspace-content\s*\{[^}]*flex:\s*1 1 0[^}]*height:\s*0[^}]*min-height:\s*0[^}]*overflow-y:\s*auto/s);
-  assert.match(css, /\.panel\s*\{[^}]*display:\s*flex[^}]*flex-direction:\s*column[^}]*overflow:\s*visible/s);
+  assert.match(css, /\.panel\s*\{[^}]*display:\s*flex[^}]*flex-direction:\s*column[^}]*overflow:\s*hidden[^}]*isolation:\s*isolate/s);
   assert.match(css, /\.panel-body\s*\{[^}]*overflow:\s*visible/s);
+  assert.match(css, /\.overview-scroll\s*\{[^}]*overflow:\s*auto[^}]*contain:\s*layout paint/s);
   assert.match(css, /\.panel\.panel-expanded\s*\{[^}]*position:\s*fixed[^}]*overflow:\s*hidden/s);
   assert.match(css, /\.panel-expanded \.panel-body\s*\{[^}]*overflow:\s*auto/s);
   assert.match(css, /\.method-result-tabs\s*\{[^}]*position:\s*sticky[^}]*overflow-y:\s*auto/s);

@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.6.1 — 2026-08-11
+
+- Closed the main-page paint leak by making every panel a clipping and stacking
+  boundary while leaving its content height unconstrained. The recombination
+  map now has an explicit, paint-contained scroll viewport that expands into
+  the panel body in full-screen mode.
+- Replaced the incorrect event-by-event “breakpoint matrix” with a dense,
+  interactive genome-position breakpoint-pair density matrix matching the
+  semantics of RDP4 Figure 2c.
+- Added a split-triangle recombination-region matrix: observed counts of events
+  separating pairs of genomic windows above the diagonal, and signed residuals
+  from a circular random-tract placement null below it.
+- Added a split-triangle local distance-profile discordance matrix as a fast,
+  explicitly labeled browser proxy for the SH/RF-style compatibility views in
+  RDP4 Figure 2e.
+- Reworked matrix rendering around canvas, adaptive 48/64/96-bin resolution,
+  keyboard/pointer inspection, exact coordinate readouts, event selection,
+  compact legends, and perceptually ordered sequential/diverging palettes.
+- Increased the sequence-distance view from 24 to as many as 64 sequences when
+  the worker has already calculated the matrix, while keeping each cell compact
+  instead of stretching a sparse grid across the panel.
+
 ## 0.6.0 — 2026-08-11
 
 - Replaced competing nested panel caps with a single desktop workspace scroll

@@ -7,7 +7,10 @@ breakpoint editing, matrices/topology checks, and recombination-aware exports.
 Version 0.6 adds a collection-level event reconstruction workspace, arbitrary
 multi-parent alignment highlighting, linked and continuously connected local
 trees, full-screen analysis panels, deterministic hydration-safe rendering,
-and a single reliable workspace scrolling model. The truth-annotated synthetic
+and a single reliable workspace scrolling model. Version 0.6.1 also makes
+panel paint containment structural and adds dense RDP4-style breakpoint-pair,
+recombination-region, and local-discordance genome matrices with interactive
+coordinate readouts and accessible scientific palettes. The truth-annotated synthetic
 dataset library, method-by-method result interpretation, safe-by-default
 fresh/accepted exports, scan-scope event recalculation, and project audit ledger
 remain available. The exact

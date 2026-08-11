@@ -88,6 +88,12 @@ display matrix without allocating an N² matrix.
   mosaic rendering caps at 300 recombinant rows, dependency rendering caps at
   500, and derived relationships are bounded at 20,000 while the project keeps
   every event.
+- Dense genome-position matrices render through one canvas per view rather than
+  thousands of interactive DOM cells. Breakpoint pairs are O(E); the region
+  matrix is O(ER²) with an adaptive cap of R=48 above 2,000 visible events and
+  R=64 above 500; local discordance samples at most 24 sequences and 72 sites
+  per window. A synthetic 5,000-event/520-sequence development-container check
+  completed all three default bounded matrix calculations in roughly 80 ms.
 
 ## Next optimization gates
 
