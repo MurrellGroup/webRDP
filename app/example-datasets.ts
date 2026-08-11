@@ -193,7 +193,7 @@ export const EXAMPLE_DATASETS: ExampleDataset[] = [
     challenge: "Use this to learn event selection, method evidence, breakpoint editing, and local-tree switching.",
     tags: ["known parents", "single event", "fast"],
     truth: [{ recombinant: "Mosaic_query", donor: "Minor_parent", region: "361–760", note: "Single internal donor tract." }],
-    recommendedOptions: { mode: "query-reference", circular: false, window: 120, step: 20, candidateParents: 7 },
+    recommendedOptions: { mode: "exploratory", circular: false, window: 120, step: 20, candidateParents: 7 },
     generate: minimalTriplet,
   },
   {
@@ -207,7 +207,7 @@ export const EXAMPLE_DATASETS: ExampleDataset[] = [
     challenge: "A moderate-divergence tract tests basic localization and parent assignment.",
     tags: ["tutorial", "known truth", "small"],
     truth: [{ recombinant: "Mosaic-X (and Mosaic-Y)", donor: "Beta-01 lineage", region: "783–1,538", note: "Known internal donor tract; Alpha-01 is the major-parent lineage." }],
-    recommendedOptions: { mode: "query-reference", circular: false, window: 180, step: 30 },
+    recommendedOptions: { mode: "exploratory", circular: false, window: 180, step: 30 },
     generate: makeDemoAlignment,
   },
   {
@@ -271,7 +271,7 @@ export const EXAMPLE_DATASETS: ExampleDataset[] = [
     sequenceCount: 60,
     length: 18_000,
     description: "Four clades with long, nested, overlapping, and origin-spanning donor tracts.",
-    challenge: "Designed to expose the current limits of one-pass event inference and encourage manual grouping and rescanning.",
+    challenge: "Exercises sequential erase/extract disassembly, nested-event ordering, co-recombinant grouping, and selective affected-triplet rescanning.",
     tags: ["nested", "overlap", "unknown ancestry"],
     truth: [
       { recombinant: "Deep_clade_1_13", donor: "Deep_clade_2_08", region: "2,401–12,600", note: "Long tract containing a nested second donor." },
@@ -312,7 +312,7 @@ export const EXAMPLE_DATASETS: ExampleDataset[] = [
     challenge: "For benchmarking the sampled parent screen, worker responsiveness, large-table behavior, and memory use—not numerical validation.",
     tags: ["520 genomes", "performance", "low diversity"],
     truth: [{ recombinant: "24 known mosaics", donor: "Outbreak clade B", region: "Variable 1.2–2.25 kb tracts", note: "Truth formula is documented in the example generator." }],
-    recommendedOptions: { mode: "query-reference", circular: false, window: 480, step: 120, candidateParents: 10, bootstrapReplicates: 25 },
+    recommendedOptions: { mode: "exploratory", circular: false, window: 480, step: 120, candidateParents: 10, bootstrapReplicates: 25 },
     generate: outbreakStress,
   },
 ];

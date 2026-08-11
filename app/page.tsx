@@ -23,6 +23,7 @@ import {
   ProjectAuditEntry,
   RdpProject,
   RdpEvent,
+  SOURCE_READY_METHODS,
   alignmentStats,
   breakpointHotspotTest,
   buildLocalTree,
@@ -105,6 +106,17 @@ interface RunMetrics {
   diagnostics?: AlignmentDiagnostics;
   disassembly?: { appliedEvents: number; components: number; erasedCanonicalBases: number };
   rdpSignalTruncations?: number;
+  chiSignalTruncations?: number;
+  tripletKernelCalls?: { rdp: number; sourceChi: number };
+  detectionCycle?: {
+    enabled: boolean;
+    eventsApplied: number;
+    passes: number;
+    initialComparisons: number;
+    redoComparisons: number;
+    stoppedBecause: "no-detectable-signals" | "cycle-cap";
+    maximumCycles: number;
+  };
 }
 
 interface AutoResolveStatus {
@@ -139,6 +151,7 @@ interface AnalysisLaunchConfig {
   resetEditHistory?: boolean;
   auditAction?: string;
   auditContext?: string;
+  cyclicDetection?: boolean;
   onComplete?: (events: RdpEvent[]) => void;
 }
 
@@ -161,26 +174,26 @@ const METHOD_META: Record<MethodName, { family: string; detail: string; limit: s
   },
   GENECONV: {
     family: "Substitution distribution",
-    detail: "RDP5 fragment scoring with a tunable G-scale mismatch penalty and Karlin–Altschul-like calibration.",
-    limit: "The active triplet fragment score and CalcKMaxP/GCCalcPValP path are ported; indel-run modes, overlapping-fragment suppression and empirical permutations remain validation work.",
+    detail: "Author-source GCXoverDP2 / CalcKMaxP / GCCalcPValP triplet batch port is pending.",
+    limit: "Disabled in production scans: the previous simplified fragment locator has been retired rather than presented as RDP parity.",
     citation: "https://doi.org/10.1006/viro.1999.0058",
   },
   BootScan: {
     family: "Phylogenetic / windowed",
-    detail: "Windowed support for changes in the recombinant’s closest relative.",
-    limit: "Stores an independent longest minor-topology window run and seeded p-distance triplet resampling; full multi-taxon neighbor-joining bootstrap parity remains.",
+    detail: "Author-source multi-taxon window/tree bootstrap batch port is pending.",
+    limit: "Disabled in production scans: the previous triplet p-distance stand-in has been retired rather than presented as RDP parity.",
     citation: "https://doi.org/10.1089/aid.2005.21.98",
   },
   MaxChi: {
     family: "Substitution distribution",
     detail: "Maximum chi-square contrasts across variable sites around candidate breakpoints.",
-    limit: "Uses independent compressed-variable-site χ² windows and the source peak correction; exact FastRecCheckMC peak growth/smoothing-table edge behavior remains validation work.",
+    limit: "The source compressed tracks, half-window rules, 11-position smoothing, basin destruction and GrowMChiWin expansion are active; desktop lookup-table rounding and a broad edge-case corpus remain.",
     citation: "https://doi.org/10.1007/BF00182389",
   },
   Chimaera: {
     family: "Substitution distribution",
     detail: "Two-state refinement of MaxChi-style breakpoint evidence in sequence triplets.",
-    limit: "Uses independent source-style binary compression, variable-site χ² windows and peak correction; exact FastRecCheckChim peak growth edge behavior remains validation work.",
+    limit: "The source three-orientation binary tracks, smoothing, basin destruction and GrowMChiWin expansion are active; desktop lookup-table rounding and a broad edge-case corpus remain.",
     citation: "https://doi.org/10.1073/pnas.241370698",
   },
   SiScan: {
@@ -191,8 +204,8 @@ const METHOD_META: Record<MethodName, { family: string; detail: string; limit: s
   },
   "3Seq": {
     family: "Non-parametric triplet",
-    detail: "Maximum-descent hypergeometric random walk with exact bounded dynamic-program calibration.",
-    limit: "The maximum-descent interval is localized independently; exact DP is operation-bounded and falls back to a conservative bound for very large state spaces.",
+    detail: "Author-source 3Seq discovery and exact probability-table path is pending.",
+    limit: "Disabled in production scans: the previous bounded approximation has been retired rather than presented as RDP parity.",
     citation: "https://doi.org/10.1093/molbev/msx263",
   },
 };
@@ -767,6 +780,7 @@ function MethodEvidencePanel({ alignment, event, window, selectedMethod, onSelec
   mode?: "all" | "best";
 }) {
   const evidence = event.evidence.find((item) => item.method === selectedMethod);
+  const selectedSignal = event.methodSignals?.find((signal) => signal.method === selectedMethod);
   const supported = event.evidence.filter((item) => item.supported).length;
   return <div className="method-result-explorer">
     <div className="method-result-tabs" role="tablist" aria-label="Method results">
@@ -789,6 +803,7 @@ function MethodEvidencePanel({ alignment, event, window, selectedMethod, onSelec
           <article><span>Raw method p</span><b>{formatP(evidence.pValue)}</b><small>Before experiment-wide correction</small></article>
           <article><span>{evidence.statisticLabel}</span><b>{Number.isFinite(evidence.statistic) ? evidence.statistic.toPrecision(4) : "—"}</b><small>{evidence.calibration}</small></article>
         </div>
+        {selectedSignal?.sourceChi && <div className="source-chi-ledger"><strong>RDP5 source peak ledger</strong><span><b>{selectedSignal.sourceChi.informativeSites.toLocaleString("en-US")}</b> compressed informative sites</span><span><b>{selectedSignal.sourceChi.halfWindow}</b> sites per half-window</span><span><b>{selectedSignal.sourceChi.boundaryStatistics.map((value) => value.toPrecision(4)).join(" / ")}</b> grown boundary χ²</span><span><b>{selectedSignal.sourceChi.growthWidths.join(" / ")}</b> GrowMChiWin widths</span><small>Track {selectedSignal.sourceChi.track + 1} · boundary ranks {selectedSignal.sourceChi.boundaryRanks.join(" / ")} · {selectedSignal.sourceRoutine}</small></div>}
         {event.recalculationNote && <div className="method-scope-note">{event.recalculationNote}</div>}
       </> : <div className="method-not-run"><b>{selectedMethod} has no result for this hypothesis.</b><span>Enable the method and run a full scan, or recalculate the selected manual hypothesis.</span></div>}
       <div className="method-limit"><strong>Interpretation limit</strong><span>{METHOD_META[selectedMethod].limit}</span><a href={METHOD_META[selectedMethod].citation} target="_blank" rel="noreferrer">Primary paper ↗</a></div>
@@ -1777,7 +1792,7 @@ function Inspector({ alignment, event, onDecision, onDecisionGroup, onUpdate, on
           {(event.breakpointModel.modelSelection?.length ?? 0) > 1 && <div className="burt-selection"><span>Step-up ledger</span>{event.breakpointModel.modelSelection?.map((entry) => <i className={entry.states === event.breakpointModel?.states ? "selected" : ""} key={entry.states}>{entry.states} states <b>BIC {entry.bic.toFixed(1)}</b></i>)}</div>}
           </details>}
         </div>}
-        {(event.methodSignals?.filter((signal) => signal.method !== "shared-screen").length ?? 0) > 0 && <details className="method-signal-list" open><summary>Method-specific interval calls</summary><div>{event.methodSignals?.filter((signal) => signal.method !== "shared-screen").map((signal, index) => <button type="button" key={`${signal.method}-${signal.start}-${signal.end}-${index}`} onClick={() => onOpenMethod(signal.method as MethodName)}><b>{signal.method}</b><span>{signal.start + 1}–{signal.end}{signal.wraps ? " · wraps origin" : ""}</span><small>{signal.locator} · {signal.statistic.toPrecision(4)}{signal.method === "SiScan" ? ` · ${signal.outgroup === null ? "randomized fourth sequence" : signal.outgroup === undefined ? signal.outgroupMode ?? "source outgroup" : `outgroup ${alignment.sequences[signal.outgroup]?.name ?? signal.outgroup + 1}`} · ${signal.permutations ?? "?"} permutations` : ""}</small></button>)}</div></details>}
+        {(event.methodSignals?.filter((signal) => signal.method !== "shared-screen").length ?? 0) > 0 && <details className="method-signal-list" open><summary>Method-specific interval calls</summary><div>{event.methodSignals?.filter((signal) => signal.method !== "shared-screen").map((signal, index) => <button type="button" key={`${signal.method}-${signal.start}-${signal.end}-${index}`} onClick={() => onOpenMethod(signal.method as MethodName)}><b>{signal.method}</b><span>{signal.start + 1}–{signal.end}{signal.wraps ? " · wraps origin" : ""}</span><small>{signal.locator} · {signal.statistic.toPrecision(4)}{signal.sourceChi ? ` · ${signal.sourceChi.informativeSites} compressed sites · H=${signal.sourceChi.halfWindow} · grown χ² ${signal.sourceChi.boundaryStatistics.map((value) => value.toPrecision(3)).join("/")}` : ""}{signal.method === "SiScan" ? ` · ${signal.outgroup === null ? "randomized fourth sequence" : signal.outgroup === undefined ? signal.outgroupMode ?? "source outgroup" : `outgroup ${alignment.sequences[signal.outgroup]?.name ?? signal.outgroup + 1}`} · ${signal.permutations ?? "?"} permutations` : ""}</small></button>)}</div></details>}
         <button className="text-button" type="button" onClick={() => {
           const nextStart = event.end === alignment.length ? 0 : event.end;
           const nextEnd = event.start;
@@ -1850,7 +1865,7 @@ export default function Home() {
   const [events, setEvents] = useState<RdpEvent[]>(() => [tutorialTruthEvent()]);
   const [selectedId, setSelectedId] = useState<string | null>("tutorial-known-truth");
   const [tab, setTab] = useState<Tab>("explore");
-  const [options, setOptions] = useState<AnalysisOptions>(() => ({ ...DEFAULT_OPTIONS, mode: "query-reference" }));
+  const [options, setOptions] = useState<AnalysisOptions>(() => ({ ...DEFAULT_OPTIONS }));
   const [runState, setRunState] = useState<RunState>("idle");
   const [progress, setProgress] = useState(0);
   const [phase, setPhase] = useState("Ready");
@@ -2086,11 +2101,14 @@ export default function Home() {
           diagnostics: payload.diagnostics,
           disassembly: payload.disassembly,
           rdpSignalTruncations: payload.rdpSignalTruncations,
+          chiSignalTruncations: payload.chiSignalTruncations,
+          tripletKernelCalls: payload.tripletKernelCalls,
+          detectionCycle: payload.detectionCycle,
         });
         setProgress(1);
         setPhase(`Complete · ${nextEvents.length} event${nextEvents.length === 1 ? "" : "s"}`);
         setRunState("complete");
-        appendAudit(config.auditAction ?? (retainedEvents.length ? "Completed unresolved-sequence rescan" : "Completed full scan"), `${config.auditContext ? `${config.auditContext} ` : ""}${payload.comparisons.toLocaleString("en-US")} triplets tested; ${resultEvents.length} new consensus hypotheses retained${payload.events.length !== resultEvents.length ? ` after suppressing ${payload.events.length - resultEvents.length} duplicate of an accepted event` : ""}${retainedEvents.length ? ` alongside ${retainedEvents.length} preserved hypotheses` : ""}${payload.disassembly?.components ? `; ${payload.disassembly.components} tract-only analysis components generated from ${payload.disassembly.appliedEvents} accepted events` : ""}${payload.rdpSignalTruncations ? `; ${payload.rdpSignalTruncations} lower-ranked RDP excursions exceeded the per-triplet retention cap` : ""}.`);
+        appendAudit(config.auditAction ?? (retainedEvents.length ? "Completed unresolved-sequence rescan" : "Completed full scan"), `${config.auditContext ? `${config.auditContext} ` : ""}${payload.comparisons.toLocaleString("en-US")} triplets tested; ${resultEvents.length} new consensus hypotheses retained${payload.events.length !== resultEvents.length ? ` after suppressing ${payload.events.length - resultEvents.length} duplicate of an accepted event` : ""}${retainedEvents.length ? ` alongside ${retainedEvents.length} preserved hypotheses` : ""}${payload.detectionCycle?.enabled ? `; RDP5 cyclical detection selected ${payload.detectionCycle.eventsApplied} events across ${payload.detectionCycle.passes} passes and redid ${payload.detectionCycle.redoComparisons.toLocaleString("en-US")} affected triplets` : ""}${payload.disassembly?.components ? `; ${payload.disassembly.components} tract-only analysis components generated from ${payload.disassembly.appliedEvents} accepted events` : ""}${payload.rdpSignalTruncations ? `; ${payload.rdpSignalTruncations} lower-ranked RDP excursions exceeded the per-triplet retention cap` : ""}${payload.chiSignalTruncations ? `; ${payload.chiSignalTruncations} lower-ranked MAXCHI/CHIMAERA peak pairs exceeded their cap` : ""}.`);
         worker.terminate();
         showToast(resultEvents.length ? `Scan complete: ${resultEvents.length} new consensus event${resultEvents.length === 1 ? "" : "s"}` : retainedEvents.length ? "Rescan complete: no additional events passed the filters" : "Scan complete: no events passed the current filters");
         if (config.onComplete) window.setTimeout(() => config.onComplete?.(nextEvents), 0);
@@ -2116,14 +2134,14 @@ export default function Home() {
       }
       showToast("The local analysis worker stopped unexpectedly.");
     };
-    worker.postMessage({ type: "analyze", jobId, alignment, options, excludedTargets, excludedParents, disassemblyEvents });
+    worker.postMessage({ type: "analyze", jobId, alignment, options, excludedTargets, excludedParents, disassemblyEvents, cyclicDetection: config.cyclicDetection === true });
   }, [alignment, appendAudit, options, showToast]);
 
   const runAnalysis = useCallback(() => {
     autoResolveSessionRef.current = null;
     setAutoResolveStatus({ state: "idle", message: "Ready to preview", round: 0, processed: 0, accepted: 0, rejected: 0, reviewed: 0, rescans: 0 });
-    launchAnalysis();
-  }, [launchAnalysis]);
+    launchAnalysis({ cyclicDetection: options.cyclicDetection });
+  }, [launchAnalysis, options.cyclicDetection]);
 
   const runIterativeAnalysis = useCallback(() => {
     autoResolveSessionRef.current = null;
@@ -2133,15 +2151,13 @@ export default function Home() {
       showToast("Accept and recalculate at least one event before rescanning unresolved sequences");
       return;
     }
-    const mosaicOrigins = acceptedMosaicOrigins(retained);
     launchAnalysis({
-      excludedTargets: mosaicOrigins,
-      excludedParents: mosaicOrigins,
       disassemblyEvents: retained,
       retainedEvents: retained,
-      auditContext: `RDP5 signal disassembly applied to ${retained.length} accepted event${retained.length === 1 ? "" : "s"}; accepted mosaic remainders were withheld while extracted tract components stayed eligible.`,
+      cyclicDetection: options.cyclicDetection,
+      auditContext: `RDP5 signal disassembly applied to ${retained.length} accepted event${retained.length === 1 ? "" : "s"}; both erased remainders and gap-padded tract components remained eligible as distinct evolutionary histories.`,
     });
-  }, [events, launchAnalysis, showToast]);
+  }, [events, launchAnalysis, options.cyclicDetection, showToast]);
 
   const continueAutoResolve = useCallback((inputEvents: RdpEvent[], session: AutoResolveSession) => {
     if (inputEvents.length === 0) {
@@ -2211,6 +2227,7 @@ export default function Home() {
       retainedEvents: preservedEvents,
       filterResolvedAgainst: acceptedEvents,
       resetEditHistory: false,
+      cyclicDetection: false,
       auditAction: "Completed auto-resolve dependency rescan",
       auditContext: `${targetPlan.scope === "full" ? "Full unresolved-target" : "Impacted-target"} rescan after E${barrier.afterEventIndex + 1}; ${targetIndexes.length} targets selected by ${barrier.risk}/100 accumulated dependency risk. ${acceptedEvents.length} accepted events were disassembled; ${acceptedTargets.size} mosaic remainders were excluded from parent search while extracted tract components remained eligible.`,
       onComplete: (rescannedEvents) => {
@@ -2702,7 +2719,7 @@ export default function Home() {
       event.breakpointModel?.circularPadding ? `${event.breakpointModel.circularPadding.offset}/${event.breakpointModel.circularPadding.fittedSites}/${event.breakpointModel.circularPadding.croppedSites}` : "",
       String(event.evidenceStale),
       event.evidence.filter((item) => item.supported).map((item) => item.method).join(";"),
-      event.methodSignals?.filter((signal) => signal.method !== "shared-screen").map((signal) => `${signal.method}:${signal.start + 1}-${signal.end}${signal.wraps ? "(wrap)" : ""}:${signal.locator}${signal.method === "SiScan" ? `:outgroup=${signal.outgroup === null ? "randomized" : signal.outgroup === undefined ? signal.outgroupMode ?? "unspecified" : alignment.sequences[signal.outgroup]?.name ?? signal.outgroup + 1}:permutations=${signal.scanPermutations ?? "?"}/${signal.permutations ?? "?"}:score=${signal.scoreFamily ?? "?"}-${signal.pattern ?? "?"}:topology=${signal.baselineTopology ?? "?"}->${signal.inferredTopology ?? "?"}` : ""}`).join(";") ?? "",
+      event.methodSignals?.filter((signal) => signal.method !== "shared-screen").map((signal) => `${signal.method}:${signal.start + 1}-${signal.end}${signal.wraps ? "(wrap)" : ""}:${signal.locator}${signal.sourceChi ? `:track=${signal.sourceChi.track + 1}:compressed=${signal.sourceChi.informativeSites}:halfwindow=${signal.sourceChi.halfWindow}:boundarychi=${signal.sourceChi.boundaryStatistics.join("/")}:growth=${signal.sourceChi.growthWidths.join("/")}` : ""}${signal.method === "SiScan" ? `:outgroup=${signal.outgroup === null ? "randomized" : signal.outgroup === undefined ? signal.outgroupMode ?? "unspecified" : alignment.sequences[signal.outgroup]?.name ?? signal.outgroup + 1}:permutations=${signal.scanPermutations ?? "?"}/${signal.permutations ?? "?"}:score=${signal.scoreFamily ?? "?"}-${signal.pattern ?? "?"}:topology=${signal.baselineTopology ?? "?"}->${signal.inferredTopology ?? "?"}` : ""}`).join(";") ?? "",
       event.evidence.length ? String(Math.min(...event.evidence.map((item) => item.correctedP))) : "",
       event.decision,
       event.warnings.join(";"),
@@ -2765,14 +2782,18 @@ export default function Home() {
 
             <section className="settings-section">
               <div className="sidebar-title"><h3>Scan design</h3><Icon name="settings" size={16}/></div>
-              <Segmented value={options.mode} options={[{ value: "exploratory", label: "Exploratory" }, { value: "query-reference", label: "Query ↔ Ref" }]} onChange={(value) => setOption("mode", value)} />
+              <Segmented value={options.mode} options={[{ value: "exploratory", label: "All-vs-all (RDP)" }, { value: "query-reference", label: "Targeted query/ref" }]} onChange={(value) => setOption("mode", value)} />
+              <p className="mode-explanation">{options.mode === "exploratory" ? "Role-agnostic desktop workflow: every unordered set of three alignment sequences is screened, and each member can be inferred as recombinant. Sequence role labels do not constrain this scan." : "Optional targeted acceleration: only sequences labelled query/both are tested against reference/both parents. This is not the desktop RDP all-triplet workflow."}</p>
               <p className="setting-help">{options.mode === "exploratory" ? options.exhaustive ? `Every unordered set of three actual sequences is screened (${chooseThree(alignment.sequences.length).toLocaleString("en-US")} concrete triplets).` : "Approximate preview: each sequence is screened only against a distance-selected parent shortlist." : "Each query is screened with every concrete pair of sequences marked reference/both; no consensus sequence substitutes for a triplet member."}</p>
             </section>
 
             <section className="settings-section">
               <div className="sidebar-title"><h3>Primary methods</h3><span>{options.methods.length}/7</span></div>
               <div className="method-toggles">
-                {PRIMARY_METHODS.map((method) => <label key={method}><input type="checkbox" checked={options.methods.includes(method)} onChange={() => toggleMethod(method)}/><i/><span><b>{method}</b><small>{METHOD_META[method].family}</small></span><a href={METHOD_META[method].citation} target="_blank" rel="noreferrer" onClick={(event) => event.stopPropagation()}>↗</a></label>)}
+                {PRIMARY_METHODS.map((method) => {
+                  const ready = SOURCE_READY_METHODS.includes(method);
+                  return <label key={method} className={ready ? "" : "method-pending"} title={ready ? undefined : "Disabled until the full author-source discovery batch is ported"}><input type="checkbox" disabled={!ready} checked={options.methods.includes(method)} onChange={() => toggleMethod(method)}/><i/><span><b>{method}</b><small>{ready ? METHOD_META[method].family : "source port pending"}</small></span><a href={METHOD_META[method].citation} target="_blank" rel="noreferrer" onClick={(event) => event.stopPropagation()}>↗</a></label>;
+                })}
               </div>
             </section>
 
@@ -2782,15 +2803,18 @@ export default function Home() {
               {options.exhaustive ? <div className="triplet-coverage-setting"><span>Triplet coverage</span><b>All concrete triplets</b><small>{options.mode === "exploratory" ? `${chooseThree(alignment.sequences.length).toLocaleString("en-US")} unordered sequence triples before circular-coordinate passes` : "Every allowed query × reference pair"}</small></div> : <label className="approximate-setting"><span>Approximate parent shortlist <b>{options.candidateParents}</b></span><input type="range" min={3} max={Math.max(3, Math.min(300, alignment.sequences.length - 1))} step={1} value={Math.min(options.candidateParents, Math.max(3, alignment.sequences.length - 1))} onChange={(event) => setOption("candidateParents", Number(event.target.value))}/><small>Not RDP5-complete: unlisted sequence triples are not tested.</small></label>}
               <label className="select-label"><span>Multiple testing</span><select value={options.correction} onChange={(event) => setOption("correction", event.target.value as AnalysisOptions["correction"])}><option value="bonferroni">Bonferroni</option><option value="holm">Holm step-down</option><option value="none">None (local p)</option></select></label>
               <label><span>Minimum support <b>{options.minMethods} methods</b></span><input type="range" min={1} max={Math.max(1, options.methods.length)} value={Math.min(options.minMethods, Math.max(1, options.methods.length))} onChange={(event) => setOption("minMethods", Number(event.target.value))}/></label>
+              <label className="switch cyclic-detection"><input type="checkbox" checked={options.cyclicDetection} onChange={(event) => setOption("cyclicDetection", event.target.checked)}/><i/><span>Sequential signal disassembly <small>RDP5 §4.1.6 · strongest event → erase/extract → affected-triplet redo</small></span></label>
               <details><summary>Advanced controls</summary><div className="advanced-controls">
                 <label className="switch"><input type="checkbox" checked={options.circular} onChange={(event) => setOption("circular", event.target.checked)}/><i/><span>Circular genome</span></label>
                 <label className="switch"><input type="checkbox" checked={options.polishBreakpoints} onChange={(event) => setOption("polishBreakpoints", event.target.checked)}/><i/><span>BURT-polish breakpoints</span></label>
                 <label className="switch"><input type="checkbox" checked={options.ancestralClustering} onChange={(event) => setOption("ancestralClustering", event.target.checked)}/><i/><span>Infer ancestral event clusters</span></label>
                 <label className="switch"><input type="checkbox" checked={options.checkMisalignment} onChange={(event) => setOption("checkMisalignment", event.target.checked)}/><i/><span>Flag alignment artefacts</span></label>
                 <label className="switch approximate-toggle"><input type="checkbox" checked={!options.exhaustive} onChange={(event) => setOption("exhaustive", !event.target.checked)}/><i/><span>Use approximate parent shortlist <small>faster preview; not RDP5 triplet parity</small></span></label>
+                {options.cyclicDetection && <label className="select-label"><span>Detection-cycle safety cap</span><input type="number" min={1} max={1000} step={1} value={options.maximumDetectionCycles} onChange={(event) => setOption("maximumDetectionCycles", Math.max(1, Math.min(1000, Number(event.target.value) || 1)))}/><small>RDP5 normally continues until no supported signal remains; this cap only guards pathological loops.</small></label>}
                 {options.mode === "query-reference" && <label className="switch"><input type="checkbox" checked={options.testReferences} onChange={(event) => setOption("testReferences", event.target.checked)}/><i/><span>Also test references as recombinants</span></label>}
                 <label><span>RDP VNP window <b>{options.rdpWindow}</b></span><input type="range" min={5} max={120} step={1} value={options.rdpWindow} onChange={(event) => setOption("rdpWindow", Number(event.target.value))}/></label>
                 <label><span>RDP signals retained/triplet <b>{options.rdpSignalsPerTriplet}</b></span><input type="range" min={8} max={256} step={8} value={options.rdpSignalsPerTriplet} onChange={(event) => setOption("rdpSignalsPerTriplet", Number(event.target.value))}/></label>
+                {(options.methods.includes("MaxChi") || options.methods.includes("Chimaera")) && <label><span>MAXCHI/CHIMAERA signals retained/triplet <b>{options.chiSignalsPerTriplet}</b></span><input type="range" min={8} max={256} step={8} value={options.chiSignalsPerTriplet} onChange={(event) => setOption("chiSignalsPerTriplet", Number(event.target.value))}/><small>Caps paired source peak basins after all three MAXCHI equality tracks and all three CHIMAERA target orientations are screened.</small></label>}
                 {options.methods.includes("GENECONV") && <label><span>GENECONV G-scale <b>{options.geneconvGScale.toFixed(1)}</b></span><input type="range" min={0} max={10} step={0.5} value={options.geneconvGScale} onChange={(event) => setOption("geneconvGScale", Number(event.target.value))}/></label>}
                 {options.methods.includes("SiScan") && <details className="parity-controls"><summary>SiScan source controls</summary><div>
                   <label className="select-label"><span>Fourth-sequence strategy</span><select value={options.siskanOutgroupMode} onChange={(event) => setOption("siskanOutgroupMode", event.target.value as AnalysisOptions["siskanOutgroupMode"])}><option value="nearest">Nearest outlier · RDP5 default</option><option value="most-divergent">Most divergent sequence</option><option value="randomized">Horizontal randomization</option><option value="manual">One analyst-selected sequence</option></select></label>
@@ -2903,13 +2927,13 @@ export default function Home() {
                 <article><span className="export-icon">÷</span><h3>Split mosaic sequences</h3><p>Disassemble recombinants at in-scope breakpoints.</p><button disabled={!exportableEvents.length} type="button" onClick={() => exportClean("split")}><Icon name="download"/> FASTA</button></article>
                 <article><span className="export-icon">▤</span><h3>Breakpoint partitions</h3><p>Create non-overlapping sub-alignments bounded by in-scope breakpoints.</p><button disabled={!exportableEvents.length} type="button" onClick={() => exportClean("partition")}><Icon name="download"/> FASTA set</button></article>
               </div>
-              <Panel title="Results & provenance"><><div className="provenance-actions"><button type="button" onClick={() => exportResults("json")}><Icon name="download"/> Restorable project <small>.rdpweb schema 0.5 · all events + immutable project ledger</small></button><button type="button" onClick={() => exportResults("csv")}><Icon name="download"/> Event table CSV <small>all hypotheses, one event per row</small></button><button type="button" onClick={() => download("rdp-web-input.fasta", toFasta(alignment.sequences))}><Icon name="download"/> Input FASTA <small>normalized alignment</small></button></div><div className="run-provenance"><span><b>{auditLog.length}</b> project audit entries</span>{metrics && <><span><b>{metrics.comparisons.toLocaleString("en-US")}</b> concrete sequence triplets</span><span><b>{metrics.tripletMode === "approximate-parent-shortlist" ? "approximate shortlist" : "all triplets"}</b> enumeration{metrics.concreteTripletInputs === false ? " · invalid proxy inputs" : " · three explicit sequences each"}</span><span><b>{metrics.elapsedMs.toFixed(1)} ms</b> wall time</span><span><b>{metrics.matrixMode ?? "exact"}</b> distance support</span>{Boolean(metrics.rdpSignalTruncations) && <span><b>{metrics.rdpSignalTruncations?.toLocaleString("en-US")}</b> lower-ranked RDP signals omitted at cap</span>}{metrics.timing && <span><b>{metrics.timing.distanceMs.toFixed(1)} / {metrics.timing.scanMs.toFixed(1)} / {metrics.timing.statisticsMs.toFixed(1)} / {(metrics.timing.diagnosticsMs ?? 0).toFixed(1)} ms</b> distance / scan / evidence / diagnostics</span>}</>}</div><details className="project-ledger"><summary>Project audit ledger · {auditLog.length} entries</summary><div>{[...auditLog].reverse().slice(0, 100).map((entry) => <article key={entry.id}><div><b>{entry.action}</b>{entry.eventSnapshot && <em>event tombstone saved</em>}</div><span>{entry.summary}</span><time dateTime={entry.timestamp}>{formatDateTime(entry.timestamp)}</time></article>)}</div></details></></Panel>
+              <Panel title="Results & provenance"><><div className="provenance-actions"><button type="button" onClick={() => exportResults("json")}><Icon name="download"/> Restorable project <small>.rdpweb schema 0.5 · all events + immutable project ledger</small></button><button type="button" onClick={() => exportResults("csv")}><Icon name="download"/> Event table CSV <small>all hypotheses, one event per row</small></button><button type="button" onClick={() => download("rdp-web-input.fasta", toFasta(alignment.sequences))}><Icon name="download"/> Input FASTA <small>normalized alignment</small></button></div><div className="run-provenance"><span><b>{auditLog.length}</b> project audit entries</span>{metrics && <><span><b>{metrics.comparisons.toLocaleString("en-US")}</b> concrete sequence triplets</span><span><b>{metrics.tripletMode === "approximate-parent-shortlist" ? "approximate shortlist" : "all triplets"}</b> enumeration{metrics.concreteTripletInputs === false ? " · invalid proxy inputs" : " · three explicit sequences each"}</span>{metrics.tripletKernelCalls && <span><b>{metrics.tripletKernelCalls.rdp.toLocaleString("en-US")} RDP · {metrics.tripletKernelCalls.sourceChi.toLocaleString("en-US")} χ</b> unordered-triplet kernel calls; invariant sites compressed inside each triplet</span>}{metrics.detectionCycle?.enabled && <span><b>{metrics.detectionCycle.eventsApplied} events · {metrics.detectionCycle.passes} passes</b> sequential erase/extract; {metrics.detectionCycle.redoComparisons.toLocaleString("en-US")} affected triplets redone{metrics.detectionCycle.stoppedBecause === "cycle-cap" ? " · safety cap reached" : " · stopped with no supported signal"}</span>}<span><b>{metrics.elapsedMs.toFixed(1)} ms</b> wall time</span><span><b>{metrics.matrixMode ?? "exact"}</b> distance support</span>{Boolean(metrics.rdpSignalTruncations) && <span><b>{metrics.rdpSignalTruncations?.toLocaleString("en-US")}</b> lower-ranked RDP signals omitted at cap</span>}{Boolean(metrics.chiSignalTruncations) && <span><b>{metrics.chiSignalTruncations?.toLocaleString("en-US")}</b> lower-ranked MAXCHI/CHIMAERA pairs omitted at cap</span>}{metrics.timing && <span><b>{metrics.timing.distanceMs.toFixed(1)} / {metrics.timing.scanMs.toFixed(1)} / {metrics.timing.statisticsMs.toFixed(1)} / {(metrics.timing.diagnosticsMs ?? 0).toFixed(1)} ms</b> distance / scan / evidence / diagnostics</span>}</>}</div><details className="project-ledger"><summary>Project audit ledger · {auditLog.length} entries</summary><div>{[...auditLog].reverse().slice(0, 100).map((entry) => <article key={entry.id}><div><b>{entry.action}</b>{entry.eventSnapshot && <em>event tombstone saved</em>}</div><span>{entry.summary}</span><time dateTime={entry.timestamp}>{formatDateTime(entry.timestamp)}</time></article>)}</div></details></></Panel>
             </>}
 
             {tab === "methods" && <>
               <div className="methods-heading"><div><span className="eyebrow">Scientific basis</span><h1>Methods, limits, and primary sources.</h1><p>This MIT-licensed implementation combines papers and the RDP5 manual with source-compatible ports made from the original RDP code supplied by its authors.</p></div><input aria-label="Filter methods and papers" placeholder="Filter methods or papers…" value={methodFilter} onChange={(event) => setMethodFilter(event.target.value)}/></div>
-              <div className="fidelity-banner"><strong>Validation state · scientific alpha</strong><p>The active engine now includes multi-signal RDP5 VNP scanning, independent locators for all seven primary families, source BURT breakpoint refinement, recursive erase/extract signal disassembly, source-style event merging, all-sequence/all-three-orientation co-recombinant screening, seeded JC/NJ bootstrap tree evidence, the source SiScan 15-category/outgroup/permutation workflow, and the default RDP5 recombinant-identification consensus: 18 standalone source statistics, its final-trim penalty, and six joint rules. Remaining numerical-parity gates include GENECONV indel/overlap/permutation modes, full multi-taxon BootScan, exact MaxChi/Chimaera peak-growth edges, the optional logistic/neural role selectors, exact Clearcut/CheckBSTree behavior, and a broad RDP5 desktop regression corpus.</p><a href="https://github.com/PoonLab/OpenRDP" target="_blank" rel="noreferrer">OpenRDP algorithm reference ↗</a></div>
-              <Panel title="Primary exploratory methods" action={<span className="panel-caption">Seven-method consensus</span>}><div className="method-catalog">{PRIMARY_METHODS.filter((method) => `${method} ${METHOD_META[method].family} ${METHOD_META[method].detail}`.toLowerCase().includes(methodFilter.toLowerCase())).map((method) => <article key={method}><div><span className={options.methods.includes(method) ? "support-dot" : "support-dot muted"}/><h3>{method}</h3><em>{METHOD_META[method].family}</em></div><p>{METHOD_META[method].detail}</p><a href={METHOD_META[method].citation} target="_blank" rel="noreferrer">Primary method paper ↗</a></article>)}</div></Panel>
+              <div className="fidelity-banner"><strong>Validation state · scientific alpha</strong><p>The active engine now includes multi-signal RDP5 VNP scanning, source MAXCHI/CHIMAERA compressed-site profiles with three concrete tracks, 11-position smoothing, peak-basin destruction and GrowMChiWin expansion, source BURT breakpoint refinement, recursive erase/extract signal disassembly, source-style event merging, all-sequence/all-three-orientation co-recombinant screening, seeded JC/NJ bootstrap tree evidence, the source SiScan 15-category/outgroup/permutation workflow, and the default RDP5 recombinant-identification consensus: 18 standalone source statistics, its final-trim penalty, and six joint rules. Remaining numerical-parity gates include the full author-source GENECONV, BootScan, 3Seq and standalone SiScan discovery batches, the optional logistic/neural role selectors, exact Clearcut/CheckBSTree behavior, and a broad RDP5 desktop golden regression corpus.</p><span>Detector specification: author-supplied RDP5 VB/native source only.</span></div>
+              <Panel title="Primary exploratory methods" action={<span className="panel-caption">Source-ready consensus · pending ports disclosed</span>}><div className="method-catalog">{PRIMARY_METHODS.filter((method) => `${method} ${METHOD_META[method].family} ${METHOD_META[method].detail}`.toLowerCase().includes(methodFilter.toLowerCase())).map((method) => <article key={method}><div><span className={options.methods.includes(method) ? "support-dot" : "support-dot muted"}/><h3>{method}</h3><em>{SOURCE_READY_METHODS.includes(method) ? METHOD_META[method].family : "source port pending"}</em></div><p>{METHOD_META[method].detail}</p><a href={METHOD_META[method].citation} target="_blank" rel="noreferrer">Primary method paper ↗</a></article>)}</div></Panel>
               <Panel title="Secondary verification views"><div className="secondary-methods">{[
                 ["BURT", "RDP5-source fixed-three-state random-start fitting plus manual-spec 2–20-state BIC/AIC step-up, posterior intervals, and switch ledger", "RDP5 source + Manual §8.13", "operational"],
                 ["LARD", "Likelihood-ratio breakpoint comparison", "Holmes et al. 1999"],
@@ -2934,7 +2958,7 @@ export default function Home() {
         "Use homologous, pre-aligned nucleotide sequences. Inspect divergent and gap-rich regions: misalignment is a major source of false positives. Mark query/reference roles only when that design is biologically justified.",
         "The default screen enumerates every unordered triplet of actual alignment sequences; each primary method receives those three concrete sequences. The optional parent-shortlist preview is explicitly approximate and must not be used for a definitive RDP5-parity analysis. Retain multiple-testing correction.",
         "For each event, compare the parent-affinity alignment, breakpoint localization, parental assignments, all local trees, method p-values, and alignment quality. Accept, reject, or edit—then record the rationale.",
-        "Review the strongest/earliest characterized event first. Group co-recombinant descendants, inspect possible overprinting and recombinant-parent dependencies, and rescan unresolved signals after any scientific edit.",
+        "The default engine repeatedly takes the strongest supported signal, groups its co-recombinant descendants, splits their recombinant tract from their retained remainder, and selectively rescreens affected triplets. Review that inferred order, inspect overprinting and recombinant-parent dependencies, and rescan after any scientific edit.",
         "Choose whether to remove recombinant sequences, mask fragments, split mosaics, or partition the alignment. Export the restorable project with parameters, rejected alternatives, and review decisions for provenance.",
       ][tutorialStep]}</p><div className="tutorial-tip"><b>{["Current dataset", "Performance", "Keyboard", "Review order", "Reproducibility"][tutorialStep]}</b><span>{[
         `${alignment.sequences.length} sequences × ${alignment.length.toLocaleString("en-US")} sites are loaded; the included tutorial has a known tract at 783–1,538.`,

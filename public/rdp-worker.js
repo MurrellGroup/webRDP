@@ -12,8 +12,10 @@ let wasmPromise;
 const BASES = { A: 0, C: 1, G: 2, T: 3, U: 3, "-": 5 };
 
 function enabledMethodMask(options) {
-  const bits = { GENECONV: 1, BootScan: 2, MaxChi: 4, Chimaera: 8, SiScan: 16, "3Seq": 32 };
-  let mask = options.polishBreakpoints ? 64 : 0;
+  // Production discovery is source-only. GENECONV, BootScan and 3Seq remain
+  // disabled until their complete author-source batch routines are ported.
+  const bits = { MaxChi: 4, Chimaera: 8, SiScan: 16 };
+  let mask = 0;
   for (const method of options.methods) mask |= bits[method] ?? 0;
   return mask;
 }
@@ -188,6 +190,39 @@ function primaryMethodSignals(signals = []) {
     if (!previous || Math.abs(signal.statistic) > Math.abs(previous.statistic)) best.set(signal.method, signal);
   }
   return [...best.values()];
+}
+
+const SOURCE_CHI_ROW_INTS = 16;
+const SOURCE_CHI_PEAK_INTS = 6;
+
+function sourceChiRoutine(method) {
+  return method === "MaxChi"
+    ? "FindSubSeqMCPB2 → WinScoreCalcP → CalcChiVals4P3 → SmoothChiValsP → FindMChiP → GrowMChiWinP2"
+    : "FindSubSeqDP3 → WinScoreCalc4P2 → CalcChiVals5P → SmoothChiVals3P → FindMChi3P → GrowMChiWinP";
+}
+
+function sourceChiSignal(row, rotation, length) {
+  const method = row[0] === 3 ? "MaxChi" : "Chimaera";
+  const mapped = mapInterval(row[3], row[4], rotation, length);
+  return {
+    method,
+    ...mapped,
+    statistic: row[6] / 1000,
+    locator: method === "MaxChi"
+      ? `RDP5 pair-equality track ${row[2] + 1} · paired source peak basin`
+      : `RDP5 recombinant track ${row[2] + 1} · paired source peak basin`,
+    sourceRoutine: sourceChiRoutine(method),
+    sourceChi: {
+      track: row[2],
+      targetSlot: row[1] < 0 ? null : row[1],
+      informativeSites: row[9],
+      halfWindow: row[10],
+      boundaryStatistics: [row[7] / 1000, row[8] / 1000],
+      boundaryRanks: [row[11], row[12]],
+      growthWidths: [row[13], row[14]],
+      direction: row[15] < 0 ? -1 : 1,
+    },
+  };
 }
 
 function selectCoLocatedSiScanRegion(result, candidate, rotation, length) {
@@ -490,7 +525,7 @@ function deduplicate(candidates, length, targetCount) {
   }).slice(0, maximum);
 }
 
-async function analyze(message) {
+async function analyze(message, emit = postMessage) {
   const started = performance.now();
   const instance = await loadWasm();
   const { alignment, options, jobId } = message;
@@ -508,6 +543,11 @@ async function analyze(message) {
   const scanSequences = disassembly.analysisSequences;
   const scanMappings = disassembly.mappings;
   const scanSequenceCount = scanSequences.length;
+  const affectedOrigins = new Set(
+    Array.isArray(message.affectedOrigins)
+      ? message.affectedOrigins.map((value) => Math.trunc(value)).filter((value) => value >= 0 && value < nSeq)
+      : [],
+  );
   const diagnosticsStarted = performance.now();
   const diagnosticProfile = alignmentDiagnostics(encoded, nSeq, nSites, options.window, options.randomSeed);
   const diagnosticsMs = performance.now() - diagnosticsStarted;
@@ -538,9 +578,22 @@ async function analyze(message) {
   const prefixBPtr = prefixAPtr + (nSites + 1) * 4;
   const outPtr = align(prefixBPtr + (nSites + 1) * 4, 16);
   const rdpSignalCapacity = Math.max(1, Math.min(256, Math.trunc(options.rdpSignalsPerTriplet ?? 128)));
+  const chiSignalCapacity = Math.max(1, Math.min(256, Math.trunc(options.chiSignalsPerTriplet ?? 24)));
+  const chiTrackCount = 3 * (
+    Number(options.methods.includes("MaxChi")) + Number(options.methods.includes("Chimaera"))
+  );
+  const chiPeakCapacity = Math.max(8, Math.min(256, Math.ceil(
+    (chiSignalCapacity * 2) / Math.max(3, chiTrackCount),
+  )));
   const rdpBestPtr = outPtr + rdpSignalCapacity * 72;
-  const statsPtr = align(rdpBestPtr + 72, 16);
-  const poolPtr = align(statsPtr + 160, 16);
+  const chiPositionsPtr = align(rdpBestPtr + 72, 16);
+  const chiScoresPtr = chiPositionsPtr + 4 * (nSites + 1) * 4;
+  const chiMissingPrefixPtr = align(chiScoresPtr + 4 * (nSites + 1), 4);
+  const chiProfilePtr = align(chiMissingPrefixPtr + (nSites + 1) * 4, 8);
+  const chiSmoothPtr = chiProfilePtr + (nSites + 1) * 8;
+  const chiPeakPtr = align(chiSmoothPtr + (nSites + 1) * 8, 4);
+  const chiOutPtr = chiPeakPtr + chiPeakCapacity * SOURCE_CHI_PEAK_INTS * 4;
+  const poolPtr = align(chiOutPtr + chiSignalCapacity * SOURCE_CHI_ROW_INTS * 4, 16);
   const nearestIndexesPtr = poolPtr + scanSequenceCount * 4;
   const nearestDistancesPtr = nearestIndexesPtr + scanSequenceCount * 4;
   const roleCohortCapacity = Math.max(4, Math.min(34, Math.trunc(options.roleQuartetTaxaLimit ?? 30)));
@@ -647,6 +700,8 @@ async function analyze(message) {
   const referencePool = options.mode === "query-reference"
     ? allIndexes.filter((index) => parentAllowed(index) && (scanSequences[index].role === "reference" || scanSequences[index].role === "both"))
     : allIndexes.filter(parentAllowed);
+  const targetSet = new Set(targets);
+  const referenceSet = new Set(referencePool);
   new Int32Array(memory.buffer, poolPtr, referencePool.length).set(referencePool);
   const candidates = [];
   const independentMethods = options.methods.filter((method) => method !== "RDP");
@@ -655,10 +710,12 @@ async function analyze(message) {
     methods: independentMethods,
     polishBreakpoints: false,
   });
-  // MAXCHI and CHIMAERA are invariant to swapping the two proposed parents.
-  // The remaining locators are directional, so only those bits need the
-  // reverse-parent pass.
-  const reverseIndependentMethodMask = independentMethodMask & (1 | 2 | 16 | 32);
+  const sourceChiMethodMask = independentMethodMask & (4 | 8);
+  // SiScan is source-confirmed on candidates found by the source triplet
+  // detectors. Its former oriented prelocator revisited each triplet under
+  // three target assignments and is intentionally no longer a discovery path.
+  const sourceOnlyUnorderedPass = options.mode === "exploratory"
+    && options.exhaustive;
   const partialBest = new Map();
   const retainCandidate = (candidate) => {
     candidate.structuralUncertaintyVnps = Math.max(1, Math.trunc(options.rdpWindow ?? 30));
@@ -675,8 +732,16 @@ async function analyze(message) {
   const comparisonKeys = new Set();
   const rdpTripletCache = new Map();
   const rdpTripletCacheLimit = 4_096;
+  const processedRdpTriplets = new Set();
   const countedTruncations = new Set();
   let truncatedRdpSignals = 0;
+  const sourceChiTripletCache = new Map();
+  const sourceChiTripletCacheLimit = 4_096;
+  const processedSourceChiTriplets = new Set();
+  const countedChiTruncations = new Set();
+  let truncatedChiSignals = 0;
+  let rdpTripletKernelCalls = 0;
+  let sourceChiTripletKernelCalls = 0;
   const sourceSiScanCache = new Map();
   const sourceSiScanCacheLimit = 512;
   let sourceSiScanRandomization = null;
@@ -699,6 +764,77 @@ async function analyze(message) {
   const scanViews = rotated
     ? [{ sequencePtr: seqPtr, rotation: 0 }, { sequencePtr: rotatedSeqPtr, rotation }]
     : [{ sequencePtr: seqPtr, rotation: 0 }];
+  const getSourceChiRows = (triplet, view) => {
+    if (sourceChiMethodMask === 0) return [];
+    const ordered = [...triplet].sort((left, right) => left - right);
+    const cacheKey = `${ordered.join(":")}@${view.rotation}`;
+    let cached = sourceChiTripletCache.get(cacheKey);
+    if (!cached) {
+      sourceChiTripletKernelCalls += 1;
+      const total = view.rotation === 0 && typeof instance.exports.scan_source_chi_all_packed === "function"
+        ? instance.exports.scan_source_chi_all_packed(
+            packedPtr,
+            validityPtr,
+            wordsPerSequence,
+            nSites,
+            ordered[0],
+            ordered[1],
+            ordered[2],
+            Math.max(20, options.window),
+            0,
+            sourceChiMethodMask,
+            chiPositionsPtr,
+            chiScoresPtr,
+            chiMissingPrefixPtr,
+            chiProfilePtr,
+            chiSmoothPtr,
+            chiPeakPtr,
+            chiPeakCapacity,
+            chiOutPtr,
+            chiSignalCapacity,
+          )
+        : instance.exports.scan_source_chi_all(
+            view.sequencePtr,
+            nSites,
+            ordered[0],
+            ordered[1],
+            ordered[2],
+            Math.max(20, options.window),
+            0,
+            sourceChiMethodMask,
+            chiPositionsPtr,
+            chiScoresPtr,
+            chiMissingPrefixPtr,
+            chiProfilePtr,
+            chiSmoothPtr,
+            chiPeakPtr,
+            chiPeakCapacity,
+            chiOutPtr,
+            chiSignalCapacity,
+          );
+      const retained = Math.min(chiSignalCapacity, Math.max(0, total));
+      cached = {
+        ordered,
+        total,
+        rows: Array.from({ length: retained }, (_, signalIndex) => (
+          Array.from(new Int32Array(
+            memory.buffer,
+            chiOutPtr + signalIndex * SOURCE_CHI_ROW_INTS * 4,
+            SOURCE_CHI_ROW_INTS,
+          ))
+        )),
+      };
+      sourceChiTripletCache.set(cacheKey, cached);
+      if (sourceChiTripletCache.size > sourceChiTripletCacheLimit) {
+        sourceChiTripletCache.delete(sourceChiTripletCache.keys().next().value);
+      }
+    }
+    if (cached.total > chiSignalCapacity && !countedChiTruncations.has(cacheKey)) {
+      truncatedChiSignals += cached.total - chiSignalCapacity;
+      countedChiTruncations.add(cacheKey);
+    }
+    return cached.rows;
+  };
 
   for (let targetPosition = 0; targetPosition < targets.length; targetPosition += 1) {
     const analysisRecombinant = targets[targetPosition];
@@ -706,7 +842,13 @@ async function analyze(message) {
     const parentLimit = options.exhaustive ? referencePool.length : Math.min(options.candidateParents, referencePool.length);
     let parents;
     if (options.exhaustive) {
-      parents = referencePool.filter((index) => index !== analysisRecombinant);
+      // AlistRDP/AlistMC/AlistChi consume one explicit unordered triplet and
+      // resolve their internal pair tracks/orientations themselves. In the
+      // role-agnostic source-only path, a<b<c therefore enumerates the full
+      // search exactly once instead of revisiting it under three outer roles.
+      parents = referencePool.filter((index) => sourceOnlyUnorderedPass
+        ? index > analysisRecombinant
+        : index !== analysisRecombinant);
     } else if (exactDistanceMatrix) {
       parents = candidateParents(parentDistance, scanSequenceCount, analysisRecombinant, referencePool, parentLimit);
     } else {
@@ -745,7 +887,9 @@ async function analyze(message) {
       if (!group || candidate === analysisRecombinant || groupRepresentatives.has(group)) continue;
       groupRepresentatives.set(group, candidate);
     }
-    const reserve = Math.min(groupRepresentatives.size, Math.max(0, Math.floor(parentLimit / 3)));
+    const reserve = sourceOnlyUnorderedPass
+      ? 0
+      : Math.min(groupRepresentatives.size, Math.max(0, Math.floor(parentLimit / 3)));
     let groupSlot = 0;
     for (const representative of groupRepresentatives.values()) {
       if (groupSlot >= reserve) break;
@@ -768,6 +912,10 @@ async function analyze(message) {
           scanMappings[inputMinorParent].originIndex,
         ];
         if (new Set(inputOrigins).size < 3) continue;
+        // RDP5's redo list re-examines only triplets containing a sequence
+        // changed by the latest erase/extract operation. An empty filter is
+        // the initial complete a<b<c screen.
+        if (affectedOrigins.size > 0 && !inputOrigins.some((origin) => affectedOrigins.has(origin))) continue;
         const comparisonKey = options.mode !== "query-reference"
           ? [analysisRecombinant, inputMajorParent, inputMinorParent].sort((a, b) => a - b).join(":")
           : `${analysisRecombinant}:${[inputMajorParent, inputMinorParent].sort((a, b) => a - b).join(":")}`;
@@ -778,187 +926,198 @@ async function analyze(message) {
         for (const view of scanViews) {
           if (options.methods.includes("RDP")) {
             const rdpCacheKey = `${[analysisRecombinant, inputMajorParent, inputMinorParent].sort((a, b) => a - b).join(":")}@${view.rotation}`;
-            let cachedRdp = rdpTripletCache.get(rdpCacheKey);
-            if (!cachedRdp) {
-              const totalRdpSignals = instance.exports.scan_rdp5_triplet_all(
-                view.sequencePtr,
-                nSites,
-                analysisRecombinant,
-                inputMajorParent,
-                inputMinorParent,
-                Math.max(5, options.rdpWindow ?? 30),
-                prefixBPtr,
-                prefixAPtr,
-                outPtr,
-                rdpSignalCapacity,
-                rdpBestPtr,
-              );
-              const retainedRdpSignals = Math.min(rdpSignalCapacity, Math.max(0, totalRdpSignals));
-              cachedRdp = {
-                total: totalRdpSignals,
-                outputs: Array.from({ length: retainedRdpSignals }, (_, signalIndex) => (
-                  Array.from(new Int32Array(memory.buffer, outPtr + signalIndex * 72, 18))
-                )),
-              };
-              rdpTripletCache.set(rdpCacheKey, cachedRdp);
-              if (rdpTripletCache.size > rdpTripletCacheLimit) {
-                rdpTripletCache.delete(rdpTripletCache.keys().next().value);
-              }
-            }
-            if (cachedRdp.total > rdpSignalCapacity && !countedTruncations.has(rdpCacheKey)) {
-              truncatedRdpSignals += cachedRdp.total - rdpSignalCapacity;
-              countedTruncations.add(rdpCacheKey);
-            }
-            for (const output of cachedRdp.outputs) {
-              // RDP can assign any triplet member as the daughter. This pass is
-              // scoped to one requested target, so defer the other polarities
-              // to their own target passes.
-              if (output[2] === analysisRecombinant) {
-                const rawStart = output[0];
-                const rawEnd = output[1];
-                const mapped = mapInterval(rawStart, rawEnd, view.rotation, nSites);
-                const majorParent = scanMappings[output[3]].originIndex;
-                const minorParent = scanMappings[output[4]].originIndex;
-                const candidate = {
-                  recombinant,
-                  ...mapped,
-                  rawStart,
-                  rawEnd,
-                  sequencePtr: view.sequencePtr,
-                  rotation: view.rotation,
-                  majorParent,
-                  minorParent,
-                  analysisRecombinant: output[2],
-                  analysisMajorParent: output[3],
-                  analysisMinorParent: output[4],
-                  siskanCandidatePool: exactDistanceMatrix ? undefined : [...parents],
-                  componentProvenance: candidateComponentProvenance(disassembly, output[2], output[3], output[4]),
-                  chiSquare: output[5] / 1000,
-                  informative: output[6],
-                  insideMinor: output[7],
-                  insideMajor: output[8],
-                  outsideMajor: output[9],
-                  outsideMinor: output[10],
-                  effect: output[11] / 1e6,
-                  alternatives: [],
-                  sourceRdp: {
-                    common: output[12],
-                    tractSites: output[13],
-                    mediumSites: output[14],
-                    probabilitySites: Math.max(1, output[6] - 1),
-                    orientationCycle: output[15],
-                    window: output[16],
-                    compatibility: "RDP5 FindSubSeqPB3/XOHomologyP2/FindNextP/DefineEventP2",
-                  },
-                  methodSignals: [{ method: "RDP", start: mapped.start, end: mapped.end, wraps: mapped.wraps, statistic: output[5] / 1000, locator: "RDP5 source" }],
+            const globalConcretePass = options.mode === "exploratory" && options.exhaustive;
+            if (!globalConcretePass || !processedRdpTriplets.has(rdpCacheKey)) {
+              if (globalConcretePass) processedRdpTriplets.add(rdpCacheKey);
+              let cachedRdp = rdpTripletCache.get(rdpCacheKey);
+              if (!cachedRdp) {
+                rdpTripletKernelCalls += 1;
+                const totalRdpSignals = view.rotation === 0 && typeof instance.exports.scan_rdp5_triplet_all_packed === "function"
+                  ? instance.exports.scan_rdp5_triplet_all_packed(
+                      packedPtr,
+                      validityPtr,
+                      wordsPerSequence,
+                      nSites,
+                      analysisRecombinant,
+                      inputMajorParent,
+                      inputMinorParent,
+                      Math.max(5, options.rdpWindow ?? 30),
+                      prefixBPtr,
+                      prefixAPtr,
+                      outPtr,
+                      rdpSignalCapacity,
+                      rdpBestPtr,
+                    )
+                  : instance.exports.scan_rdp5_triplet_all(
+                      view.sequencePtr,
+                      nSites,
+                      analysisRecombinant,
+                      inputMajorParent,
+                      inputMinorParent,
+                      Math.max(5, options.rdpWindow ?? 30),
+                      prefixBPtr,
+                      prefixAPtr,
+                      outPtr,
+                      rdpSignalCapacity,
+                      rdpBestPtr,
+                    );
+                const retainedRdpSignals = Math.min(rdpSignalCapacity, Math.max(0, totalRdpSignals));
+                cachedRdp = {
+                  total: totalRdpSignals,
+                  outputs: Array.from({ length: retainedRdpSignals }, (_, signalIndex) => (
+                    Array.from(new Int32Array(memory.buffer, outPtr + signalIndex * 72, 18))
+                  )),
                 };
-                retainCandidate(candidate);
+                rdpTripletCache.set(rdpCacheKey, cachedRdp);
+                if (rdpTripletCache.size > rdpTripletCacheLimit) {
+                  rdpTripletCache.delete(rdpTripletCache.keys().next().value);
+                }
+              }
+              if (cachedRdp.total > rdpSignalCapacity && !countedTruncations.has(rdpCacheKey)) {
+                truncatedRdpSignals += cachedRdp.total - rdpSignalCapacity;
+                countedTruncations.add(rdpCacheKey);
+              }
+              for (const output of cachedRdp.outputs) {
+                const targetEligible = globalConcretePass
+                  ? targetSet.has(output[2]) && referenceSet.has(output[3]) && referenceSet.has(output[4])
+                  : output[2] === analysisRecombinant;
+                if (targetEligible) {
+                  const rawStart = output[0];
+                  const rawEnd = output[1];
+                  const mapped = mapInterval(rawStart, rawEnd, view.rotation, nSites);
+                  const majorParent = scanMappings[output[3]].originIndex;
+                  const minorParent = scanMappings[output[4]].originIndex;
+                  const candidate = {
+                    recombinant: scanMappings[output[2]].originIndex,
+                    ...mapped,
+                    rawStart,
+                    rawEnd,
+                    sequencePtr: view.sequencePtr,
+                    rotation: view.rotation,
+                    majorParent,
+                    minorParent,
+                    analysisRecombinant: output[2],
+                    analysisMajorParent: output[3],
+                    analysisMinorParent: output[4],
+                    siskanCandidatePool: exactDistanceMatrix ? undefined : [...referencePool],
+                    componentProvenance: candidateComponentProvenance(disassembly, output[2], output[3], output[4]),
+                    chiSquare: output[5] / 1000,
+                    informative: output[6],
+                    insideMinor: output[7],
+                    insideMajor: output[8],
+                    outsideMajor: output[9],
+                    outsideMinor: output[10],
+                    effect: output[11] / 1e6,
+                    alternatives: [],
+                    sourceRdp: {
+                      common: output[12],
+                      tractSites: output[13],
+                      mediumSites: output[14],
+                      probabilitySites: Math.max(1, output[6] - 1),
+                      orientationCycle: output[15],
+                      window: output[16],
+                      compatibility: "RDP5 FindSubSeqPB3/XOHomologyP2/FindNextP/DefineEventP2",
+                    },
+                    methodSignals: [{ method: "RDP", start: mapped.start, end: mapped.end, wraps: mapped.wraps, statistic: output[5] / 1000, locator: "RDP5 source" }],
+                  };
+                  retainCandidate(candidate);
+                }
               }
             }
           }
 
-          // Each enabled non-RDP family now contributes its own discovery
-          // interval. This replaces the former shared CUSUM seed, which could
-          // not discover a signal seen only by one method and could attach a
-          // method's strongest peak to an unrelated RDP event.
-          if (independentMethodMask !== 0) {
-            const parentOrientations = [
-              [inputMajorParent, inputMinorParent, independentMethodMask],
-              [inputMinorParent, inputMajorParent, reverseIndependentMethodMask],
-            ];
-            for (let orientation = 0; orientation < parentOrientations.length; orientation += 1) {
-              const [analysisMajorParent, analysisMinorParent, methodMask] = parentOrientations[orientation];
-              if (methodMask === 0) continue;
-              instance.exports.method_stats(
-                view.sequencePtr,
-                nSites,
-                analysisRecombinant,
-                analysisMajorParent,
-                analysisMinorParent,
-                0,
-                nSites,
-                Math.max(20, options.window),
-                Math.max(1, options.step),
-                0,
-                (
-                  (options.randomSeed ?? 0x5a17c0de)
-                  ^ Math.imul(analysisRecombinant + 1, 0x9e3779b1)
-                  ^ Math.imul(analysisMajorParent + 1, 0x85ebca6b)
-                  ^ Math.imul(analysisMinorParent + 1, 0xc2b2ae35)
-                ) | 0,
-                methodMask,
-                prefixAPtr,
-                prefixBPtr,
-                statsPtr,
-                options.geneconvGScale ?? 1,
-              );
-              const output = new Int32Array(memory.buffer, statsPtr, 35).slice();
-              const signals = [
-                { method: "GENECONV", start: output[3], end: output[4], statistic: output[0], present: output[0] > 0, locator: `independent RDP5 G=${options.geneconvGScale ?? 1} fragment` },
-                { method: "BootScan", start: output[29], end: output[30], statistic: output[33], present: output[33] > 0, locator: "independent topology-window run" },
-                { method: "MaxChi", start: output[25], end: output[26], statistic: output[7] / 1000, present: output[7] > 0, locator: "independent paired χ² peaks" },
-                { method: "Chimaera", start: output[27], end: output[28], statistic: output[8] / 1000, present: output[8] > 0, locator: "independent binary χ² peaks" },
-                { method: "SiScan", start: output[31], end: output[32], statistic: output[34], present: output[34] > 0, locator: "independent oriented-category run" },
-                { method: "3Seq", start: output[23], end: output[24], statistic: output[11], present: output[11] > 0, locator: "independent maximum HGRW descent" },
-              ];
-              for (const signal of signals) {
-                if (!signal.present || !independentMethods.includes(signal.method)) continue;
-                const rawStart = signal.start;
-                const rawEnd = signal.end;
-                if (!(rawEnd - rawStart >= 4 && rawStart >= 0 && rawEnd <= nSites)) continue;
-                instance.exports.triplet_counts(
-                  view.sequencePtr,
-                  nSites,
-                  analysisRecombinant,
-                  analysisMajorParent,
-                  analysisMinorParent,
-                  rawStart,
-                  rawEnd,
-                  rdpBestPtr,
-                );
-                const counts = new Int32Array(memory.buffer, rdpBestPtr, 6).slice();
-                const mapped = mapInterval(rawStart, rawEnd, view.rotation, nSites);
-                const insideTotal = counts[1] + counts[2];
-                const outsideTotal = counts[3] + counts[4];
-                const effect = counts[1] / Math.max(1, insideTotal) - counts[4] / Math.max(1, outsideTotal);
-                retainCandidate({
-                  recombinant,
-                  ...mapped,
-                  rawStart,
-                  rawEnd,
-                  sequencePtr: view.sequencePtr,
-                  rotation: view.rotation,
-                  majorParent: scanMappings[analysisMajorParent].originIndex,
-                  minorParent: scanMappings[analysisMinorParent].originIndex,
-                  analysisRecombinant,
-                  analysisMajorParent,
-                  analysisMinorParent,
-                  siskanCandidatePool: exactDistanceMatrix ? undefined : [...parents],
-                  componentProvenance: candidateComponentProvenance(disassembly, analysisRecombinant, analysisMajorParent, analysisMinorParent),
-                  chiSquare: counts[5] / 1000,
-                  informative: counts[0],
-                  insideMinor: counts[1],
-                  insideMajor: counts[2],
-                  outsideMajor: counts[3],
-                  outsideMinor: counts[4],
-                  effect,
-                  alternatives: [],
-                  methodSignals: [{
-                    method: signal.method,
-                    start: mapped.start,
-                    end: mapped.end,
-                    wraps: mapped.wraps,
-                    statistic: signal.statistic,
-                    locator: signal.locator,
-                  }],
-                });
+          if (sourceChiMethodMask !== 0) {
+            const triplet = [analysisRecombinant, inputMajorParent, inputMinorParent];
+            const orderedTriplet = [...triplet].sort((left, right) => left - right);
+            const globalConcretePass = options.mode === "exploratory" && options.exhaustive;
+            const processedKey = `${orderedTriplet.join(":")}@${view.rotation}`;
+            if (!globalConcretePass || !processedSourceChiTriplets.has(processedKey)) {
+              if (globalConcretePass) processedSourceChiTriplets.add(processedKey);
+              const sourceRows = getSourceChiRows(triplet, view);
+              const sourceTargets = globalConcretePass
+                ? orderedTriplet.filter((target) => (
+                    targetSet.has(target)
+                    && orderedTriplet.every((member) => member === target || referenceSet.has(member))
+                  ))
+                : [analysisRecombinant];
+              for (const sourceTarget of sourceTargets) {
+                const targetSlot = orderedTriplet.indexOf(sourceTarget);
+                const applicableRows = new Map();
+                for (const row of sourceRows) {
+                  if (row[0] === 4 && row[1] !== targetSlot) continue;
+                  const key = `${row[0]}:${row[3]}:${row[4]}:${row[5]}`;
+                  const previous = applicableRows.get(key);
+                  if (!previous || row[6] > previous[6]) applicableRows.set(key, row);
+                }
+                const sourceParents = orderedTriplet.filter((index) => index !== sourceTarget);
+                for (const row of applicableRows.values()) {
+                  const rawStart = row[3];
+                  const rawEnd = row[4];
+                  if (!(rawEnd - rawStart >= 4 && rawStart >= 0 && rawEnd <= nSites)) continue;
+                  let bestOrientation = null;
+                  for (const [analysisMajorParent, analysisMinorParent] of [
+                    [sourceParents[0], sourceParents[1]],
+                    [sourceParents[1], sourceParents[0]],
+                  ]) {
+                    instance.exports.triplet_counts(
+                      view.sequencePtr,
+                      nSites,
+                      sourceTarget,
+                      analysisMajorParent,
+                      analysisMinorParent,
+                      rawStart,
+                      rawEnd,
+                      rdpBestPtr,
+                    );
+                    const counts = Array.from(new Int32Array(memory.buffer, rdpBestPtr, 6));
+                    const insideTotal = counts[1] + counts[2];
+                    const outsideTotal = counts[3] + counts[4];
+                    const effect = counts[1] / Math.max(1, insideTotal) - counts[4] / Math.max(1, outsideTotal);
+                    if (!bestOrientation || effect > bestOrientation.effect) {
+                      bestOrientation = { analysisMajorParent, analysisMinorParent, counts, effect };
+                    }
+                  }
+                  if (!bestOrientation || bestOrientation.counts[0] < 4) continue;
+                  const mapped = mapInterval(rawStart, rawEnd, view.rotation, nSites);
+                  const signal = sourceChiSignal(row, view.rotation, nSites);
+                  retainCandidate({
+                    recombinant: scanMappings[sourceTarget].originIndex,
+                    ...mapped,
+                    rawStart,
+                    rawEnd,
+                    sequencePtr: view.sequencePtr,
+                    rotation: view.rotation,
+                    majorParent: scanMappings[bestOrientation.analysisMajorParent].originIndex,
+                    minorParent: scanMappings[bestOrientation.analysisMinorParent].originIndex,
+                    analysisRecombinant: sourceTarget,
+                    analysisMajorParent: bestOrientation.analysisMajorParent,
+                    analysisMinorParent: bestOrientation.analysisMinorParent,
+                    siskanCandidatePool: exactDistanceMatrix ? undefined : [...referencePool],
+                    componentProvenance: candidateComponentProvenance(
+                      disassembly,
+                      sourceTarget,
+                      bestOrientation.analysisMajorParent,
+                      bestOrientation.analysisMinorParent,
+                    ),
+                    chiSquare: bestOrientation.counts[5] / 1000,
+                    informative: bestOrientation.counts[0],
+                    insideMinor: bestOrientation.counts[1],
+                    insideMajor: bestOrientation.counts[2],
+                    outsideMajor: bestOrientation.counts[3],
+                    outsideMinor: bestOrientation.counts[4],
+                    effect: bestOrientation.effect,
+                    alternatives: [],
+                    methodSignals: [signal],
+                  });
+                }
               }
             }
           }
+
         }
       }
     }
-    postMessage({
+    emit({
       type: "progress",
       jobId,
       progress: 0.85 * (targetPosition + 1) / targets.length,
@@ -998,7 +1157,7 @@ async function analyze(message) {
           componentProvenance: candidate.componentProvenance,
           structuralUncertainty: candidate.structuralUncertainty,
         }));
-      postMessage({ type: "partial", jobId, events: partialEvents, comparisons });
+      emit({ type: "partial", jobId, events: partialEvents, comparisons });
     }
   }
   const scanMs = performance.now() - scanStarted;
@@ -1029,85 +1188,71 @@ async function analyze(message) {
       candidate.effect = candidate.insideMinor / Math.max(1, candidate.insideMinor + candidate.insideMajor)
         - candidate.outsideMinor / Math.max(1, candidate.outsideMinor + candidate.outsideMajor);
     }
-    instance.exports.method_stats(
-      candidate.sequencePtr,
-      nSites,
-      candidate.analysisRecombinant,
-      candidate.analysisMajorParent,
-      candidate.analysisMinorParent,
-      candidate.rawStart,
-      candidate.rawEnd,
-      Math.max(20, options.window),
-      Math.max(1, options.step),
-      options.methods.includes("BootScan") ? Math.max(0, options.bootstrapReplicates ?? 100) : 0,
-      (
-        (options.randomSeed ?? 0x5a17c0de)
-        ^ Math.imul(candidate.analysisRecombinant + 1, 0x9e3779b1)
-        ^ Math.imul(candidate.analysisMajorParent + 1, 0x85ebca6b)
-        ^ Math.imul(candidate.analysisMinorParent + 1, 0xc2b2ae35)
-        ^ candidate.rawStart
-        ^ Math.imul(candidate.rawEnd, 31)
-      ) | 0,
-      enabledMethodMask(options),
-      prefixAPtr,
-      prefixBPtr,
-      statsPtr,
-      options.geneconvGScale ?? 1,
-    );
-    const methodOutput = new Int32Array(memory.buffer, statsPtr, 35);
-    candidate.stats = {
-      genconvRun: methodOutput[0],
-      genconvEligible: methodOutput[1],
-      genconvMatches: methodOutput[2],
-      genconvStart: methodOutput[3],
-      genconvEnd: methodOutput[4],
-      bootscanConsistent: methodOutput[5],
-      bootscanWindows: methodOutput[6],
-      maxChi: methodOutput[7] / 1000,
-      chimaera: methodOutput[8] / 1000,
-      siskanScore: methodOutput[9],
-      siskanSites: methodOutput[10],
-      threeSeqDescent: methodOutput[11],
-      threeSeqSites: methodOutput[12],
-      maxChiBoundaries: [methodOutput[13] / 1000, methodOutput[14] / 1000],
-      chimaeraBoundaries: [methodOutput[15] / 1000, methodOutput[16] / 1000],
-      threeSeqMajorSites: methodOutput[19],
-      threeSeqMinorSites: methodOutput[20],
-      bootscanBootstrapConsistent: methodOutput[21],
-      bootscanBootstrapReplicates: methodOutput[22],
-      threeSeqStart: methodOutput[23],
-      threeSeqEnd: methodOutput[24],
-      maxChiStart: methodOutput[25],
-      maxChiEnd: methodOutput[26],
-      chimaeraStart: methodOutput[27],
-      chimaeraEnd: methodOutput[28],
-      bootscanStart: methodOutput[29],
-      bootscanEnd: methodOutput[30],
-      siskanStart: methodOutput[31],
-      siskanEnd: methodOutput[32],
-      bootscanRunWindows: methodOutput[33],
-      siskanRunWindows: methodOutput[34],
-      rdpSource: candidate.sourceRdp,
-    };
-    const mapSignal = (method, start, end, statistic, locator) => {
-      if (!(end > start)) return;
-      const mapped = mapInterval(start, end, candidate.rotation, nSites);
-      const signal = { method, ...mapped, statistic, locator };
-      if (!isCoLocatedSignal(candidate, signal, nSites)) return;
-      if (!(candidate.methodSignals ?? []).some((entry) => entry.method === method && entry.start === signal.start && entry.end === signal.end)) {
+    const candidateTriplet = [candidate.analysisRecombinant, candidate.analysisMajorParent, candidate.analysisMinorParent];
+    const orderedCandidateTriplet = [...candidateTriplet].sort((left, right) => left - right);
+    const candidateTargetSlot = orderedCandidateTriplet.indexOf(candidate.analysisRecombinant);
+    const sourceChiByMethod = new Map();
+    for (const row of getSourceChiRows(candidateTriplet, {
+      sequencePtr: candidate.sequencePtr,
+      rotation: candidate.rotation,
+    })) {
+      if (row[0] === 4 && row[1] !== candidateTargetSlot) continue;
+      const signal = sourceChiSignal(row, candidate.rotation, nSites);
+      if (!isCoLocatedSignal(candidate, signal, nSites)) continue;
+      const previous = sourceChiByMethod.get(signal.method);
+      if (!previous || signal.statistic > previous.statistic) sourceChiByMethod.set(signal.method, signal);
+    }
+    for (const signal of sourceChiByMethod.values()) {
+      if (!(candidate.methodSignals ?? []).some((entry) => (
+        entry.method === signal.method && entry.start === signal.start && entry.end === signal.end
+      ))) {
         candidate.methodSignals = [...(candidate.methodSignals ?? []), signal];
       }
+    }
+    const sourceMaxChi = sourceChiByMethod.get("MaxChi")
+      ?? (candidate.methodSignals ?? []).find((signal) => signal.method === "MaxChi" && signal.sourceChi);
+    const sourceChimaera = sourceChiByMethod.get("Chimaera")
+      ?? (candidate.methodSignals ?? []).find((signal) => signal.method === "Chimaera" && signal.sourceChi);
+    candidate.stats = {
+      genconvRun: 0,
+      genconvEligible: 0,
+      genconvMatches: 0,
+      genconvStart: 0,
+      genconvEnd: 0,
+      bootscanConsistent: 0,
+      bootscanWindows: 0,
+      maxChi: sourceMaxChi?.statistic ?? 0,
+      chimaera: sourceChimaera?.statistic ?? 0,
+      siskanScore: 0,
+      siskanSites: 0,
+      threeSeqDescent: 0,
+      threeSeqSites: 0,
+      maxChiBoundaries: sourceMaxChi?.sourceChi?.boundaryStatistics ?? [0, 0],
+      chimaeraBoundaries: sourceChimaera?.sourceChi?.boundaryStatistics ?? [0, 0],
+      maxChiInformative: sourceMaxChi?.sourceChi?.informativeSites,
+      maxChiHalfWindow: sourceMaxChi?.sourceChi?.halfWindow,
+      chimaeraInformative: sourceChimaera?.sourceChi?.informativeSites,
+      chimaeraHalfWindow: sourceChimaera?.sourceChi?.halfWindow,
+      threeSeqMajorSites: 0,
+      threeSeqMinorSites: 0,
+      bootscanBootstrapConsistent: 0,
+      bootscanBootstrapReplicates: 0,
+      threeSeqStart: 0,
+      threeSeqEnd: 0,
+      maxChiStart: 0,
+      maxChiEnd: 0,
+      chimaeraStart: 0,
+      chimaeraEnd: 0,
+      bootscanStart: 0,
+      bootscanEnd: 0,
+      siskanStart: 0,
+      siskanEnd: 0,
+      bootscanRunWindows: 0,
+      siskanRunWindows: 0,
+      rdpSource: candidate.sourceRdp,
     };
-    if (options.methods.includes("GENECONV")) mapSignal("GENECONV", methodOutput[3], methodOutput[4], methodOutput[0], "maximum concordant fragment");
-    if (options.methods.includes("BootScan")) mapSignal("BootScan", methodOutput[29], methodOutput[30], methodOutput[21] / Math.max(1, methodOutput[22]), "minor-topology window run");
-    if (options.methods.includes("MaxChi")) mapSignal("MaxChi", methodOutput[25], methodOutput[26], methodOutput[7] / 1000, "independent χ² peak pair");
-    if (options.methods.includes("Chimaera")) mapSignal("Chimaera", methodOutput[27], methodOutput[28], methodOutput[8] / 1000, "independent binary χ² peak pair");
     if (options.methods.includes("SiScan")) {
-      const preliminary = methodOutput[32] > methodOutput[31]
-        ? { method: "SiScan", ...mapInterval(methodOutput[31], methodOutput[32], candidate.rotation, nSites) }
-        : null;
-      const sourceRequested = (candidate.methodSignals ?? []).some((signal) => signal.method === "SiScan")
-        || isCoLocatedSignal(candidate, preliminary, nSites);
+      const sourceRequested = options.methods.includes("SiScan");
       // The WASM category run is a deliberately cheap locator.  It may seed a
       // candidate, but it never supplies final SiScan evidence: the source
       // 15-category/outgroup/permutation workflow must confirm a co-located
@@ -1255,10 +1400,9 @@ async function analyze(message) {
         }
       }
     }
-    if (options.methods.includes("3Seq")) mapSignal("3Seq", methodOutput[23], methodOutput[24], methodOutput[11], "maximum HGRW descent");
     if (options.polishBreakpoints) {
-      let polishedStart = methodOutput[17];
-      let polishedEnd = methodOutput[18];
+      let polishedStart = candidate.rawStart;
+      let polishedEnd = candidate.rawEnd;
       candidate.breakpointModel = {
         method: "local-chi-square",
         informativeSites: candidate.informative,
@@ -1304,7 +1448,7 @@ async function analyze(message) {
     candidate.methodSignals = (candidate.methodSignals ?? []).filter((signal) => isCoLocatedSignal(candidate, signal, nSites));
     candidate.diagnostics = candidateDiagnostics(candidate, encoded, nSites, diagnosticProfile);
     if (candidateIndex % 16 === 0 || candidateIndex === unique.length - 1) {
-      postMessage({
+      emit({
         type: "progress",
         jobId,
         progress: 0.85 + 0.15 * (candidateIndex + 1) / Math.max(1, unique.length),
@@ -1516,7 +1660,7 @@ async function analyze(message) {
     }
   }
 
-  postMessage({
+  const result = {
     type: "result",
     jobId,
     events,
@@ -1532,6 +1676,11 @@ async function analyze(message) {
       erasedCanonicalBases: disassembly.erasedCanonicalBases,
     },
     rdpSignalTruncations: truncatedRdpSignals,
+    chiSignalTruncations: truncatedChiSignals,
+    tripletKernelCalls: {
+      rdp: rdpTripletKernelCalls,
+      sourceChi: sourceChiTripletKernelCalls,
+    },
     matrixCount,
     parentSamples: exactDistanceMatrix ? nSites : Math.min(parentSamples, nSites),
     matrixMode: exactDistanceMatrix && exactDisplayMatrix
@@ -1552,6 +1701,210 @@ async function analyze(message) {
       options.ancestralClustering === false ? "event clustering off" : `${clustered.clusters.length} ancestral clusters`,
       disassembly.componentCount > 0 ? `${disassembly.componentCount} extracted analysis components` : "intact alignment",
     ].join(" · "),
+  };
+  emit(result);
+  return result;
+}
+
+function cycleEventP(event) {
+  return Math.min(1, ...(event.evidence ?? []).map((item) => item.correctedP));
+}
+
+function cycleEventOrigins(event) {
+  return [event.recombinant, event.majorParent, event.minorParent];
+}
+
+function cycleRecombinantOrigins(event) {
+  const selected = event.coRecombinantSets?.find((set) => set.presumedRecombinant === event.recombinant);
+  const members = selected?.sequenceMembers?.length
+    ? selected.sequenceMembers
+    : event.ancestralCluster?.sequenceMembers?.length
+      ? event.ancestralCluster.sequenceMembers
+      : [event.recombinant];
+  return [...new Set([event.recombinant, ...members])].sort((left, right) => left - right);
+}
+
+function sameCycleEvent(left, right, length) {
+  if (left.recombinant !== right.recombinant) return false;
+  const leftParents = [left.majorParent, left.minorParent].sort((a, b) => a - b).join(":");
+  const rightParents = [right.majorParent, right.minorParent].sort((a, b) => a - b).join(":");
+  if (leftParents !== rightParents) return false;
+  return sameCircularBreakpoints(left, right, length) || overlap(left, right, length) > 0.75;
+}
+
+function mergeCyclePool(current, incoming, selected, invalidatedOrigins, length) {
+  const retained = current.filter((event) => (
+    !cycleEventOrigins(event).some((origin) => invalidatedOrigins.has(origin))
+    && !selected.some((accepted) => sameCycleEvent(accepted, event, length))
+  ));
+  for (const event of incoming) {
+    if (selected.some((accepted) => sameCycleEvent(accepted, event, length))) continue;
+    const duplicate = retained.find((candidate) => sameCycleEvent(candidate, event, length));
+    if (!duplicate) retained.push(event);
+    else if (cycleEventP(event) < cycleEventP(duplicate)) retained[retained.indexOf(duplicate)] = event;
+  }
+  return retained.sort((left, right) => cycleEventP(left) - cycleEventP(right));
+}
+
+// RDP5 manual section 4.1.6: screen, take the best signal, identify its
+// recombinant/co-recombinant set, erase and extract those tracts, then repeat
+// until no signal remains. Unaffected detections stay in the pool; only
+// triplets containing an origin modified by the latest event are put on the
+// redo list. This is the source workflow's sequential decomposition rather
+// than a post-hoc reconstruction of a one-pass result list.
+async function analyzeCyclic(message) {
+  const started = performance.now();
+  const selected = [];
+  const applied = Array.isArray(message.disassemblyEvents)
+    ? message.disassemblyEvents.filter((event) => event?.decision === "accepted" && event.evidenceStale !== true)
+    : [];
+  const preexistingAppliedCount = applied.length;
+  let pool = [];
+  let affectedOrigins = [];
+  let executedPasses = 0;
+  let lastResult = null;
+  let stoppedBecause = "no-detectable-signals";
+  const maximumCycles = Math.max(1, Math.min(1000, Math.trunc(message.options.maximumDetectionCycles ?? 250)));
+  const aggregate = {
+    comparisons: 0,
+    initialComparisons: 0,
+    distanceMs: 0,
+    scanMs: 0,
+    statisticsMs: 0,
+    diagnosticsMs: 0,
+    clusteringMs: 0,
+    rdpSignalTruncations: 0,
+    chiSignalTruncations: 0,
+    rdpCalls: 0,
+    sourceChiCalls: 0,
+  };
+
+  while (selected.length < maximumCycles && executedPasses < maximumCycles * 4 + 4) {
+    let passResult = null;
+    const passNumber = executedPasses + 1;
+    const passJobId = `${message.jobId}-cycle-${passNumber}`;
+    await analyze({
+      ...message,
+      jobId: passJobId,
+      disassemblyEvents: applied,
+      affectedOrigins: executedPasses === 0 ? [] : affectedOrigins,
+    }, (payload) => {
+      if (payload.type === "result") {
+        passResult = payload;
+        return;
+      }
+      if (payload.type === "progress") {
+        postMessage({
+          ...payload,
+          jobId: message.jobId,
+          progress: Math.min(0.98, 1 - 1 / (passNumber + Math.max(0, Math.min(1, payload.progress)))),
+          phase: `Detection pass ${passNumber} · ${payload.phase}`,
+        });
+        return;
+      }
+      if (payload.type === "partial") {
+        postMessage({ ...payload, jobId: message.jobId, events: [...selected, ...payload.events] });
+      }
+    });
+    if (!passResult) throw new Error(`Detection pass ${passNumber} did not return a result.`);
+    lastResult = passResult;
+    executedPasses += 1;
+    aggregate.comparisons += passResult.comparisons;
+    if (executedPasses === 1) aggregate.initialComparisons = passResult.comparisons;
+    aggregate.distanceMs += passResult.timing?.distanceMs ?? 0;
+    aggregate.scanMs += passResult.timing?.scanMs ?? 0;
+    aggregate.statisticsMs += passResult.timing?.statisticsMs ?? 0;
+    aggregate.diagnosticsMs += passResult.timing?.diagnosticsMs ?? 0;
+    aggregate.clusteringMs += passResult.timing?.clusteringMs ?? 0;
+    aggregate.rdpSignalTruncations += passResult.rdpSignalTruncations ?? 0;
+    aggregate.chiSignalTruncations += passResult.chiSignalTruncations ?? 0;
+    aggregate.rdpCalls += passResult.tripletKernelCalls?.rdp ?? 0;
+    aggregate.sourceChiCalls += passResult.tripletKernelCalls?.sourceChi ?? 0;
+
+    pool = mergeCyclePool(
+      pool,
+      passResult.events,
+      selected,
+      new Set(executedPasses === 1 ? [] : affectedOrigins),
+      message.alignment.length,
+    );
+    const best = pool[0];
+    if (!best) break;
+    // Detection signals that survived from an earlier pool are still valid,
+    // but RDP5 characterizes the chosen signal against the *current*
+    // component alignment. Refresh every concrete triplet involving that
+    // candidate before applying it if its role/group ledger predates an erase.
+    const appliedIds = applied.map((event) => event.id);
+    const characterizedIds = new Set(best.componentProvenance?.appliedEventIds ?? []);
+    if (appliedIds.some((id) => !characterizedIds.has(id))) {
+      affectedOrigins = cycleEventOrigins(best);
+      continue;
+    }
+    pool.shift();
+    const round = selected.length + 1;
+    const members = cycleRecombinantOrigins(best);
+    const cycleSummary = `Selected as the strongest remaining signal in RDP5 erase/extract cycle ${round}; ${members.length} recombinant lineage${members.length === 1 ? "" : "s"} split before the redo-list scan.`;
+    const recorded = {
+      ...best,
+      decision: "unreviewed",
+      note: [best.note, cycleSummary].filter(Boolean).join(" "),
+      history: [
+        ...(best.history ?? []),
+        {
+          id: `history-${message.jobId}-cycle-${round}`,
+          timestamp: new Date().toISOString(),
+          action: `Cyclic detection round ${round}`,
+          summary: cycleSummary,
+        },
+      ],
+    };
+    selected.push(recorded);
+    applied.push({ ...recorded, decision: "accepted", evidenceStale: false });
+    affectedOrigins = members;
+  }
+
+  if (!lastResult) throw new Error("Cyclic detection did not start.");
+  if (selected.length >= maximumCycles || executedPasses >= maximumCycles * 4 + 4) {
+    stoppedBecause = "cycle-cap";
+    const final = selected[selected.length - 1];
+    const warning = `Cyclical detection stopped at the configured ${maximumCycles}-event safety cap while detectable signals remained.`;
+    if (!final.warnings.includes(warning)) final.warnings.push(warning);
+    final.note = [final.note, warning].filter(Boolean).join(" ");
+  }
+  const totalMs = performance.now() - started;
+  postMessage({
+    ...lastResult,
+    jobId: message.jobId,
+    events: selected,
+    comparisons: aggregate.comparisons,
+    elapsedMs: totalMs,
+    timing: {
+      distanceMs: aggregate.distanceMs,
+      scanMs: aggregate.scanMs,
+      statisticsMs: aggregate.statisticsMs,
+      diagnosticsMs: aggregate.diagnosticsMs,
+      clusteringMs: aggregate.clusteringMs,
+    },
+    rdpSignalTruncations: aggregate.rdpSignalTruncations,
+    chiSignalTruncations: aggregate.chiSignalTruncations,
+    tripletKernelCalls: {
+      rdp: aggregate.rdpCalls,
+      sourceChi: aggregate.sourceChiCalls,
+    },
+    detectionCycle: {
+      enabled: true,
+      eventsApplied: selected.length,
+      passes: executedPasses,
+      initialComparisons: aggregate.initialComparisons,
+      redoComparisons: Math.max(0, aggregate.comparisons - aggregate.initialComparisons),
+      stoppedBecause,
+      maximumCycles,
+    },
+    disassembly: {
+      ...(lastResult.disassembly ?? {}),
+      appliedEvents: applied.length,
+    },
+    engine: `${lastResult.engine} · sequential erase/extract redo queue (${selected.length} new events; ${preexistingAppliedCount} pre-applied)`,
   });
 }
 
@@ -1642,9 +1995,22 @@ async function recalculate(message) {
   const prefixAPtr = align(seqPtr + working.byteLength, 16);
   const prefixBPtr = prefixAPtr + (nSites + 1) * 4;
   const outPtr = align(prefixBPtr + (nSites + 1) * 4, 16);
-  const statsPtr = align(outPtr + 96, 16);
+  const chiSignalCapacity = Math.max(1, Math.min(256, Math.trunc(options.chiSignalsPerTriplet ?? 24)));
+  const chiTrackCount = 3 * (
+    Number(options.methods.includes("MaxChi")) + Number(options.methods.includes("Chimaera"))
+  );
+  const chiPeakCapacity = Math.max(8, Math.min(256, Math.ceil(
+    (chiSignalCapacity * 2) / Math.max(3, chiTrackCount),
+  )));
+  const chiPositionsPtr = align(outPtr + 96, 16);
+  const chiScoresPtr = chiPositionsPtr + 4 * (nSites + 1) * 4;
+  const chiMissingPrefixPtr = align(chiScoresPtr + 4 * (nSites + 1), 4);
+  const chiProfilePtr = align(chiMissingPrefixPtr + (nSites + 1) * 4, 8);
+  const chiSmoothPtr = chiProfilePtr + (nSites + 1) * 8;
+  const chiPeakPtr = align(chiSmoothPtr + (nSites + 1) * 8, 4);
+  const chiOutPtr = chiPeakPtr + chiPeakCapacity * SOURCE_CHI_PEAK_INTS * 4;
   const workingPacked = packSequences(working, workingSequenceCount, nSites);
-  const packedPtr = align(statsPtr + 160, 16);
+  const packedPtr = align(chiOutPtr + chiSignalCapacity * SOURCE_CHI_ROW_INTS * 4, 16);
   const validityPtr = packedPtr + workingPacked.packed.byteLength;
   const sourceSiScanExactDistance = options.methods.includes("SiScan")
     && workingSequenceCount <= 512
@@ -1731,57 +2097,38 @@ async function recalculate(message) {
     outPtr,
   );
   const counts = new Int32Array(instance.exports.memory.buffer, outPtr, 6).slice();
-  instance.exports.method_stats(
-    seqPtr,
-    nSites,
-    analysisRecombinant,
-    analysisMajorParent,
-    analysisMinorParent,
-    rawStart,
-    rawEnd,
-    Math.max(20, options.window),
-    Math.max(1, options.step),
-    options.methods.includes("BootScan") ? Math.max(0, options.bootstrapReplicates ?? 100) : 0,
-    (options.randomSeed ?? 0x5a17c0de) | 0,
-    enabledMethodMask(options),
-    prefixAPtr,
-    prefixBPtr,
-    statsPtr,
-    options.geneconvGScale ?? 1,
-  );
-  const output = new Int32Array(instance.exports.memory.buffer, statsPtr, 35);
   const stats = {
-    genconvRun: output[0],
-    genconvEligible: output[1],
-    genconvMatches: output[2],
-    genconvStart: output[3],
-    genconvEnd: output[4],
-    bootscanConsistent: output[5],
-    bootscanWindows: output[6],
-    maxChi: output[7] / 1000,
-    chimaera: output[8] / 1000,
-    siskanScore: output[9],
-    siskanSites: output[10],
-    threeSeqDescent: output[11],
-    threeSeqSites: output[12],
-    maxChiBoundaries: [output[13] / 1000, output[14] / 1000],
-    chimaeraBoundaries: [output[15] / 1000, output[16] / 1000],
-    threeSeqMajorSites: output[19],
-    threeSeqMinorSites: output[20],
-    bootscanBootstrapConsistent: output[21],
-    bootscanBootstrapReplicates: output[22],
-    threeSeqStart: output[23],
-    threeSeqEnd: output[24],
-    maxChiStart: output[25],
-    maxChiEnd: output[26],
-    chimaeraStart: output[27],
-    chimaeraEnd: output[28],
-    bootscanStart: output[29],
-    bootscanEnd: output[30],
-    siskanStart: output[31],
-    siskanEnd: output[32],
-    bootscanRunWindows: output[33],
-    siskanRunWindows: output[34],
+    genconvRun: 0,
+    genconvEligible: 0,
+    genconvMatches: 0,
+    genconvStart: 0,
+    genconvEnd: 0,
+    bootscanConsistent: 0,
+    bootscanWindows: 0,
+    maxChi: 0,
+    chimaera: 0,
+    siskanScore: 0,
+    siskanSites: 0,
+    threeSeqDescent: 0,
+    threeSeqSites: 0,
+    maxChiBoundaries: [0, 0],
+    chimaeraBoundaries: [0, 0],
+    threeSeqMajorSites: 0,
+    threeSeqMinorSites: 0,
+    bootscanBootstrapConsistent: 0,
+    bootscanBootstrapReplicates: 0,
+    threeSeqStart: 0,
+    threeSeqEnd: 0,
+    maxChiStart: 0,
+    maxChiEnd: 0,
+    chimaeraStart: 0,
+    chimaeraEnd: 0,
+    bootscanStart: 0,
+    bootscanEnd: 0,
+    siskanStart: 0,
+    siskanEnd: 0,
+    bootscanRunWindows: 0,
+    siskanRunWindows: 0,
   };
   const candidate = {
     recombinant: event.recombinant,
@@ -1809,13 +2156,70 @@ async function recalculate(message) {
     stats,
     diagnostics: null,
   };
+  const recalculatedSourceChiSignals = [];
+  const recalculatedChiMask = (options.methods.includes("MaxChi") ? 4 : 0)
+    | (options.methods.includes("Chimaera") ? 8 : 0);
+  if (recalculatedChiMask !== 0) {
+    const orderedTriplet = [analysisRecombinant, analysisMajorParent, analysisMinorParent]
+      .sort((left, right) => left - right);
+    const targetSlot = orderedTriplet.indexOf(analysisRecombinant);
+    const total = instance.exports.scan_source_chi_all(
+      seqPtr,
+      nSites,
+      orderedTriplet[0],
+      orderedTriplet[1],
+      orderedTriplet[2],
+      Math.max(20, options.window),
+      0,
+      recalculatedChiMask,
+      chiPositionsPtr,
+      chiScoresPtr,
+      chiMissingPrefixPtr,
+      chiProfilePtr,
+      chiSmoothPtr,
+      chiPeakPtr,
+      chiPeakCapacity,
+      chiOutPtr,
+      chiSignalCapacity,
+    );
+    const bestByMethod = new Map();
+    for (let index = 0; index < Math.min(total, chiSignalCapacity); index += 1) {
+      const row = Array.from(new Int32Array(
+        memory.buffer,
+        chiOutPtr + index * SOURCE_CHI_ROW_INTS * 4,
+        SOURCE_CHI_ROW_INTS,
+      ));
+      if (row[0] === 4 && row[1] !== targetSlot) continue;
+      const signal = sourceChiSignal(row, rotation, nSites);
+      if (!isCoLocatedSignal(candidate, signal, nSites)) continue;
+      const previous = bestByMethod.get(signal.method);
+      if (!previous || signal.statistic > previous.statistic) bestByMethod.set(signal.method, signal);
+    }
+    recalculatedSourceChiSignals.push(...bestByMethod.values());
+    const maxChi = bestByMethod.get("MaxChi");
+    const chimaera = bestByMethod.get("Chimaera");
+    if (maxChi) {
+      stats.maxChi = maxChi.statistic;
+      stats.maxChiBoundaries = maxChi.sourceChi.boundaryStatistics;
+      stats.maxChiInformative = maxChi.sourceChi.informativeSites;
+      stats.maxChiHalfWindow = maxChi.sourceChi.halfWindow;
+    } else {
+      stats.maxChi = 0;
+      stats.maxChiBoundaries = [0, 0];
+    }
+    if (chimaera) {
+      stats.chimaera = chimaera.statistic;
+      stats.chimaeraBoundaries = chimaera.sourceChi.boundaryStatistics;
+      stats.chimaeraInformative = chimaera.sourceChi.informativeSites;
+      stats.chimaeraHalfWindow = chimaera.sourceChi.halfWindow;
+    } else {
+      stats.chimaera = 0;
+      stats.chimaeraBoundaries = [0, 0];
+    }
+  }
   let recalculatedSiScanSignal = null;
   if (options.methods.includes("SiScan")) {
-    const preliminary = output[32] > output[31]
-      ? { method: "SiScan", ...mapInterval(output[31], output[32], rotation, nSites) }
-      : null;
-    const sourceRequested = (event.methodSignals ?? []).some((signal) => signal.method === "SiScan")
-      || isCoLocatedSignal(candidate, preliminary, nSites);
+    const sourceRequested = true;
     stats.siskanScore = 0;
     stats.siskanSites = 0;
     stats.siskanSourceP = 1;
@@ -1907,8 +2311,7 @@ async function recalculate(message) {
     ...(options.methods.includes("RDP") ? [{ method: "RDP", ...mappedInterval, statistic: candidate.chiSquare, locator: "edited hypothesis recalculation" }] : []),
     ...(options.methods.includes("GENECONV") && output[4] > output[3] ? [{ method: "GENECONV", ...mapInterval(output[3], output[4], rotation, nSites), statistic: output[0], locator: "maximum concordant fragment" }] : []),
     ...(options.methods.includes("BootScan") && output[30] > output[29] ? [{ method: "BootScan", ...mapInterval(output[29], output[30], rotation, nSites), statistic: output[21] / Math.max(1, output[22]), locator: "minor-topology window run" }] : []),
-    ...(options.methods.includes("MaxChi") && output[26] > output[25] ? [{ method: "MaxChi", ...mapInterval(output[25], output[26], rotation, nSites), statistic: output[7] / 1000, locator: "independent χ² peak pair" }] : []),
-    ...(options.methods.includes("Chimaera") && output[28] > output[27] ? [{ method: "Chimaera", ...mapInterval(output[27], output[28], rotation, nSites), statistic: output[8] / 1000, locator: "independent binary χ² peak pair" }] : []),
+    ...recalculatedSourceChiSignals,
     ...(recalculatedSiScanSignal ? [recalculatedSiScanSignal] : []),
     ...(options.methods.includes("3Seq") && output[24] > output[23] ? [{ method: "3Seq", ...mapInterval(output[23], output[24], rotation, nSites), statistic: output[11], locator: "maximum HGRW descent" }] : []),
   ].filter((signal) => isCoLocatedSignal(candidate, signal, nSites));
@@ -1987,7 +2390,11 @@ async function recalculate(message) {
 
 self.onmessage = (event) => {
   if (event.data?.type !== "analyze" && event.data?.type !== "recalculate") return;
-  const operation = event.data.type === "recalculate" ? recalculate : analyze;
+  const operation = event.data.type === "recalculate"
+    ? recalculate
+    : event.data.cyclicDetection === true
+      ? analyzeCyclic
+      : analyze;
   operation(event.data).catch((error) => {
     postMessage({
       type: "error",

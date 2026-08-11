@@ -232,8 +232,10 @@ export function geneconvSourceProbability(score, eligible, matchingSites, gScale
 // tail to the best peak, multiply by the number of half-window placements in
 // compressed informative-site space, then by the three pairwise triplet
 // orientations. Experiment-wide correction is applied separately below.
-export function sourceChiWindowProbability(statistic, informativeSites, fullWindow) {
-  const halfWindow = Math.max(8, Math.floor(fullWindow / 2));
+export function sourceChiWindowProbability(statistic, informativeSites, fullWindow, exactHalfWindow = null) {
+  const halfWindow = exactHalfWindow === null
+    ? Math.max(8, Math.floor(fullWindow / 2))
+    : Math.max(1, Math.floor(exactHalfWindow));
   const placements = Math.max(1, informativeSites / halfWindow);
   return clampProbability(chiSquareP(statistic) * placements * 3);
 }
@@ -296,6 +298,8 @@ export function methodEvidence(candidate, stats, options, comparisons, nSites) {
     : null);
   const hasSignalLedger = Array.isArray(candidate.methodSignals);
   const locatedMethods = new Set((candidate.methodSignals ?? []).map((signal) => signal.method));
+  const maxChiSignal = (candidate.methodSignals ?? []).find((signal) => signal.method === "MaxChi" && signal.sourceChi);
+  const chimaeraSignal = (candidate.methodSignals ?? []).find((signal) => signal.method === "Chimaera" && signal.sourceChi);
 
   const calculations = {
     RDP: {
@@ -321,16 +325,30 @@ export function methodEvidence(candidate, stats, options, comparisons, nSites) {
         : "distance-window sign test",
     },
     MaxChi: {
-      p: sourceChiWindowProbability(stats.maxChi, stats.genconvEligible, options.window),
+      p: sourceChiWindowProbability(
+        stats.maxChi,
+        maxChiSignal?.sourceChi?.informativeSites ?? stats.genconvEligible,
+        options.window,
+        maxChiSignal?.sourceChi?.halfWindow ?? null,
+      ),
       statistic: stats.maxChi,
       statisticLabel: "minimum boundary χ²",
-      calibration: "RDP5 ChiPVal2P · informative half-window × 3",
+      calibration: maxChiSignal?.sourceChi
+        ? `RDP5 ChiPVal2P · ${maxChiSignal.sourceChi.informativeSites} compressed sites · half-window ${maxChiSignal.sourceChi.halfWindow} × 3`
+        : "RDP5 ChiPVal2P · informative half-window × 3",
     },
     Chimaera: {
-      p: sourceChiWindowProbability(stats.chimaera, stats.threeSeqSites, options.window),
+      p: sourceChiWindowProbability(
+        stats.chimaera,
+        chimaeraSignal?.sourceChi?.informativeSites ?? stats.threeSeqSites,
+        options.window,
+        chimaeraSignal?.sourceChi?.halfWindow ?? null,
+      ),
       statistic: stats.chimaera,
       statisticLabel: "minimum boundary χ²",
-      calibration: "RDP5 ChiPVal2P · binary half-window × 3",
+      calibration: chimaeraSignal?.sourceChi
+        ? `RDP5 ChiPVal2P · ${chimaeraSignal.sourceChi.informativeSites} binary sites · half-window ${chimaeraSignal.sourceChi.halfWindow} × 3`
+        : "RDP5 ChiPVal2P · binary half-window × 3",
     },
     SiScan: {
       p: sourceSiScanAvailable

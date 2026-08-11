@@ -6,32 +6,33 @@ simulation results, workflow parity, and browser-scale performance.
 
 ## Track A — primary detection methods
 
-- The parity scan now enumerates every unordered triplet of concrete alignment
-  sequences by default and evaluates each possible recombinant polarity; no
-  method receives a consensus/rest-of-alignment proxy as its third member. The
-  parent shortlist is an explicitly approximate preview only. Preserve this
-  coverage while moving more triplet batching and method orchestration into
-  packed WebAssembly kernels.
+- Manual §4.1.6 cyclical detection is operational and default: best-signal
+  selection, co-recombinant erase/extract, recursively addressed components,
+  unaffected-signal pooling, affected-origin redo scans, and current-component
+  refresh before application. Finish desktop golden fixtures for exact
+  redo-list compaction, minimum-size component dropping, and tie ordering.
+- The parity scan now constructs one `a < b < c` record for every unordered
+  concrete triplet. RDP and combined MAXCHI/CHIMAERA each run once and resolve
+  internal tracks/polarities; two-bit extraction skips invariant columns for
+  that triplet only. Keep the exact packed/byte and kernel-call regressions.
 - RDP: reproduce reference selection, informative-window enumeration, and
   local/global p-values on documented triplets. Multi-excursion source
   enumeration is operational; complete the desktop tie/missing/circular corpus.
-- GENECONV: source finite-G integer mismatch scoring and the
-  `CalcKMaxP`/`GCCalcPValP` KA path are operational, including G=0; finish
-  indel-run modes, overlap suppression, pair scans and native permutations.
-- BOOTSCAN/RECSCAN: seeded native triplet bootstrapping is operational; retain
-  multi-taxon NJ/substitution-model detection and RDP5 cutoff parity work.
-- MAXCHI and CHIMAERA: compressed informative-site windows, independent peak
-  pairs and the source half-window × three-pair correction are operational;
-  finish `GrowMChiWin` peak growth, smoothing/ban-window edge behavior and
-  desktop table parity.
+- GENECONV: port the complete `AlistGC2`/`GCXoverDP2` batch, fragment queues,
+  `CalcKMaxP`/`GCCalcPValP`, indel/overlap modes and permutations before
+  re-enabling the method.
+- BOOTSCAN/RECSCAN: port the complete source multi-taxon window/tree/bootstrap
+  batch before re-enabling the method.
+- MAXCHI and CHIMAERA: source compressed tracks, window rules, 11-position
+  smoothing, basin destruction, GrowMChiWin expansion and multi-peak queues are
+  operational; finish desktop lookup-table/rounding and edge-case corpus.
 - SISCAN: source nearest-tree/direct, most-divergent, manual and randomized
   fourth-sequence paths; 15 site categories and topology sums;
   horizontal/vertical randomization; reproducible seeds; topology-run
   enumeration and shrinkage; and bounded-memory fast/full controls are
   operational. Finish desktop tie/missing-data and plot-by-plot corpus parity.
-- 3SEQ: exact HGRW first-passage dynamic programming is operational within a
-  browser work budget; finish large-case lookup/algorithm comparisons and
-  RDP5 corrected-p validation.
+- 3SEQ: port the complete author-source discovery and probability-table path
+  before re-enabling the method.
 
 ## Track B — false-positive control and breakpoint inference
 
@@ -61,9 +62,8 @@ simulation results, workflow parity, and browser-scale performance.
   source/manual-guided six-stage Review studio are operational. The primary
   surface now includes characterization-order navigation, best-unresolved and
   method-count filtering, source-weighted role-polarity audition, group-level decisions, and
-  tract/background tree verification. All seven families now own independent
-  discovery intervals and co-location gates; add multi-signal raw queues and
-  richer source plot controls for every non-RDP family.
+  tract/background tree verification. Source-ready families own their interval
+  provenance; finish and re-enable the remaining method batches one at a time.
 - The desktop-default `MakeConsensusC` role path now covers its 18 standalone
   statistics, final-trim penalty, and six joint rules, including `FindSets`-driven parsimony
   fallbacks, O:E/O:EDist, SSDist/OUIndex, Conflict, SetDistT/P, final-trim
@@ -102,8 +102,8 @@ simulation results, workflow parity, and browser-scale performance.
   large-path fixtures are automated; expand low/high-diversity and
   recombinant-of-recombinant corpora.
 - The C(5,3) worker regression guards complete concrete-triplet coverage and
-  provenance. Add method-by-method, polarity-by-polarity call-count fixtures
-  as the remaining detector orchestration moves into larger batched kernels.
+  proves one RDP plus one combined χ kernel call per triple. Extend the same
+  call-count contract as each remaining source batch is enabled.
 - Numerical comparison ledger against RDP5 outputs supplied by the original
   authors and collaborators; the permitted desktop source is the reference
   specification for browser ports.

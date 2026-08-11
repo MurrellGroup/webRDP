@@ -354,92 +354,958 @@ function prefixValue(ptr: i32, position: i32): i32 {
   return load<i32>(usize(ptr + position * 4));
 }
 
+// RDP5 FastRecCheckMC/FastRecCheckChim share a considerably richer peak
+// locator than the single strongest-pair shortcut used by early RDP Web
+// builds.  The source path below keeps the historical compressed-coordinate
+// scan, strict first-maximum ordering, 11-position smoothing basin,
+// GrowMChiWin expansion and three triplet tracks in one allocation-free WASM
+// kernel.  Scratch buffers are owned by the worker and reused across every
+// concrete triplet.
+
+const SOURCE_CHI_ROW_INTS: i32 = 16;
+const SOURCE_CHI_PEAK_INTS: i32 = 6;
+
 @inline
-function breakpointChi(
-  prefixAPtr: i32,
-  prefixBPtr: i32,
-  nSites: i32,
-  position: i32,
-  halfWindow: i32,
-): f64 {
-  const left = clamp(position - halfWindow, 0, nSites);
-  const center = clamp(position, 0, nSites);
-  const right = clamp(position + halfWindow, 0, nSites);
-  const leftA = prefixValue(prefixAPtr, center) - prefixValue(prefixAPtr, left);
-  const leftB = prefixValue(prefixBPtr, center) - prefixValue(prefixBPtr, left);
-  const rightA = prefixValue(prefixAPtr, right) - prefixValue(prefixAPtr, center);
-  const rightB = prefixValue(prefixBPtr, right) - prefixValue(prefixBPtr, center);
-  if (leftA + leftB < 4 || rightA + rightB < 4) return 0.0;
-  return chiSquare(leftA, leftB, rightA, rightB);
+function sourceChiScore(scoresPtr: i32, rank: i32, scoreBit: i32): i32 {
+  return (i32(load<u8>(usize(scoresPtr + rank))) >> scoreBit) & 1;
 }
 
 @inline
-function informativePrefix(prefixAPtr: i32, prefixBPtr: i32, position: i32): i32 {
-  return prefixValue(prefixAPtr, position) + prefixValue(prefixBPtr, position);
+function sourceChiScaled(statistic: f64): i32 {
+  if (!(statistic > 0.0)) return 0;
+  const bounded = statistic > 2_000_000.0 ? 2_000_000.0 : statistic;
+  return i32(bounded * 1000.0);
 }
 
-// RDP5's automated MAXCHI and CHIMAERA scans move in compressed
-// informative-site coordinates, not raw alignment coordinates. This lower
-// bound maps the boundary after `rank` informative sites back to the original
-// alignment without materialising a second coordinate array.
-function positionForInformativeRank(
-  prefixAPtr: i32,
-  prefixBPtr: i32,
-  nSites: i32,
-  rank: i32,
-): i32 {
-  if (rank <= 0) return 0;
-  const total = informativePrefix(prefixAPtr, prefixBPtr, nSites);
-  if (rank >= total) return nSites;
-  let lower: i32 = 0;
-  let upper: i32 = nSites;
-  while (lower < upper) {
-    const middle = lower + (upper - lower) / 2;
-    if (informativePrefix(prefixAPtr, prefixBPtr, middle) < rank) lower = middle + 1;
-    else upper = middle;
+@inline
+function sourceChiModulo(value: i32, length: i32): i32 {
+  let result = value % length;
+  if (result < 0) result += length;
+  return result;
+}
+
+function sourceChiHalfWindow(informative: i32, fullWindow: i32): i32 {
+  if (informative < 7) return 0;
+  let halfWindow = (fullWindow + 1) / 2;
+  const criticalDifference: i32 = 2;
+  if (halfWindow * 2 > informative) {
+    halfWindow = i32((f64(informative) * 0.75 / 2.0) + 0.51) - 1;
   }
-  return lower;
+  if (halfWindow <= criticalDifference) {
+    halfWindow = i32((f64(informative) / 2.0) + 0.51) - 1;
+  }
+  return halfWindow >= 6 ? halfWindow : 0;
 }
 
-function variableBreakpointChi(
-  prefixAPtr: i32,
-  prefixBPtr: i32,
+// Builds the shared MAXCHI track and all three CHIMAERA target tracks in one
+// nucleotide pass. The desktop routines reuse triplet encodings between
+// methods; materializing four compact lanes here gives the browser the same
+// triplet-level economy while keeping each downstream source scan unchanged.
+function sourceChiBuildAllTracks(
+  seqPtr: i32,
   nSites: i32,
-  rank: i32,
-  halfWindow: i32,
-): f64 {
-  const total = informativePrefix(prefixAPtr, prefixBPtr, nSites);
-  if (rank < halfWindow || rank + halfWindow > total) return 0.0;
-  const left = positionForInformativeRank(prefixAPtr, prefixBPtr, nSites, rank - halfWindow);
-  const center = positionForInformativeRank(prefixAPtr, prefixBPtr, nSites, rank);
-  const right = positionForInformativeRank(prefixAPtr, prefixBPtr, nSites, rank + halfWindow);
-  const leftA = prefixValue(prefixAPtr, center) - prefixValue(prefixAPtr, left);
-  const leftB = prefixValue(prefixBPtr, center) - prefixValue(prefixBPtr, left);
-  const rightA = prefixValue(prefixAPtr, right) - prefixValue(prefixAPtr, center);
-  const rightB = prefixValue(prefixBPtr, right) - prefixValue(prefixBPtr, center);
-  return chiSquare(leftA, leftB, rightA, rightB);
+  sequence0: i32,
+  sequence1: i32,
+  sequence2: i32,
+  positionsPtr: i32,
+  scoresPtr: i32,
+  missingPrefixPtr: i32,
+  countsPtr: i32,
+  methodMask: i32,
+): void {
+  const positionStride = (nSites + 1) * 4;
+  const scoreStride = nSites + 1;
+  let maxChiCount: i32 = 0;
+  let chimaera0Count: i32 = 0;
+  let chimaera1Count: i32 = 0;
+  let chimaera2Count: i32 = 0;
+  let missing: i32 = 0;
+  store<i32>(usize(missingPrefixPtr), 0);
+  for (let site: i32 = 0; site < nSites; site += 1) {
+    const a = seqBase(seqPtr, nSites, sequence0, site);
+    const b = seqBase(seqPtr, nSites, sequence1, site);
+    const c = seqBase(seqPtr, nSites, sequence2, site);
+    const complete = valid(a) && valid(b) && valid(c);
+    if (!complete) {
+      missing += 1;
+    } else {
+      if ((methodMask & 4) != 0 && !(a == b && a == c)) {
+        store<i32>(usize(positionsPtr + maxChiCount * 4), site);
+        const scoreBits = i32(a == b) | (i32(a == c) << 1) | (i32(b == c) << 2);
+        store<u8>(usize(scoresPtr + maxChiCount), u8(scoreBits));
+        maxChiCount += 1;
+      }
+      if ((methodMask & 8) != 0 && b != c && (a == b || a == c)) {
+        store<i32>(usize(positionsPtr + positionStride + chimaera0Count * 4), site);
+        store<u8>(usize(scoresPtr + scoreStride + chimaera0Count), u8(a == b));
+        chimaera0Count += 1;
+      }
+      if ((methodMask & 8) != 0 && c != a && (b == c || b == a)) {
+        store<i32>(usize(positionsPtr + positionStride * 2 + chimaera1Count * 4), site);
+        store<u8>(usize(scoresPtr + scoreStride * 2 + chimaera1Count), u8(b == c));
+        chimaera1Count += 1;
+      }
+      if ((methodMask & 8) != 0 && a != b && (c == a || c == b)) {
+        store<i32>(usize(positionsPtr + positionStride * 3 + chimaera2Count * 4), site);
+        store<u8>(usize(scoresPtr + scoreStride * 3 + chimaera2Count), u8(c == a));
+        chimaera2Count += 1;
+      }
+    }
+    store<i32>(usize(missingPrefixPtr + (site + 1) * 4), missing);
+  }
+  store<i32>(usize(countsPtr), maxChiCount);
+  store<i32>(usize(countsPtr + 4), chimaera0Count);
+  store<i32>(usize(countsPtr + 8), chimaera1Count);
+  store<i32>(usize(countsPtr + 12), chimaera2Count);
+  // A negative first prefix entry is the no-missing-data fast-path marker.
+  // It lets every downstream window test avoid reading the O(L) prefix lane.
+  if (missing == 0) store<i32>(usize(missingPrefixPtr), -1);
 }
 
-function polishBreakpoint(
-  prefixAPtr: i32,
-  prefixBPtr: i32,
+// The RDP5 desktop first compresses the alignment and then decodes triplet
+// states through lookup tables instead of rereading three character strings
+// for every triplet. The browser already owns an exact two-bit alignment plus
+// one validity bit per nucleotide lane for distance calculations. Reusing it
+// here advances sixteen raw sites per word and only materializes informative
+// compressed coordinates. This is algebraically identical to
+// sourceChiBuildAllTracks; the byte path remains as a validation oracle.
+function sourceChiBuildAllTracksPacked(
+  packedPtr: i32,
+  validityPtr: i32,
+  wordsPerSequence: i32,
   nSites: i32,
-  proposed: i32,
-  halfWindow: i32,
-): i32 {
-  const radius = halfWindow > 12 ? halfWindow : 12;
-  const first = clamp(proposed - radius, 1, nSites - 1);
-  const last = clamp(proposed + radius, 1, nSites - 1);
-  let bestPosition = clamp(proposed, 1, nSites - 1);
-  let best = breakpointChi(prefixAPtr, prefixBPtr, nSites, bestPosition, halfWindow);
-  for (let position = first; position <= last; position += 1) {
-    const statistic = breakpointChi(prefixAPtr, prefixBPtr, nSites, position, halfWindow);
-    if (statistic > best) {
-      best = statistic;
-      bestPosition = position;
+  sequence0: i32,
+  sequence1: i32,
+  sequence2: i32,
+  positionsPtr: i32,
+  scoresPtr: i32,
+  missingPrefixPtr: i32,
+  countsPtr: i32,
+  methodMask: i32,
+): void {
+  const positionStride = (nSites + 1) * 4;
+  const scoreStride = nSites + 1;
+  const offset0 = sequence0 * wordsPerSequence;
+  const offset1 = sequence1 * wordsPerSequence;
+  const offset2 = sequence2 * wordsPerSequence;
+  let maxChiCount: i32 = 0;
+  let chimaera0Count: i32 = 0;
+  let chimaera1Count: i32 = 0;
+  let chimaera2Count: i32 = 0;
+  let missing: i32 = 0;
+
+  for (let word: i32 = 0; word < wordsPerSequence; word += 1) {
+    const a = load<u32>(usize(packedPtr + (offset0 + word) * 4));
+    const b = load<u32>(usize(packedPtr + (offset1 + word) * 4));
+    const c = load<u32>(usize(packedPtr + (offset2 + word) * 4));
+    let rawLaneMask: u32 = 0x55555555;
+    const remaining = nSites - word * 16;
+    if (remaining < 16) {
+      rawLaneMask = 0;
+      for (let lane: i32 = 0; lane < remaining; lane += 1) rawLaneMask |= u32(1) << u32(lane * 2);
+    }
+    const allValid = load<u32>(usize(validityPtr + (offset0 + word) * 4))
+      & load<u32>(usize(validityPtr + (offset1 + word) * 4))
+      & load<u32>(usize(validityPtr + (offset2 + word) * 4))
+      & rawLaneMask;
+    missing += popCount32(rawLaneMask & ~allValid);
+    const ab = packedEquality(a, b, allValid);
+    const ac = packedEquality(a, c, allValid);
+    const bc = packedEquality(b, c, allValid);
+
+    if ((methodMask & 4) != 0) {
+      let informativeMask = allValid & ~(ab & ac);
+      while (informativeMask != 0) {
+        const bit = i32(ctz<u32>(informativeMask));
+        const lane = u32(1) << u32(bit);
+        const site = word * 16 + bit / 2;
+        store<i32>(usize(positionsPtr + maxChiCount * 4), site);
+        const scoreBits = i32((ab & lane) != 0)
+          | (i32((ac & lane) != 0) << 1)
+          | (i32((bc & lane) != 0) << 2);
+        store<u8>(usize(scoresPtr + maxChiCount), u8(scoreBits));
+        maxChiCount += 1;
+        informativeMask &= informativeMask - 1;
+      }
+    }
+
+    if ((methodMask & 8) != 0) {
+      let chimaera0 = allValid & ~bc & (ab | ac);
+      let chimaera1 = allValid & ~ac & (bc | ab);
+      let chimaera2 = allValid & ~ab & (ac | bc);
+      while (chimaera0 != 0) {
+        const bit = i32(ctz<u32>(chimaera0));
+        const lane = u32(1) << u32(bit);
+        const site = word * 16 + bit / 2;
+        store<i32>(usize(positionsPtr + positionStride + chimaera0Count * 4), site);
+        store<u8>(usize(scoresPtr + scoreStride + chimaera0Count), u8((ab & lane) != 0));
+        chimaera0Count += 1;
+        chimaera0 &= chimaera0 - 1;
+      }
+      while (chimaera1 != 0) {
+        const bit = i32(ctz<u32>(chimaera1));
+        const lane = u32(1) << u32(bit);
+        const site = word * 16 + bit / 2;
+        store<i32>(usize(positionsPtr + positionStride * 2 + chimaera1Count * 4), site);
+        store<u8>(usize(scoresPtr + scoreStride * 2 + chimaera1Count), u8((bc & lane) != 0));
+        chimaera1Count += 1;
+        chimaera1 &= chimaera1 - 1;
+      }
+      while (chimaera2 != 0) {
+        const bit = i32(ctz<u32>(chimaera2));
+        const lane = u32(1) << u32(bit);
+        const site = word * 16 + bit / 2;
+        store<i32>(usize(positionsPtr + positionStride * 3 + chimaera2Count * 4), site);
+        store<u8>(usize(scoresPtr + scoreStride * 3 + chimaera2Count), u8((ac & lane) != 0));
+        chimaera2Count += 1;
+        chimaera2 &= chimaera2 - 1;
+      }
     }
   }
-  return bestPosition;
+
+  if (missing == 0) {
+    store<i32>(usize(missingPrefixPtr), -1);
+  } else {
+    let missingPrefix: i32 = 0;
+    store<i32>(usize(missingPrefixPtr), 0);
+    for (let site: i32 = 0; site < nSites; site += 1) {
+      const word = site >> 4;
+      const lane = u32(1) << u32((site & 15) * 2);
+      const complete = (load<u32>(usize(validityPtr + (offset0 + word) * 4))
+        & load<u32>(usize(validityPtr + (offset1 + word) * 4))
+        & load<u32>(usize(validityPtr + (offset2 + word) * 4))
+        & lane) != 0;
+      if (!complete) missingPrefix += 1;
+      store<i32>(usize(missingPrefixPtr + (site + 1) * 4), missingPrefix);
+    }
+  }
+  store<i32>(usize(countsPtr), maxChiCount);
+  store<i32>(usize(countsPtr + 4), chimaera0Count);
+  store<i32>(usize(countsPtr + 8), chimaera1Count);
+  store<i32>(usize(countsPtr + 12), chimaera2Count);
+}
+
+@inline
+function sourceChiRawSpanHasMissing(
+  positionsPtr: i32,
+  missingPrefixPtr: i32,
+  firstRank: i32,
+  lastRank: i32,
+): bool {
+  if (prefixValue(missingPrefixPtr, 0) < 0) return false;
+  const first = load<i32>(usize(positionsPtr + firstRank * 4));
+  const last = load<i32>(usize(positionsPtr + lastRank * 4));
+  return prefixValue(missingPrefixPtr, last + 1) - prefixValue(missingPrefixPtr, first) > 0;
+}
+
+function sourceChiFillProfile(
+  informative: i32,
+  halfWindow: i32,
+  circular: bool,
+  scoreBit: i32,
+  positionsPtr: i32,
+  scoresPtr: i32,
+  missingPrefixPtr: i32,
+  chiPtr: i32,
+  smoothPtr: i32,
+): void {
+  for (let rank: i32 = 0; rank < informative; rank += 1) {
+    store<f64>(usize(chiPtr + rank * 8), 0.0);
+    store<f64>(usize(smoothPtr + rank * 8), 0.0);
+  }
+  if (halfWindow <= 0 || informative < halfWindow * 2) return;
+
+  let leftOnes: i32 = 0;
+  let rightOnes: i32 = 0;
+  if (circular) {
+    for (let offset: i32 = -halfWindow; offset < 0; offset += 1) {
+      leftOnes += sourceChiScore(scoresPtr, sourceChiModulo(offset, informative), scoreBit);
+    }
+    for (let offset: i32 = 0; offset < halfWindow; offset += 1) {
+      rightOnes += sourceChiScore(scoresPtr, offset, scoreBit);
+    }
+    for (let rank: i32 = 0; rank < informative; rank += 1) {
+      const statistic = chiSquare(
+        leftOnes,
+        halfWindow - leftOnes,
+        rightOnes,
+        halfWindow - rightOnes,
+      );
+      const difference = leftOnes - rightOnes;
+      store<f64>(usize(chiPtr + rank * 8), Math.abs(difference) > 2 ? statistic : 0.0);
+      const leavingLeft = sourceChiModulo(rank - halfWindow, informative);
+      const enteringLeft = rank;
+      const leavingRight = rank;
+      const enteringRight = sourceChiModulo(rank + halfWindow, informative);
+      leftOnes += sourceChiScore(scoresPtr, enteringLeft, scoreBit)
+        - sourceChiScore(scoresPtr, leavingLeft, scoreBit);
+      rightOnes += sourceChiScore(scoresPtr, enteringRight, scoreBit)
+        - sourceChiScore(scoresPtr, leavingRight, scoreBit);
+    }
+  } else {
+    for (let rank: i32 = 0; rank < halfWindow; rank += 1) {
+      leftOnes += sourceChiScore(scoresPtr, rank, scoreBit);
+      rightOnes += sourceChiScore(scoresPtr, rank + halfWindow, scoreBit);
+    }
+    for (let boundary: i32 = halfWindow; boundary + halfWindow <= informative; boundary += 1) {
+      const missing = sourceChiRawSpanHasMissing(
+        positionsPtr,
+        missingPrefixPtr,
+        boundary - halfWindow,
+        boundary + halfWindow - 1,
+      );
+      const difference = leftOnes - rightOnes;
+      if (!missing && Math.abs(difference) > 2) {
+        store<f64>(usize(chiPtr + boundary * 8), chiSquare(
+          leftOnes,
+          halfWindow - leftOnes,
+          rightOnes,
+          halfWindow - rightOnes,
+        ));
+      }
+      if (boundary + halfWindow < informative) {
+        leftOnes += sourceChiScore(scoresPtr, boundary, scoreBit)
+          - sourceChiScore(scoresPtr, boundary - halfWindow, scoreBit);
+        rightOnes += sourceChiScore(scoresPtr, boundary + halfWindow, scoreBit)
+          - sourceChiScore(scoresPtr, boundary, scoreBit);
+      }
+    }
+  }
+
+  // SmoothChiValsP/SmoothChiVals3P use a circular 11-position mean even for
+  // linear scans; invalid end windows are already zero above.
+  let smoothSum: f64 = 0.0;
+  for (let offset: i32 = -5; offset <= 5; offset += 1) {
+    smoothSum += load<f64>(usize(chiPtr + sourceChiModulo(offset, informative) * 8));
+  }
+  for (let rank: i32 = 0; rank < informative; rank += 1) {
+    store<f64>(usize(smoothPtr + rank * 8), smoothSum / 11.0);
+    const leaving = sourceChiModulo(rank - 5, informative);
+    const entering = sourceChiModulo(rank + 6, informative);
+    smoothSum += load<f64>(usize(chiPtr + entering * 8))
+      - load<f64>(usize(chiPtr + leaving * 8));
+  }
+}
+
+function sourceChiCount(
+  scoresPtr: i32,
+  informative: i32,
+  start: i32,
+  count: i32,
+  scoreBit: i32,
+  circular: bool,
+): i32 {
+  let total: i32 = 0;
+  for (let offset: i32 = 0; offset < count; offset += 1) {
+    let rank = start + offset;
+    if (circular) rank = sourceChiModulo(rank, informative);
+    else if (rank < 0 || rank >= informative) continue;
+    total += sourceChiScore(scoresPtr, rank, scoreBit);
+  }
+  return total;
+}
+
+function sourceChiPeakSign(
+  scoresPtr: i32,
+  informative: i32,
+  peak: i32,
+  halfWindow: i32,
+  scoreBit: i32,
+  circular: bool,
+): i32 {
+  const left = sourceChiCount(scoresPtr, informative, peak - halfWindow, halfWindow, scoreBit, circular);
+  const right = sourceChiCount(scoresPtr, informative, peak, halfWindow, scoreBit, circular);
+  return left >= right ? 1 : -1;
+}
+
+function sourceChiGrowPeak(
+  informative: i32,
+  peak: i32,
+  halfWindow: i32,
+  scoreBit: i32,
+  circular: bool,
+  positionsPtr: i32,
+  scoresPtr: i32,
+  missingPrefixPtr: i32,
+  initialStatistic: f64,
+  resultPtr: i32,
+): void {
+  let tWindow = i32((f64(halfWindow) / 4.0) + 0.51);
+  if (tWindow < 6) tWindow = 6;
+  if (tWindow > halfWindow) tWindow = halfWindow;
+  if (tWindow > informative / 2) tWindow = informative / 2;
+  let leftOnes = sourceChiCount(scoresPtr, informative, peak - tWindow, tWindow, scoreBit, circular);
+  let rightOnes = sourceChiCount(scoresPtr, informative, peak, tWindow, scoreBit, circular);
+  let bestStatistic = initialStatistic;
+  let bestWidth = halfWindow;
+  let failCount: i32 = 0;
+  let maximumFails = halfWindow * 2;
+  const availableFails = (informative - tWindow * 2) / 2;
+  if (maximumFails > availableFails) maximumFails = availableFails;
+  if (maximumFails <= 0) maximumFails = 1;
+
+  tWindow += 1;
+  while (failCount <= maximumFails && tWindow <= informative / 2) {
+    const leftRank = peak - tWindow;
+    const rightRank = peak + tWindow - 1;
+    if (!circular) {
+      if (leftRank < 0 || rightRank >= informative) break;
+      if (sourceChiRawSpanHasMissing(positionsPtr, missingPrefixPtr, leftRank, rightRank)) break;
+    }
+    leftOnes += sourceChiScore(scoresPtr, circular ? sourceChiModulo(leftRank, informative) : leftRank, scoreBit);
+    rightOnes += sourceChiScore(scoresPtr, circular ? sourceChiModulo(rightRank, informative) : rightRank, scoreBit);
+    const statistic = chiSquare(
+      leftOnes,
+      tWindow - leftOnes,
+      rightOnes,
+      tWindow - rightOnes,
+    );
+    if (statistic >= bestStatistic) {
+      bestStatistic = statistic;
+      bestWidth = tWindow;
+      failCount = 0;
+    } else {
+      failCount += 1;
+    }
+    tWindow += 1;
+  }
+  store<i32>(usize(resultPtr), sourceChiScaled(bestStatistic));
+  store<i32>(usize(resultPtr + 4), bestWidth);
+}
+
+function sourceChiSuppressPeak(
+  informative: i32,
+  peak: i32,
+  chiPtr: i32,
+  smoothPtr: i32,
+): void {
+  let right = peak;
+  let rightSteps: i32 = 0;
+  while (rightSteps < informative) {
+    const current = load<f64>(usize(smoothPtr + right * 8));
+    const next1 = sourceChiModulo(right + 1, informative);
+    const next2 = sourceChiModulo(right + 2, informative);
+    if (!(current > 0.0 && (current >= load<f64>(usize(smoothPtr + next1 * 8))
+      || current >= load<f64>(usize(smoothPtr + next2 * 8))))) break;
+    right = next1;
+    rightSteps += 1;
+  }
+  let left = peak;
+  let leftSteps: i32 = 0;
+  while (leftSteps < informative) {
+    const current = load<f64>(usize(smoothPtr + left * 8));
+    const previous1 = sourceChiModulo(left - 1, informative);
+    const previous2 = sourceChiModulo(left - 2, informative);
+    if (!(current > 0.0 && (current >= load<f64>(usize(smoothPtr + previous1 * 8))
+      || current >= load<f64>(usize(smoothPtr + previous2 * 8))))) break;
+    left = previous1;
+    leftSteps += 1;
+  }
+  if (leftSteps + rightSteps >= informative - 1) {
+    for (let rank: i32 = 0; rank < informative; rank += 1) {
+      store<f64>(usize(chiPtr + rank * 8), 0.0);
+    }
+    return;
+  }
+  let rank = left;
+  for (let step: i32 = 0; step < informative; step += 1) {
+    store<f64>(usize(chiPtr + rank * 8), 0.0);
+    if (rank == right) break;
+    rank = sourceChiModulo(rank + 1, informative);
+  }
+}
+
+@inline
+function sourceChiPeakField(peakPtr: i32, peak: i32, field: i32): i32 {
+  return load<i32>(usize(peakPtr + (peak * SOURCE_CHI_PEAK_INTS + field) * 4));
+}
+
+@inline
+function sourceChiStorePeakField(peakPtr: i32, peak: i32, field: i32, value: i32): void {
+  store<i32>(usize(peakPtr + (peak * SOURCE_CHI_PEAK_INTS + field) * 4), value);
+}
+
+function sourceChiBoundaryPosition(positionsPtr: i32, informative: i32, rank: i32, nSites: i32): i32 {
+  if (rank <= 0) return 0;
+  if (rank >= informative) return nSites;
+  return load<i32>(usize(positionsPtr + rank * 4));
+}
+
+function sourceChiCollectPeaks(
+  nSites: i32,
+  informative: i32,
+  halfWindow: i32,
+  circular: bool,
+  scoreBit: i32,
+  positionsPtr: i32,
+  scoresPtr: i32,
+  missingPrefixPtr: i32,
+  chiPtr: i32,
+  smoothPtr: i32,
+  peakPtr: i32,
+  peakCapacity: i32,
+): i32 {
+  let peakCount: i32 = 0;
+  while (peakCount < peakCapacity) {
+    let bestRank: i32 = -1;
+    let bestStatistic: f64 = 0.0;
+    for (let rank: i32 = 0; rank < informative; rank += 1) {
+      const statistic = load<f64>(usize(chiPtr + rank * 8));
+      if (statistic > bestStatistic) {
+        bestStatistic = statistic;
+        bestRank = rank;
+      }
+    }
+    if (bestRank < 0 || !(bestStatistic > 0.0)) break;
+    const recordPtr = peakPtr + peakCount * SOURCE_CHI_PEAK_INTS * 4;
+    sourceChiGrowPeak(
+      informative,
+      bestRank,
+      halfWindow,
+      scoreBit,
+      circular,
+      positionsPtr,
+      scoresPtr,
+      missingPrefixPtr,
+      bestStatistic,
+      recordPtr + 12,
+    );
+    sourceChiStorePeakField(peakPtr, peakCount, 0, bestRank);
+    sourceChiStorePeakField(
+      peakPtr,
+      peakCount,
+      1,
+      sourceChiBoundaryPosition(positionsPtr, informative, bestRank, nSites),
+    );
+    sourceChiStorePeakField(
+      peakPtr,
+      peakCount,
+      2,
+      sourceChiPeakSign(scoresPtr, informative, bestRank, halfWindow, scoreBit, circular),
+    );
+    sourceChiStorePeakField(peakPtr, peakCount, 5, sourceChiScaled(bestStatistic));
+    peakCount += 1;
+    sourceChiSuppressPeak(informative, bestRank, chiPtr, smoothPtr);
+  }
+
+  // FindMChiP keeps the first strict maximum. Restore genomic order after the
+  // descending source search so paired state changes form non-overlapping
+  // segments.
+  for (let index: i32 = 1; index < peakCount; index += 1) {
+    const rank = sourceChiPeakField(peakPtr, index, 0);
+    const position = sourceChiPeakField(peakPtr, index, 1);
+    const sign = sourceChiPeakField(peakPtr, index, 2);
+    const statistic = sourceChiPeakField(peakPtr, index, 3);
+    const width = sourceChiPeakField(peakPtr, index, 4);
+    const rawStatistic = sourceChiPeakField(peakPtr, index, 5);
+    let insertion = index;
+    while (insertion > 0 && sourceChiPeakField(peakPtr, insertion - 1, 0) > rank) {
+      for (let field: i32 = 0; field < SOURCE_CHI_PEAK_INTS; field += 1) {
+        sourceChiStorePeakField(
+          peakPtr,
+          insertion,
+          field,
+          sourceChiPeakField(peakPtr, insertion - 1, field),
+        );
+      }
+      insertion -= 1;
+    }
+    sourceChiStorePeakField(peakPtr, insertion, 0, rank);
+    sourceChiStorePeakField(peakPtr, insertion, 1, position);
+    sourceChiStorePeakField(peakPtr, insertion, 2, sign);
+    sourceChiStorePeakField(peakPtr, insertion, 3, statistic);
+    sourceChiStorePeakField(peakPtr, insertion, 4, width);
+    sourceChiStorePeakField(peakPtr, insertion, 5, rawStatistic);
+  }
+  return peakCount;
+}
+
+function sourceChiWriteRow(
+  outPtr: i32,
+  outCapacity: i32,
+  outputIndex: i32,
+  method: i32,
+  targetSlot: i32,
+  track: i32,
+  start: i32,
+  end: i32,
+  wraps: i32,
+  statistic: i32,
+  leftStatistic: i32,
+  rightStatistic: i32,
+  informative: i32,
+  halfWindow: i32,
+  leftRank: i32,
+  rightRank: i32,
+  leftWidth: i32,
+  rightWidth: i32,
+  direction: i32,
+): void {
+  if (outputIndex >= outCapacity) return;
+  const row = outPtr + outputIndex * SOURCE_CHI_ROW_INTS * 4;
+  store<i32>(usize(row), method);
+  store<i32>(usize(row + 4), targetSlot);
+  store<i32>(usize(row + 8), track);
+  store<i32>(usize(row + 12), start);
+  store<i32>(usize(row + 16), end);
+  store<i32>(usize(row + 20), wraps);
+  store<i32>(usize(row + 24), statistic);
+  store<i32>(usize(row + 28), leftStatistic);
+  store<i32>(usize(row + 32), rightStatistic);
+  store<i32>(usize(row + 36), informative);
+  store<i32>(usize(row + 40), halfWindow);
+  store<i32>(usize(row + 44), leftRank);
+  store<i32>(usize(row + 48), rightRank);
+  store<i32>(usize(row + 52), leftWidth);
+  store<i32>(usize(row + 56), rightWidth);
+  store<i32>(usize(row + 60), direction);
+}
+
+function sourceChiPairPeaks(
+  method: i32,
+  targetSlot: i32,
+  track: i32,
+  nSites: i32,
+  informative: i32,
+  halfWindow: i32,
+  circular: bool,
+  peakPtr: i32,
+  peakCount: i32,
+  outPtr: i32,
+  outCapacity: i32,
+  outputCount: i32,
+): i32 {
+  let left: i32 = 0;
+  while (left + 1 < peakCount) {
+    const leftSign = sourceChiPeakField(peakPtr, left, 2);
+    let right = left + 1;
+    while (right < peakCount && sourceChiPeakField(peakPtr, right, 2) == leftSign) right += 1;
+    if (right >= peakCount) break;
+    let bestLeft = left;
+    for (let candidate = left + 1; candidate < right; candidate += 1) {
+      if (sourceChiPeakField(peakPtr, candidate, 3) > sourceChiPeakField(peakPtr, bestLeft, 3)) {
+        bestLeft = candidate;
+      }
+    }
+    const start = sourceChiPeakField(peakPtr, bestLeft, 1);
+    const end = sourceChiPeakField(peakPtr, right, 1);
+    if (end - start >= 4) {
+      const leftStatistic = sourceChiPeakField(peakPtr, bestLeft, 3);
+      const rightStatistic = sourceChiPeakField(peakPtr, right, 3);
+      sourceChiWriteRow(
+        outPtr,
+        outCapacity,
+        outputCount,
+        method,
+        targetSlot,
+        track,
+        start,
+        end,
+        0,
+        leftStatistic < rightStatistic ? leftStatistic : rightStatistic,
+        leftStatistic,
+        rightStatistic,
+        informative,
+        halfWindow,
+        sourceChiPeakField(peakPtr, bestLeft, 0),
+        sourceChiPeakField(peakPtr, right, 0),
+        sourceChiPeakField(peakPtr, bestLeft, 4),
+        sourceChiPeakField(peakPtr, right, 4),
+        leftSign,
+      );
+      outputCount += 1;
+    }
+    left = right + 1;
+  }
+  if (circular && peakCount > 1) {
+    const last = peakCount - 1;
+    const lastSign = sourceChiPeakField(peakPtr, last, 2);
+    const firstSign = sourceChiPeakField(peakPtr, 0, 2);
+    if (lastSign != firstSign) {
+      const start = sourceChiPeakField(peakPtr, last, 1);
+      const end = sourceChiPeakField(peakPtr, 0, 1);
+      const circularLength = nSites - start + end;
+      if (circularLength >= 4 && circularLength < nSites - 4) {
+        const leftStatistic = sourceChiPeakField(peakPtr, last, 3);
+        const rightStatistic = sourceChiPeakField(peakPtr, 0, 3);
+        sourceChiWriteRow(
+          outPtr,
+          outCapacity,
+          outputCount,
+          method,
+          targetSlot,
+          track,
+          start,
+          end,
+          1,
+          leftStatistic < rightStatistic ? leftStatistic : rightStatistic,
+          leftStatistic,
+          rightStatistic,
+          informative,
+          halfWindow,
+          sourceChiPeakField(peakPtr, last, 0),
+          sourceChiPeakField(peakPtr, 0, 0),
+          sourceChiPeakField(peakPtr, last, 4),
+          sourceChiPeakField(peakPtr, 0, 4),
+          lastSign,
+        );
+        outputCount += 1;
+      }
+    }
+  }
+  return outputCount;
+}
+
+function sourceChiScanTrack(
+  method: i32,
+  targetSlot: i32,
+  track: i32,
+  nSites: i32,
+  informative: i32,
+  fullWindow: i32,
+  circular: bool,
+  scoreBit: i32,
+  positionsPtr: i32,
+  scoresPtr: i32,
+  missingPrefixPtr: i32,
+  chiPtr: i32,
+  smoothPtr: i32,
+  peakPtr: i32,
+  peakCapacity: i32,
+  outPtr: i32,
+  outCapacity: i32,
+  outputCount: i32,
+): i32 {
+  const halfWindow = sourceChiHalfWindow(informative, fullWindow);
+  if (halfWindow <= 0) return outputCount;
+  sourceChiFillProfile(
+    informative,
+    halfWindow,
+    circular,
+    scoreBit,
+    positionsPtr,
+    scoresPtr,
+    missingPrefixPtr,
+    chiPtr,
+    smoothPtr,
+  );
+  const peakCount = sourceChiCollectPeaks(
+    nSites,
+    informative,
+    halfWindow,
+    circular,
+    scoreBit,
+    positionsPtr,
+    scoresPtr,
+    missingPrefixPtr,
+    chiPtr,
+    smoothPtr,
+    peakPtr,
+    peakCapacity,
+  );
+  return sourceChiPairPeaks(
+    method,
+    targetSlot,
+    track,
+    nSites,
+    informative,
+    halfWindow,
+    circular,
+    peakPtr,
+    peakCount,
+    outPtr,
+    outCapacity,
+    outputCount,
+  );
+}
+
+function sourceChiScanBuiltTracks(
+  nSites: i32,
+  fullWindow: i32,
+  circularFlag: i32,
+  methodMask: i32,
+  positionsPtr: i32,
+  scoresPtr: i32,
+  missingPrefixPtr: i32,
+  chiPtr: i32,
+  smoothPtr: i32,
+  peakPtr: i32,
+  peakCapacity: i32,
+  outPtr: i32,
+  outCapacity: i32,
+): i32 {
+  let outputCount: i32 = 0;
+  const circular = circularFlag != 0;
+  const maxChiInformative = load<i32>(usize(peakPtr));
+  const chimaera0Informative = load<i32>(usize(peakPtr + 4));
+  const chimaera1Informative = load<i32>(usize(peakPtr + 8));
+  const chimaera2Informative = load<i32>(usize(peakPtr + 12));
+  if ((methodMask & 4) != 0) {
+    for (let track: i32 = 0; track < 3; track += 1) {
+      outputCount = sourceChiScanTrack(
+        3,
+        -1,
+        track,
+        nSites,
+        maxChiInformative,
+        fullWindow,
+        circular,
+        track,
+        positionsPtr,
+        scoresPtr,
+        missingPrefixPtr,
+        chiPtr,
+        smoothPtr,
+        peakPtr,
+        peakCapacity,
+        outPtr,
+        outCapacity,
+        outputCount,
+      );
+    }
+  }
+  if ((methodMask & 8) != 0) {
+    const positionStride = (nSites + 1) * 4;
+    const scoreStride = nSites + 1;
+    for (let targetSlot: i32 = 0; targetSlot < 3; targetSlot += 1) {
+      const informative = targetSlot == 0
+        ? chimaera0Informative
+        : targetSlot == 1 ? chimaera1Informative : chimaera2Informative;
+      const trackPositionsPtr = positionsPtr + positionStride * (targetSlot + 1);
+      const trackScoresPtr = scoresPtr + scoreStride * (targetSlot + 1);
+      outputCount = sourceChiScanTrack(
+        4,
+        targetSlot,
+        targetSlot,
+        nSites,
+        informative,
+        fullWindow,
+        circular,
+        0,
+        trackPositionsPtr,
+        trackScoresPtr,
+        missingPrefixPtr,
+        chiPtr,
+        smoothPtr,
+        peakPtr,
+        peakCapacity,
+        outPtr,
+        outCapacity,
+        outputCount,
+      );
+    }
+  }
+  return outputCount;
+}
+
+// Output rows (16 i32 each): method (3 MAXCHI, 4 CHIMAERA), target slot
+// (-1 for MAXCHI), source track, start/end/wrap, minimum and individual grown
+// boundary chi-square values ×1000, compressed-site count, half-window,
+// boundary ranks, GrowMChiWin widths, and left-boundary direction. The return
+// value is the total row count before output-capacity truncation. positionsPtr
+// and scoresPtr each contain four (nSites+1)-element scratch lanes: shared
+// MAXCHI followed by CHIMAERA target slots 0, 1 and 2.
+export function scan_source_chi_all(
+  seqPtr: i32,
+  nSites: i32,
+  sequence0: i32,
+  sequence1: i32,
+  sequence2: i32,
+  fullWindow: i32,
+  circularFlag: i32,
+  methodMask: i32,
+  positionsPtr: i32,
+  scoresPtr: i32,
+  missingPrefixPtr: i32,
+  chiPtr: i32,
+  smoothPtr: i32,
+  peakPtr: i32,
+  peakCapacity: i32,
+  outPtr: i32,
+  outCapacity: i32,
+): i32 {
+  sourceChiBuildAllTracks(
+    seqPtr,
+    nSites,
+    sequence0,
+    sequence1,
+    sequence2,
+    positionsPtr,
+    scoresPtr,
+    missingPrefixPtr,
+    peakPtr,
+    methodMask,
+  );
+  return sourceChiScanBuiltTracks(
+    nSites,
+    fullWindow,
+    circularFlag,
+    methodMask,
+    positionsPtr,
+    scoresPtr,
+    missingPrefixPtr,
+    chiPtr,
+    smoothPtr,
+    peakPtr,
+    peakCapacity,
+    outPtr,
+    outCapacity,
+  );
+}
+
+// Packed production entry point. It is deliberately separate from the byte
+// oracle above so tests can enforce bit-for-bit equivalence on every emitted
+// source peak while production scans avoid three raw-sequence loads per site.
+export function scan_source_chi_all_packed(
+  packedPtr: i32,
+  validityPtr: i32,
+  wordsPerSequence: i32,
+  nSites: i32,
+  sequence0: i32,
+  sequence1: i32,
+  sequence2: i32,
+  fullWindow: i32,
+  circularFlag: i32,
+  methodMask: i32,
+  positionsPtr: i32,
+  scoresPtr: i32,
+  missingPrefixPtr: i32,
+  chiPtr: i32,
+  smoothPtr: i32,
+  peakPtr: i32,
+  peakCapacity: i32,
+  outPtr: i32,
+  outCapacity: i32,
+): i32 {
+  sourceChiBuildAllTracksPacked(
+    packedPtr,
+    validityPtr,
+    wordsPerSequence,
+    nSites,
+    sequence0,
+    sequence1,
+    sequence2,
+    positionsPtr,
+    scoresPtr,
+    missingPrefixPtr,
+    peakPtr,
+    methodMask,
+  );
+  return sourceChiScanBuiltTracks(
+    nSites,
+    fullWindow,
+    circularFlag,
+    methodMask,
+    positionsPtr,
+    scoresPtr,
+    missingPrefixPtr,
+    chiPtr,
+    smoothPtr,
+    peakPtr,
+    peakCapacity,
+    outPtr,
+    outCapacity,
+  );
 }
 
 // Evaluates a user-specified recombinant/parent assignment and tract without
@@ -488,735 +1354,6 @@ export function triplet_counts(
   store<i32>(usize(outPtr + 12), outsideMajor);
   store<i32>(usize(outPtr + 16), outsideMinor);
   store<i32>(usize(outPtr + 20), i32(statistic * 1000.0));
-}
-
-// Calculates method-specific fast statistics for the seven exploratory method
-// families after a candidate tract has been localized.  These kernels are
-// progressively being replaced by source-compatible method ports; the ABI is
-// retained so saved projects and interactive recalculation remain stable.
-//
-// Output layout (i32 values):
-//  0..4  GENECONV G=0 run, eligible/matching sites, run boundaries
-//  5..6  BOOTSCAN topology-consistent / decisive windows
-//  7..8  MAXCHI and CHIMAERA breakpoint statistics, scaled by 1000
-//  9..10 SISCAN-oriented category score and informative-site count
-// 11..12 3SEQ maximum HGRW descent and informative-site count
-// 13..16 individual MAXCHI/CHIMAERA boundary statistics, scaled by 1000
-// 17..18 polished left/right breakpoint positions
-// 19..20 3SEQ major-parent and minor-parent informative-site counts
-// 21..22 seeded p-distance bootstrap-consistent / decisive replicates
-// 23..24 3SEQ maximum-descent start/end genomic positions
-// 25..26 independent MAXCHI peak-pair positions
-// 27..28 independent CHIMAERA peak-pair positions
-// 29..30 independent BOOTSCAN minor-topology run positions
-// 31..32 independent SISCAN oriented-category run positions
-// 33..34 independent BOOTSCAN/SISCAN run lengths in sampled windows
-export function method_stats(
-  seqPtr: i32,
-  nSites: i32,
-  recombinant: i32,
-  majorParent: i32,
-  minorParent: i32,
-  start: i32,
-  end: i32,
-  window: i32,
-  step: i32,
-  bootstrapReplicates: i32,
-  randomSeed: i32,
-  methodMask: i32,
-  prefixAPtr: i32,
-  prefixBPtr: i32,
-  outPtr: i32,
-  geneconvGScale: f64,
-): void {
-  const halfWindow = window / 2 > 8 ? window / 2 : 8;
-  const wantGeneconv = (methodMask & 1) != 0;
-  const wantBootscan = (methodMask & 2) != 0;
-  const wantMaxChi = (methodMask & 4) != 0;
-  const wantChimaera = (methodMask & 8) != 0;
-  const wantSiScan = (methodMask & 16) != 0;
-  const wantThreeSeq = (methodMask & 32) != 0;
-  const wantPolish = (methodMask & 64) != 0;
-
-  // RDP5 GENECONV fragment scoring in triplet-polymorphic space. G=0 is the
-  // infinite-penalty exact-run special case. Finite G uses the source integer
-  // mismatch penalty floor(L*G/mismatches)+1 and maximum local fragment score.
-  let eligible: i32 = 0;
-  let concordant: i32 = 0;
-  let run: i32 = 0;
-  let bestRun: i32 = 0;
-  let runStart: i32 = start;
-  let bestRunStart: i32 = start;
-  let bestRunEnd: i32 = start;
-  if (wantGeneconv) {
-    for (let site: i32 = 0; site < nSites; site += 1) {
-      const r = seqBase(seqPtr, nSites, recombinant, site);
-      const a = seqBase(seqPtr, nSites, majorParent, site);
-      const b = seqBase(seqPtr, nSites, minorParent, site);
-      if (!valid(r) || !valid(a) || !valid(b) || (r == a && r == b)) continue;
-      eligible += 1;
-      if (r == b) concordant += 1;
-      if (geneconvGScale <= 0.0) {
-        if (r == b) {
-          if (run == 0) runStart = site;
-          run += 1;
-          if (run > bestRun) {
-            bestRun = run;
-            bestRunStart = runStart;
-            bestRunEnd = site + 1;
-          }
-        } else {
-          run = 0;
-        }
-      }
-    }
-    if (geneconvGScale > 0.0) {
-      const mismatches = eligible - concordant;
-      if (mismatches > 0 && concordant > 0) {
-        const mismatchPenalty = i32(Math.floor(f64(eligible) * geneconvGScale / f64(mismatches))) + 1;
-        let fragmentScore: i32 = 0;
-        for (let site: i32 = 0; site < nSites; site += 1) {
-          const r = seqBase(seqPtr, nSites, recombinant, site);
-          const a = seqBase(seqPtr, nSites, majorParent, site);
-          const b = seqBase(seqPtr, nSites, minorParent, site);
-          if (!valid(r) || !valid(a) || !valid(b) || (r == a && r == b)) continue;
-          const siteScore = r == b ? 1 : -mismatchPenalty;
-          if (fragmentScore <= 0) {
-            if (siteScore > 0) {
-              fragmentScore = siteScore;
-              runStart = site;
-            } else {
-              fragmentScore = 0;
-            }
-          } else {
-            fragmentScore += siteScore;
-            if (fragmentScore < 0) fragmentScore = 0;
-          }
-          if (fragmentScore > bestRun) {
-            bestRun = fragmentScore;
-            bestRunStart = runStart;
-            bestRunEnd = site + 1;
-          }
-        }
-      }
-    }
-  }
-
-  // Prefix pairwise mismatches for a deterministic, no-resampling RECSCAN
-  // topology-switch statistic. Only sites valid in the full triplet are used
-  // so both distances have identical denominators.
-  let majorDifferences: i32 = 0;
-  let minorDifferences: i32 = 0;
-  if (wantBootscan) {
-    store<i32>(usize(prefixAPtr), 0);
-    store<i32>(usize(prefixBPtr), 0);
-    for (let site: i32 = 0; site < nSites; site += 1) {
-      const r = seqBase(seqPtr, nSites, recombinant, site);
-      const a = seqBase(seqPtr, nSites, majorParent, site);
-      const b = seqBase(seqPtr, nSites, minorParent, site);
-      if (valid(r) && valid(a) && valid(b)) {
-        if (r != a) majorDifferences += 1;
-        if (r != b) minorDifferences += 1;
-      }
-      store<i32>(usize(prefixAPtr + (site + 1) * 4), majorDifferences);
-      store<i32>(usize(prefixBPtr + (site + 1) * 4), minorDifferences);
-    }
-  }
-  let topologyConsistent: i32 = 0;
-  let decisiveWindows: i32 = 0;
-  let bootscanRunStart: i32 = start;
-  let bootscanRunEnd: i32 = end;
-  let currentBootscanStart: i32 = -1;
-  let currentBootscanWindows: i32 = 0;
-  let bestBootscanWindows: i32 = 0;
-  const stride = step > 0 ? step : 1;
-  if (wantBootscan) for (let center = halfWindow; center <= nSites - halfWindow; center += stride) {
-    const left = center - halfWindow;
-    const right = center + halfWindow;
-    const majorDistance = prefixValue(prefixAPtr, right) - prefixValue(prefixAPtr, left);
-    const minorDistance = prefixValue(prefixBPtr, right) - prefixValue(prefixBPtr, left);
-    if (majorDistance == minorDistance) {
-      currentBootscanStart = -1;
-      currentBootscanWindows = 0;
-      continue;
-    }
-    decisiveWindows += 1;
-    const inside = center >= start && center < end;
-    if ((inside && minorDistance < majorDistance) || (!inside && majorDistance < minorDistance)) {
-      topologyConsistent += 1;
-    }
-    if (minorDistance < majorDistance) {
-      if (currentBootscanStart < 0) currentBootscanStart = center;
-      currentBootscanWindows += 1;
-      if (currentBootscanWindows > bestBootscanWindows) {
-        bestBootscanWindows = currentBootscanWindows;
-        bootscanRunStart = clamp(currentBootscanStart - halfWindow, 0, nSites);
-        bootscanRunEnd = clamp(center + halfWindow, 0, nSites);
-      }
-    } else {
-      currentBootscanStart = -1;
-      currentBootscanWindows = 0;
-    }
-  }
-
-  // A reproducible triplet bootstrap complements the fast all-window sign
-  // scan. Columns are resampled with replacement from one tract window and
-  // the available left/right flanks. For a three-sequence candidate, the
-  // p-distance ordering is the tree-topology decision relevant to the local
-  // parent switch. This avoids JavaScript RNG overhead and keeps the cost
-  // bounded at O(3 * replicates * window).
-  let bootstrapConsistent: i32 = 0;
-  let bootstrapDecisive: i32 = 0;
-  const requestedReplicates = clamp(bootstrapReplicates, 0, 1000);
-  const targetWindow = clamp(window, 12, nSites);
-  let state: u32 = u32(randomSeed) ^ 0x9e3779b9;
-  if (state == 0) state = 0x6d2b79f5;
-  if (wantBootscan) for (let region: i32 = 0; region < 3; region += 1) {
-    let regionStart: i32 = 0;
-    let regionLength: i32 = 0;
-    let expectMinor = false;
-    if (region == 0) {
-      regionLength = start < targetWindow ? start : targetWindow;
-      regionStart = start - regionLength;
-    } else if (region == 1) {
-      const tractLength = end - start;
-      regionLength = tractLength < targetWindow ? tractLength : targetWindow;
-      regionStart = start + (tractLength - regionLength) / 2;
-      expectMinor = true;
-    } else {
-      const available = nSites - end;
-      regionLength = available < targetWindow ? available : targetWindow;
-      regionStart = end;
-    }
-    if (regionLength < 8) continue;
-    for (let replicate: i32 = 0; replicate < requestedReplicates; replicate += 1) {
-      let majorDistance: i32 = 0;
-      let minorDistance: i32 = 0;
-      let validSites: i32 = 0;
-      for (let draw: i32 = 0; draw < regionLength; draw += 1) {
-        state ^= state << 13;
-        state ^= state >> 17;
-        state ^= state << 5;
-        const site = regionStart + i32(state % u32(regionLength));
-        const r = seqBase(seqPtr, nSites, recombinant, site);
-        const a = seqBase(seqPtr, nSites, majorParent, site);
-        const b = seqBase(seqPtr, nSites, minorParent, site);
-        if (!valid(r) || !valid(a) || !valid(b)) continue;
-        validSites += 1;
-        if (r != a) majorDistance += 1;
-        if (r != b) minorDistance += 1;
-      }
-      if (validSites < 4 || majorDistance == minorDistance) continue;
-      bootstrapDecisive += 1;
-      if ((expectMinor && minorDistance < majorDistance)
-        || (!expectMinor && majorDistance < minorDistance)) bootstrapConsistent += 1;
-    }
-  }
-
-  // MAXCHI pairwise variable/non-variable states in triplet-polymorphic space.
-  let pairVariable: i32 = 0;
-  let pairNonVariable: i32 = 0;
-  if (wantMaxChi) {
-    store<i32>(usize(prefixAPtr), 0);
-    store<i32>(usize(prefixBPtr), 0);
-    for (let site: i32 = 0; site < nSites; site += 1) {
-      const r = seqBase(seqPtr, nSites, recombinant, site);
-      const a = seqBase(seqPtr, nSites, majorParent, site);
-      const b = seqBase(seqPtr, nSites, minorParent, site);
-      if (valid(r) && valid(a) && valid(b) && (r != a || r != b || a != b)) {
-        if (r == b) pairNonVariable += 1;
-        else pairVariable += 1;
-      }
-      store<i32>(usize(prefixAPtr + (site + 1) * 4), pairVariable);
-      store<i32>(usize(prefixBPtr + (site + 1) * 4), pairNonVariable);
-    }
-  }
-  let maxChiStart: f64 = 0.0;
-  let maxChiEnd: f64 = 0.0;
-  let maxChiStatistic: f64 = 0.0;
-  let maxChiStartPosition: i32 = start;
-  let maxChiEndPosition: i32 = end;
-  if (wantMaxChi) {
-    const informative = informativePrefix(prefixAPtr, prefixBPtr, nSites);
-    let firstPeak: f64 = -1.0;
-    let firstPeakRank: i32 = halfWindow;
-    for (let rank: i32 = halfWindow; rank + halfWindow <= informative; rank += 1) {
-      const value = variableBreakpointChi(prefixAPtr, prefixBPtr, nSites, rank, halfWindow);
-      if (value > firstPeak) {
-        firstPeak = value;
-        firstPeakRank = rank;
-        maxChiStartPosition = positionForInformativeRank(prefixAPtr, prefixBPtr, nSites, rank);
-      }
-    }
-    let secondPeak: f64 = -1.0;
-    const exclusion = halfWindow > 8 ? halfWindow : 8;
-    for (let rank: i32 = halfWindow; rank + halfWindow <= informative; rank += 1) {
-      if (Math.abs(rank - firstPeakRank) < exclusion) continue;
-      const value = variableBreakpointChi(prefixAPtr, prefixBPtr, nSites, rank, halfWindow);
-      if (value > secondPeak) {
-        secondPeak = value;
-        maxChiEndPosition = positionForInformativeRank(prefixAPtr, prefixBPtr, nSites, rank);
-      }
-    }
-    if (maxChiEndPosition < maxChiStartPosition) {
-      const swap = maxChiStartPosition;
-      maxChiStartPosition = maxChiEndPosition;
-      maxChiEndPosition = swap;
-    }
-    maxChiStart = firstPeak > 0.0 ? firstPeak : 0.0;
-    maxChiEnd = secondPeak > 0.0 ? secondPeak : 0.0;
-    maxChiStatistic = maxChiStart < maxChiEnd ? maxChiStart : maxChiEnd;
-  }
-
-  // CHIMAERA's compressed binary string and SISCAN-style oriented category
-  // score. The same prefixes support an O(window) breakpoint-polishing pass.
-  let matchesMajor: i32 = 0;
-  let matchesMinor: i32 = 0;
-  let sisterScore: i32 = 0;
-  let sisterSites: i32 = 0;
-  let siScanRunStart: i32 = start;
-  let siScanRunEnd: i32 = end;
-  let bestSiScanWindows: i32 = 0;
-  if (wantChimaera || wantSiScan || wantThreeSeq || wantPolish) {
-    store<i32>(usize(prefixAPtr), 0);
-    store<i32>(usize(prefixBPtr), 0);
-    for (let site: i32 = 0; site < nSites; site += 1) {
-      const r = seqBase(seqPtr, nSites, recombinant, site);
-      const a = seqBase(seqPtr, nSites, majorParent, site);
-      const b = seqBase(seqPtr, nSites, minorParent, site);
-      if (valid(r) && valid(a) && valid(b) && a != b) {
-        let category: i32 = 0;
-        if (r == a) {
-          matchesMajor += 1;
-          category = -1;
-        } else if (r == b) {
-          matchesMinor += 1;
-          category = 1;
-        }
-        if (category != 0 && wantSiScan) {
-          sisterSites += 1;
-          sisterScore += (site >= start && site < end) ? category : -category;
-        }
-      }
-      store<i32>(usize(prefixAPtr + (site + 1) * 4), matchesMajor);
-      store<i32>(usize(prefixBPtr + (site + 1) * 4), matchesMinor);
-    }
-  }
-  if (wantSiScan) {
-    let currentStart: i32 = -1;
-    let currentWindows: i32 = 0;
-    for (let center = halfWindow; center <= nSites - halfWindow; center += stride) {
-      const left = center - halfWindow;
-      const right = center + halfWindow;
-      const majorCount = prefixValue(prefixAPtr, right) - prefixValue(prefixAPtr, left);
-      const minorCount = prefixValue(prefixBPtr, right) - prefixValue(prefixBPtr, left);
-      if (minorCount > majorCount) {
-        if (currentStart < 0) currentStart = center;
-        currentWindows += 1;
-        if (currentWindows > bestSiScanWindows) {
-          bestSiScanWindows = currentWindows;
-          siScanRunStart = clamp(currentStart - halfWindow, 0, nSites);
-          siScanRunEnd = clamp(center + halfWindow, 0, nSites);
-        }
-      } else {
-        currentStart = -1;
-        currentWindows = 0;
-      }
-    }
-  }
-  let chimaeraStart: f64 = 0.0;
-  let chimaeraEnd: f64 = 0.0;
-  let chimaeraStatistic: f64 = 0.0;
-  let chimaeraStartPosition: i32 = start;
-  let chimaeraEndPosition: i32 = end;
-  if (wantChimaera) {
-    const informative = informativePrefix(prefixAPtr, prefixBPtr, nSites);
-    let firstPeak: f64 = -1.0;
-    let firstPeakRank: i32 = halfWindow;
-    for (let rank: i32 = halfWindow; rank + halfWindow <= informative; rank += 1) {
-      const value = variableBreakpointChi(prefixAPtr, prefixBPtr, nSites, rank, halfWindow);
-      if (value > firstPeak) {
-        firstPeak = value;
-        firstPeakRank = rank;
-        chimaeraStartPosition = positionForInformativeRank(prefixAPtr, prefixBPtr, nSites, rank);
-      }
-    }
-    let secondPeak: f64 = -1.0;
-    const exclusion = halfWindow > 8 ? halfWindow : 8;
-    for (let rank: i32 = halfWindow; rank + halfWindow <= informative; rank += 1) {
-      if (Math.abs(rank - firstPeakRank) < exclusion) continue;
-      const value = variableBreakpointChi(prefixAPtr, prefixBPtr, nSites, rank, halfWindow);
-      if (value > secondPeak) {
-        secondPeak = value;
-        chimaeraEndPosition = positionForInformativeRank(prefixAPtr, prefixBPtr, nSites, rank);
-      }
-    }
-    if (chimaeraEndPosition < chimaeraStartPosition) {
-      const swap = chimaeraStartPosition;
-      chimaeraStartPosition = chimaeraEndPosition;
-      chimaeraEndPosition = swap;
-    }
-    chimaeraStart = firstPeak > 0.0 ? firstPeak : 0.0;
-    chimaeraEnd = secondPeak > 0.0 ? secondPeak : 0.0;
-    chimaeraStatistic = chimaeraStart < chimaeraEnd ? chimaeraStart : chimaeraEnd;
-  }
-  // 3SEQ maps sites matching the major parent to an up-step and sites
-  // matching the minor parent to a down-step. Its two-breakpoint statistic is
-  // the maximum descent of that hypergeometric random walk from any previous
-  // maximum, corresponding to the strongest contiguous minor-parent tract.
-  const threeSeqSites = matchesMajor + matchesMinor;
-  let threeSeqWalk: i32 = 0;
-  let threeSeqMaximum: i32 = 0;
-  let threeSeqDescent: i32 = 0;
-  let threeSeqMaximumPosition: i32 = 0;
-  let threeSeqStart: i32 = start;
-  let threeSeqEnd: i32 = end;
-  if (wantThreeSeq) for (let position: i32 = 1; position <= nSites; position += 1) {
-    const majorStep = prefixValue(prefixAPtr, position) - prefixValue(prefixAPtr, position - 1);
-    const minorStep = prefixValue(prefixBPtr, position) - prefixValue(prefixBPtr, position - 1);
-    threeSeqWalk += majorStep - minorStep;
-    if (threeSeqWalk > threeSeqMaximum) {
-      threeSeqMaximum = threeSeqWalk;
-      threeSeqMaximumPosition = position;
-    }
-    const descent = threeSeqMaximum - threeSeqWalk;
-    if (descent > threeSeqDescent) {
-      threeSeqDescent = descent;
-      threeSeqStart = threeSeqMaximumPosition;
-      threeSeqEnd = position;
-    }
-  }
-  const polishedStart = wantPolish ? polishBreakpoint(prefixAPtr, prefixBPtr, nSites, start, halfWindow) : start;
-  const polishedEnd = wantPolish ? polishBreakpoint(prefixAPtr, prefixBPtr, nSites, end, halfWindow) : end;
-
-  store<i32>(usize(outPtr), bestRun);
-  store<i32>(usize(outPtr + 4), eligible);
-  store<i32>(usize(outPtr + 8), concordant);
-  store<i32>(usize(outPtr + 12), bestRunStart);
-  store<i32>(usize(outPtr + 16), bestRunEnd);
-  store<i32>(usize(outPtr + 20), topologyConsistent);
-  store<i32>(usize(outPtr + 24), decisiveWindows);
-  store<i32>(usize(outPtr + 28), i32(maxChiStatistic * 1000.0));
-  store<i32>(usize(outPtr + 32), i32(chimaeraStatistic * 1000.0));
-  store<i32>(usize(outPtr + 36), sisterScore);
-  store<i32>(usize(outPtr + 40), sisterSites);
-  store<i32>(usize(outPtr + 44), threeSeqDescent);
-  store<i32>(usize(outPtr + 48), threeSeqSites);
-  store<i32>(usize(outPtr + 52), i32(maxChiStart * 1000.0));
-  store<i32>(usize(outPtr + 56), i32(maxChiEnd * 1000.0));
-  store<i32>(usize(outPtr + 60), i32(chimaeraStart * 1000.0));
-  store<i32>(usize(outPtr + 64), i32(chimaeraEnd * 1000.0));
-  store<i32>(usize(outPtr + 68), polishedStart);
-  store<i32>(usize(outPtr + 72), polishedEnd);
-  store<i32>(usize(outPtr + 76), matchesMajor);
-  store<i32>(usize(outPtr + 80), matchesMinor);
-  store<i32>(usize(outPtr + 84), bootstrapConsistent);
-  store<i32>(usize(outPtr + 88), bootstrapDecisive);
-  store<i32>(usize(outPtr + 92), threeSeqStart);
-  store<i32>(usize(outPtr + 96), threeSeqEnd);
-  store<i32>(usize(outPtr + 100), maxChiStartPosition);
-  store<i32>(usize(outPtr + 104), maxChiEndPosition);
-  store<i32>(usize(outPtr + 108), chimaeraStartPosition);
-  store<i32>(usize(outPtr + 112), chimaeraEndPosition);
-  store<i32>(usize(outPtr + 116), bootscanRunStart);
-  store<i32>(usize(outPtr + 120), bootscanRunEnd);
-  store<i32>(usize(outPtr + 124), siScanRunStart);
-  store<i32>(usize(outPtr + 128), siScanRunEnd);
-  store<i32>(usize(outPtr + 132), bestBootscanWindows);
-  store<i32>(usize(outPtr + 136), bestSiScanWindows);
-}
-
-@inline
-function hmmProbability(value: f64): f64 {
-  return value < 0.5001 ? 0.5001 : value > 0.9999 ? 0.9999 : value;
-}
-
-@inline
-function markedPosition(value: i32): i32 {
-  return value < 0 ? -value - 1 : value;
-}
-
-// Legacy two-state breakpoint-refinement ABI retained for older tests/projects.
-// New analyses use the source-compatible BURT engine in public/rdp-burt.js;
-// this O(L) kernel is no longer called by the worker.
-//
-// Output layout (i32 values):
-// 0..1 refined start/end; 2 retained informative sites; 3 state switches;
-// 4..5 major/minor correct-emission probabilities scaled by 1000;
-// 6 informative sites in the selected minor-state run;
-// 7..10 start-low/start-high/end-low/end-high informative-site bounds.
-export function hmm_polish(
-  seqPtr: i32,
-  nSites: i32,
-  recombinant: i32,
-  majorParent: i32,
-  minorParent: i32,
-  start: i32,
-  end: i32,
-  positionPtr: i32,
-  predecessorPtr: i32,
-  outPtr: i32,
-): i32 {
-  if (nSites < 4 || start < 0 || end > nSites || end <= start) return 0;
-
-  let informative: i32 = 0;
-  let insideMajor: i32 = 0;
-  let insideMinor: i32 = 0;
-  let outsideMajor: i32 = 0;
-  let outsideMinor: i32 = 0;
-  for (let site: i32 = 0; site < nSites; site += 1) {
-    const r = seqBase(seqPtr, nSites, recombinant, site);
-    const a = seqBase(seqPtr, nSites, majorParent, site);
-    const b = seqBase(seqPtr, nSites, minorParent, site);
-    if (!valid(r) || !valid(a) || !valid(b) || a == b || (r != a && r != b)) continue;
-    store<i32>(usize(positionPtr + informative * 4), site);
-    const inside = site >= start && site < end;
-    if (r == a) {
-      if (inside) insideMajor += 1;
-      else outsideMajor += 1;
-    } else {
-      if (inside) insideMinor += 1;
-      else outsideMinor += 1;
-    }
-    informative += 1;
-  }
-  if (informative < 8 || insideMajor + insideMinor < 3 || outsideMajor + outsideMinor < 3) return 0;
-
-  const majorFit = hmmProbability(
-    f64(outsideMajor + 1) / f64(outsideMajor + outsideMinor + 2),
-  );
-  const minorFit = hmmProbability(
-    f64(insideMinor + 1) / f64(insideMajor + insideMinor + 2),
-  );
-  const transition = Math.max(0.000001, Math.min(0.08, 2.0 / f64(informative)));
-  const logStay = Math.log(1.0 - transition);
-  const logSwitch = Math.log(transition);
-
-  let position = load<i32>(usize(positionPtr));
-  let r = seqBase(seqPtr, nSites, recombinant, position);
-  let b = seqBase(seqPtr, nSites, minorParent, position);
-  let observationMinor = r == b;
-  let scoreMajor = Math.log(0.5) + Math.log(observationMinor ? 1.0 - majorFit : majorFit);
-  let scoreMinor = Math.log(0.5) + Math.log(observationMinor ? minorFit : 1.0 - minorFit);
-  store<i32>(usize(predecessorPtr), 0);
-
-  for (let index: i32 = 1; index < informative; index += 1) {
-    position = load<i32>(usize(positionPtr + index * 4));
-    r = seqBase(seqPtr, nSites, recombinant, position);
-    b = seqBase(seqPtr, nSites, minorParent, position);
-    observationMinor = r == b;
-
-    const majorFromMajor = scoreMajor + logStay;
-    const majorFromMinor = scoreMinor + logSwitch;
-    const minorFromMajor = scoreMajor + logSwitch;
-    const minorFromMinor = scoreMinor + logStay;
-    const predecessorMajor: i32 = majorFromMinor > majorFromMajor ? 1 : 0;
-    const predecessorMinor: i32 = minorFromMinor >= minorFromMajor ? 1 : 0;
-    const nextMajor = (predecessorMajor == 1 ? majorFromMinor : majorFromMajor)
-      + Math.log(observationMinor ? 1.0 - majorFit : majorFit);
-    const nextMinor = (predecessorMinor == 1 ? minorFromMinor : minorFromMajor)
-      + Math.log(observationMinor ? minorFit : 1.0 - minorFit);
-    store<i32>(usize(predecessorPtr + index * 4), predecessorMajor | (predecessorMinor << 1));
-    scoreMajor = nextMajor;
-    scoreMinor = nextMinor;
-  }
-
-  let state: i32 = scoreMinor > scoreMajor ? 1 : 0;
-  let switches: i32 = 0;
-  for (let index = informative - 1; index >= 0; index -= 1) {
-    const rawPosition = load<i32>(usize(positionPtr + index * 4));
-    store<i32>(usize(positionPtr + index * 4), state == 1 ? -rawPosition - 1 : rawPosition);
-    if (index == 0) continue;
-    const predecessors = load<i32>(usize(predecessorPtr + index * 4));
-    const previous = state == 0 ? predecessors & 1 : (predecessors >> 1) & 1;
-    if (previous != state) switches += 1;
-    state = previous;
-  }
-
-  let bestStart: i32 = start;
-  let bestEnd: i32 = end;
-  let bestOverlap: i32 = -1;
-  let bestRunSites: i32 = 0;
-  let bestStartLow: i32 = start;
-  let bestStartHigh: i32 = start;
-  let bestEndLow: i32 = end;
-  let bestEndHigh: i32 = end;
-  let runStartIndex: i32 = -1;
-  for (let index: i32 = 0; index <= informative; index += 1) {
-    const isMinor = index < informative && load<i32>(usize(positionPtr + index * 4)) < 0;
-    if (isMinor && runStartIndex < 0) runStartIndex = index;
-    if (isMinor || runStartIndex < 0) continue;
-
-    const runEndIndex = index - 1;
-    const firstPosition = markedPosition(load<i32>(usize(positionPtr + runStartIndex * 4)));
-    const lastPosition = markedPosition(load<i32>(usize(positionPtr + runEndIndex * 4)));
-    const previousPosition = runStartIndex > 0
-      ? markedPosition(load<i32>(usize(positionPtr + (runStartIndex - 1) * 4)))
-      : -1;
-    const nextPosition = index < informative
-      ? markedPosition(load<i32>(usize(positionPtr + index * 4)))
-      : nSites;
-    const refinedStart = previousPosition >= 0
-      ? (previousPosition + firstPosition + 1) / 2
-      : 0;
-    const refinedEnd = nextPosition < nSites
-      ? (lastPosition + nextPosition + 1) / 2
-      : nSites;
-    const overlapStart = refinedStart > start ? refinedStart : start;
-    const overlapEnd = refinedEnd < end ? refinedEnd : end;
-    const candidateOverlap = overlapEnd > overlapStart ? overlapEnd - overlapStart : 0;
-    const runSites = runEndIndex - runStartIndex + 1;
-    if (candidateOverlap > bestOverlap || (candidateOverlap == bestOverlap && runSites > bestRunSites)) {
-      bestOverlap = candidateOverlap;
-      bestRunSites = runSites;
-      bestStart = refinedStart;
-      bestEnd = refinedEnd;
-      bestStartLow = previousPosition >= 0 ? previousPosition + 1 : 0;
-      bestStartHigh = firstPosition;
-      bestEndLow = lastPosition + 1;
-      bestEndHigh = nextPosition < nSites ? nextPosition : nSites;
-    }
-    runStartIndex = -1;
-  }
-
-  if (bestOverlap <= 0 || bestRunSites < 3 || bestEnd - bestStart < 4) return 0;
-  store<i32>(usize(outPtr), bestStart);
-  store<i32>(usize(outPtr + 4), bestEnd);
-  store<i32>(usize(outPtr + 8), informative);
-  store<i32>(usize(outPtr + 12), switches);
-  store<i32>(usize(outPtr + 16), i32(majorFit * 1000.0));
-  store<i32>(usize(outPtr + 20), i32(minorFit * 1000.0));
-  store<i32>(usize(outPtr + 24), bestRunSites);
-  store<i32>(usize(outPtr + 28), bestStartLow);
-  store<i32>(usize(outPtr + 32), bestStartHigh);
-  store<i32>(usize(outPtr + 36), bestEndLow);
-  store<i32>(usize(outPtr + 40), bestEndHigh);
-  return 1;
-}
-
-// Finds the strongest internal CUSUM excursion for a recombinant candidate and
-// two candidate parents, then evaluates the resulting inside/outside 2×2 table.
-// Prefix sums make each parent-pair scan O(alignment length).
-export function scan_pair(
-  seqPtr: i32,
-  nSites: i32,
-  recombinant: i32,
-  parentA: i32,
-  parentB: i32,
-  minimumSegment: i32,
-  prefixAPtr: i32,
-  prefixBPtr: i32,
-  outPtr: i32,
-): i32 {
-  store<i32>(usize(prefixAPtr), 0);
-  store<i32>(usize(prefixBPtr), 0);
-  let countA: i32 = 0;
-  let countB: i32 = 0;
-
-  for (let site: i32 = 0; site < nSites; site += 1) {
-    const r = seqBase(seqPtr, nSites, recombinant, site);
-    const a = seqBase(seqPtr, nSites, parentA, site);
-    const b = seqBase(seqPtr, nSites, parentB, site);
-    if (valid(r) && valid(a) && valid(b) && a != b) {
-      if (r == a) countA += 1;
-      else if (r == b) countB += 1;
-    }
-    store<i32>(usize(prefixAPtr + (site + 1) * 4), countA);
-    store<i32>(usize(prefixBPtr + (site + 1) * 4), countB);
-  }
-
-  const informative: i32 = countA + countB;
-  if (informative < 12 || nSites < minimumSegment * 2) return 0;
-
-  const totalDifference: f64 = f64(countB - countA);
-  let minimumValue: f64 = 0.0;
-  let minimumPosition: i32 = 0;
-  let maximumValue: f64 = 0.0;
-  let maximumPosition: i32 = 0;
-  let bestPositive: f64 = 0.0;
-  let positiveStart: i32 = 0;
-  let positiveEnd: i32 = 0;
-  let bestNegative: f64 = 0.0;
-  let negativeStart: i32 = 0;
-  let negativeEnd: i32 = 0;
-
-  for (let position: i32 = 1; position < nSites; position += 1) {
-    const prefixA = load<i32>(usize(prefixAPtr + position * 4));
-    const prefixB = load<i32>(usize(prefixBPtr + position * 4));
-    const detrended = f64(prefixB - prefixA) - totalDifference * f64(position) / f64(nSites);
-
-    if (position - minimumPosition >= minimumSegment) {
-      const gain = detrended - minimumValue;
-      if (gain > bestPositive) {
-        bestPositive = gain;
-        positiveStart = minimumPosition;
-        positiveEnd = position;
-      }
-    }
-    if (position - maximumPosition >= minimumSegment) {
-      const loss = maximumValue - detrended;
-      if (loss > bestNegative) {
-        bestNegative = loss;
-        negativeStart = maximumPosition;
-        negativeEnd = position;
-      }
-    }
-    if (detrended < minimumValue) {
-      minimumValue = detrended;
-      minimumPosition = position;
-    }
-    if (detrended > maximumValue) {
-      maximumValue = detrended;
-      maximumPosition = position;
-    }
-  }
-
-  let start: i32 = bestPositive >= bestNegative ? positiveStart : negativeStart;
-  let end: i32 = bestPositive >= bestNegative ? positiveEnd : negativeEnd;
-  if (end - start < minimumSegment || end - start > nSites - minimumSegment) return 0;
-
-  const insideA = load<i32>(usize(prefixAPtr + end * 4)) - load<i32>(usize(prefixAPtr + start * 4));
-  const insideB = load<i32>(usize(prefixBPtr + end * 4)) - load<i32>(usize(prefixBPtr + start * 4));
-  const outsideA = countA - insideA;
-  const outsideB = countB - insideB;
-  if ((insideA - insideB) * (outsideA - outsideB) >= 0) return 0;
-
-  let majorParent = parentA;
-  let minorParent = parentB;
-  let insideMinor = insideB;
-  let insideMajor = insideA;
-  let outsideMajor = outsideA;
-  let outsideMinor = outsideB;
-  if (insideA > insideB) {
-    majorParent = parentB;
-    minorParent = parentA;
-    insideMinor = insideA;
-    insideMajor = insideB;
-    outsideMajor = outsideB;
-    outsideMinor = outsideA;
-  }
-
-  if (insideMinor - insideMajor < 3 || outsideMajor - outsideMinor < 3) return 0;
-  const statistic = chiSquare(insideMinor, insideMajor, outsideMinor, outsideMajor);
-  if (statistic < 6.0) return 0;
-
-  const insideTotal: f64 = f64(insideMinor + insideMajor);
-  const outsideTotal: f64 = f64(outsideMinor + outsideMajor);
-  const effect = f64(insideMinor) / insideTotal - f64(outsideMinor) / outsideTotal;
-
-  store<i32>(usize(outPtr), start);
-  store<i32>(usize(outPtr + 4), end);
-  store<i32>(usize(outPtr + 8), majorParent);
-  store<i32>(usize(outPtr + 12), minorParent);
-  store<i32>(usize(outPtr + 16), i32(statistic * 1000.0));
-  store<i32>(usize(outPtr + 20), informative);
-  store<i32>(usize(outPtr + 24), insideMinor);
-  store<i32>(usize(outPtr + 28), insideMajor);
-  store<i32>(usize(outPtr + 32), outsideMajor);
-  store<i32>(usize(outPtr + 36), outsideMinor);
-  store<i32>(usize(outPtr + 40), i32(effect * 1000000.0));
-  store<i32>(usize(outPtr + 44), bestPositive >= bestNegative ? 1 : -1);
-  return 1;
 }
 
 @inline
@@ -1326,6 +1463,10 @@ function writeRdpSignal(
 
 function scanRdp5TripletCore(
   seqPtr: i32,
+  packedPtr: i32,
+  validityPtr: i32,
+  wordsPerSequence: i32,
+  usePacked: bool,
   nSites: i32,
   seq1: i32,
   seq2: i32,
@@ -1346,21 +1487,55 @@ function scanRdp5TripletCore(
   let count1: i32 = 0;
   let count2: i32 = 0;
 
-  for (let site: i32 = 0; site < nSites; site += 1) {
-    const a = seqBase(seqPtr, nSites, seq1, site);
-    const b = seqBase(seqPtr, nSites, seq2, site);
-    const c = seqBase(seqPtr, nSites, seq3, site);
-    if (!valid(a) || !valid(b) || !valid(c)) continue;
-    let category: i32 = -1;
-    if (a == b && a != c) category = 0;
-    else if (a == c && a != b) category = 1;
-    else if (b == c && b != a) category = 2;
-    if (category < 0) continue;
-    store<i32>(usize(scratchPackedPtr + informative * 4), (site << 2) | category);
-    informative += 1;
-    if (category == 0) count0 += 1;
-    else if (category == 1) count1 += 1;
-    else count2 += 1;
+  if (usePacked) {
+    const offset0 = seq1 * wordsPerSequence;
+    const offset1 = seq2 * wordsPerSequence;
+    const offset2 = seq3 * wordsPerSequence;
+    for (let word: i32 = 0; word < wordsPerSequence; word += 1) {
+      const a = load<u32>(usize(packedPtr + (offset0 + word) * 4));
+      const b = load<u32>(usize(packedPtr + (offset1 + word) * 4));
+      const c = load<u32>(usize(packedPtr + (offset2 + word) * 4));
+      const allValid = load<u32>(usize(validityPtr + (offset0 + word) * 4))
+        & load<u32>(usize(validityPtr + (offset1 + word) * 4))
+        & load<u32>(usize(validityPtr + (offset2 + word) * 4));
+      const ab = packedEquality(a, b, allValid);
+      const ac = packedEquality(a, c, allValid);
+      const bc = packedEquality(b, c, allValid);
+      const category0 = ab & ~ac;
+      const category1 = ac & ~ab;
+      const category2 = bc & ~ab;
+      count0 += popCount32(category0);
+      count1 += popCount32(category1);
+      count2 += popCount32(category2);
+      let variable = category0 | category1 | category2;
+      while (variable != 0) {
+        const bit = i32(ctz<u32>(variable));
+        const lane = u32(1) << u32(bit);
+        const site = word * 16 + bit / 2;
+        if (site >= nSites) break;
+        const category = (category0 & lane) != 0 ? 0 : (category1 & lane) != 0 ? 1 : 2;
+        store<i32>(usize(scratchPackedPtr + informative * 4), (site << 2) | category);
+        informative += 1;
+        variable &= variable - 1;
+      }
+    }
+  } else {
+    for (let site: i32 = 0; site < nSites; site += 1) {
+      const a = seqBase(seqPtr, nSites, seq1, site);
+      const b = seqBase(seqPtr, nSites, seq2, site);
+      const c = seqBase(seqPtr, nSites, seq3, site);
+      if (!valid(a) || !valid(b) || !valid(c)) continue;
+      let category: i32 = -1;
+      if (a == b && a != c) category = 0;
+      else if (a == c && a != b) category = 1;
+      else if (b == c && b != a) category = 2;
+      if (category < 0) continue;
+      store<i32>(usize(scratchPackedPtr + informative * 4), (site << 2) | category);
+      informative += 1;
+      if (category == 0) count0 += 1;
+      else if (category == 1) count1 += 1;
+      else count2 += 1;
+    }
   }
 
   // FastRecCheckP uses XoverWindow = XOverWindowX / 2 and requires at least
@@ -1626,7 +1801,7 @@ export function scan_rdp5_triplet(
   scratchDominancePtr: i32,
   outPtr: i32,
 ): i32 {
-  return scanRdp5TripletCore(seqPtr, nSites, seq1, seq2, seq3, fullWindow, scratchPackedPtr, scratchDominancePtr, outPtr, 0, 0);
+  return scanRdp5TripletCore(seqPtr, 0, 0, 0, false, nSites, seq1, seq2, seq3, fullWindow, scratchPackedPtr, scratchDominancePtr, outPtr, 0, 0);
 }
 
 export function scan_rdp5_triplet_all(
@@ -1642,5 +1817,23 @@ export function scan_rdp5_triplet_all(
   maximumEvents: i32,
   bestOutPtr: i32,
 ): i32 {
-  return scanRdp5TripletCore(seqPtr, nSites, seq1, seq2, seq3, fullWindow, scratchPackedPtr, scratchDominancePtr, bestOutPtr, outPtr, maximumEvents);
+  return scanRdp5TripletCore(seqPtr, 0, 0, 0, false, nSites, seq1, seq2, seq3, fullWindow, scratchPackedPtr, scratchDominancePtr, bestOutPtr, outPtr, maximumEvents);
+}
+
+export function scan_rdp5_triplet_all_packed(
+  packedPtr: i32,
+  validityPtr: i32,
+  wordsPerSequence: i32,
+  nSites: i32,
+  seq1: i32,
+  seq2: i32,
+  seq3: i32,
+  fullWindow: i32,
+  scratchPackedPtr: i32,
+  scratchDominancePtr: i32,
+  outPtr: i32,
+  maximumEvents: i32,
+  bestOutPtr: i32,
+): i32 {
+  return scanRdp5TripletCore(0, packedPtr, validityPtr, wordsPerSequence, true, nSites, seq1, seq2, seq3, fullWindow, scratchPackedPtr, scratchDominancePtr, bestOutPtr, outPtr, maximumEvents);
 }

@@ -48,9 +48,11 @@ const { instance } = await WebAssembly.instantiate(await readFile(wasmPath));
 if (
   typeof instance.exports.distance_matrix_packed !== "function"
   || typeof instance.exports.nearest_candidates_sampled !== "function"
-  || typeof instance.exports.method_stats !== "function"
   || typeof instance.exports.triplet_counts !== "function"
-  || typeof instance.exports.hmm_polish !== "function"
+  || typeof instance.exports.scan_rdp5_triplet_all !== "function"
+  || typeof instance.exports.scan_rdp5_triplet_all_packed !== "function"
+  || typeof instance.exports.scan_source_chi_all !== "function"
+  || typeof instance.exports.scan_source_chi_all_packed !== "function"
 ) {
   throw new Error("The GitHub Pages artifact is missing the optimized RDP Web kernels.");
 }

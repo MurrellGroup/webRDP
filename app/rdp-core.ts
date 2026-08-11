@@ -9,6 +9,10 @@ export const PRIMARY_METHODS = [
 ] as const;
 
 export type MethodName = (typeof PRIMARY_METHODS)[number];
+// Only these families are allowed in production scans until their complete
+// author-source discovery path has been ported. This prevents a simplified
+// stand-in from silently participating in an analysis labelled RDP parity.
+export const SOURCE_READY_METHODS: MethodName[] = ["RDP", "MaxChi", "Chimaera", "SiScan"];
 export type EventDecision = "unreviewed" | "accepted" | "rejected";
 
 export interface SequenceRecord {
@@ -59,6 +63,16 @@ export interface MethodSignal {
   statistic: number;
   locator: string;
   sourceRoutine?: string;
+  sourceChi?: {
+    track: number;
+    targetSlot: number | null;
+    informativeSites: number;
+    halfWindow: number;
+    boundaryStatistics: [number, number];
+    boundaryRanks: [number, number];
+    growthWidths: [number, number];
+    direction: 1 | -1;
+  };
   outgroup?: number | null;
   outgroupMode?: "nearest" | "most-divergent" | "randomized" | "manual";
   outgroupSampled?: boolean;
@@ -351,6 +365,7 @@ export interface AnalysisOptions {
   window: number;
   rdpWindow: number;
   rdpSignalsPerTriplet: number;
+  chiSignalsPerTriplet: number;
   geneconvGScale: number;
   siskanOutgroupMode: "nearest" | "most-divergent" | "randomized" | "manual";
   siskanOutgroupSequence: number | null;
@@ -365,6 +380,8 @@ export interface AnalysisOptions {
   candidateParents: number;
   methods: MethodName[];
   exhaustive: boolean;
+  cyclicDetection: boolean;
+  maximumDetectionCycles: number;
   polishBreakpoints: boolean;
   burtMode: "rdp5-source" | "manual-step-up";
   burtRandomStarts: number;
@@ -1196,6 +1213,7 @@ export const DEFAULT_OPTIONS: AnalysisOptions = {
   window: 120,
   rdpWindow: 30,
   rdpSignalsPerTriplet: 128,
+  chiSignalsPerTriplet: 24,
   geneconvGScale: 1,
   siskanOutgroupMode: "nearest",
   siskanOutgroupSequence: null,
@@ -1208,10 +1226,15 @@ export const DEFAULT_OPTIONS: AnalysisOptions = {
   correction: "bonferroni",
   minMethods: 3,
   candidateParents: 8,
-  methods: [...PRIMARY_METHODS],
+  methods: [...SOURCE_READY_METHODS],
   // RDP5 parity default: enumerate every concrete unordered sequence triplet.
   // Parent shortlisting remains an explicit approximate opt-in for previews.
   exhaustive: true,
+  // RDP5 manual §4.1.6: repeatedly apply the strongest event, split its
+  // recombinant lineage into remainder/tract components, and redo only the
+  // triplets touched by that split until no supported signal remains.
+  cyclicDetection: true,
+  maximumDetectionCycles: 250,
   polishBreakpoints: true,
   burtMode: "rdp5-source",
   burtRandomStarts: 21,
@@ -1255,6 +1278,17 @@ export interface RdpProject {
     diagnostics?: AlignmentDiagnostics;
     disassembly?: { appliedEvents: number; components: number; erasedCanonicalBases: number };
     rdpSignalTruncations?: number;
+    chiSignalTruncations?: number;
+    tripletKernelCalls?: { rdp: number; sourceChi: number };
+    detectionCycle?: {
+      enabled: boolean;
+      eventsApplied: number;
+      passes: number;
+      initialComparisons: number;
+      redoComparisons: number;
+      stoppedBecause: "no-detectable-signals" | "cycle-cap";
+      maximumCycles: number;
+    };
   } | null;
   distance: number[];
   auditLog: ProjectAuditEntry[];
@@ -1316,12 +1350,12 @@ export function parseProject(text: string): RdpProject {
   const alignment: AlignmentData = { ...alignmentBase, features };
   const rawOptions = (raw.options ?? {}) as Partial<AnalysisOptions>;
   const methods = Array.isArray(rawOptions.methods)
-    ? rawOptions.methods.filter((method): method is MethodName => PRIMARY_METHODS.includes(method as MethodName))
-    : [...PRIMARY_METHODS];
+    ? rawOptions.methods.filter((method): method is MethodName => SOURCE_READY_METHODS.includes(method as MethodName))
+    : [...SOURCE_READY_METHODS];
   const options: AnalysisOptions = {
     ...DEFAULT_OPTIONS,
     ...rawOptions,
-    methods: methods.length ? methods : [...PRIMARY_METHODS],
+    methods: methods.length ? methods : [...SOURCE_READY_METHODS],
     mode: rawOptions.mode === "query-reference" ? "query-reference" : "exploratory",
     testReferences: rawOptions.testReferences === true,
     correction: rawOptions.correction === "holm" || rawOptions.correction === "none" ? rawOptions.correction : "bonferroni",
@@ -1330,8 +1364,11 @@ export function parseProject(text: string): RdpProject {
     alpha: Math.max(1e-12, Math.min(1, finiteNumber(rawOptions.alpha, DEFAULT_OPTIONS.alpha))),
     minMethods: Math.max(1, Math.min(Math.max(1, methods.length), Math.trunc(finiteNumber(rawOptions.minMethods, DEFAULT_OPTIONS.minMethods)))),
     candidateParents: Math.max(2, Math.min(300, Math.trunc(finiteNumber(rawOptions.candidateParents, DEFAULT_OPTIONS.candidateParents)))),
+    cyclicDetection: rawOptions.cyclicDetection !== false,
+    maximumDetectionCycles: Math.max(1, Math.min(1000, Math.trunc(finiteNumber(rawOptions.maximumDetectionCycles, DEFAULT_OPTIONS.maximumDetectionCycles)))),
     rdpWindow: Math.max(5, Math.min(300, Math.trunc(finiteNumber(rawOptions.rdpWindow, DEFAULT_OPTIONS.rdpWindow)))),
     rdpSignalsPerTriplet: Math.max(1, Math.min(256, Math.trunc(finiteNumber(rawOptions.rdpSignalsPerTriplet, DEFAULT_OPTIONS.rdpSignalsPerTriplet)))),
+    chiSignalsPerTriplet: Math.max(1, Math.min(256, Math.trunc(finiteNumber(rawOptions.chiSignalsPerTriplet, DEFAULT_OPTIONS.chiSignalsPerTriplet)))),
     geneconvGScale: Math.max(0, Math.min(100, finiteNumber(rawOptions.geneconvGScale, DEFAULT_OPTIONS.geneconvGScale))),
     siskanOutgroupMode: rawOptions.siskanOutgroupMode === "most-divergent" || rawOptions.siskanOutgroupMode === "randomized" || rawOptions.siskanOutgroupMode === "manual"
       ? rawOptions.siskanOutgroupMode
@@ -1659,6 +1696,27 @@ export function parseProject(text: string): RdpProject {
           statistic: finiteNumber(signal.statistic, 0),
           locator: typeof signal.locator === "string" ? signal.locator : "imported locator",
           sourceRoutine: typeof signal.sourceRoutine === "string" ? signal.sourceRoutine : undefined,
+          sourceChi: signal.sourceChi && typeof signal.sourceChi === "object" ? {
+            track: Math.max(0, Math.min(2, Math.trunc(finiteNumber(signal.sourceChi.track, 0)))),
+            targetSlot: signal.sourceChi.targetSlot === null
+              ? null
+              : Math.max(0, Math.min(2, Math.trunc(finiteNumber(signal.sourceChi.targetSlot, 0)))),
+            informativeSites: Math.max(0, Math.trunc(finiteNumber(signal.sourceChi.informativeSites, 0))),
+            halfWindow: Math.max(0, Math.trunc(finiteNumber(signal.sourceChi.halfWindow, 0))),
+            boundaryStatistics: [
+              Math.max(0, finiteNumber(signal.sourceChi.boundaryStatistics?.[0], 0)),
+              Math.max(0, finiteNumber(signal.sourceChi.boundaryStatistics?.[1], 0)),
+            ] as [number, number],
+            boundaryRanks: [
+              Math.max(0, Math.trunc(finiteNumber(signal.sourceChi.boundaryRanks?.[0], 0))),
+              Math.max(0, Math.trunc(finiteNumber(signal.sourceChi.boundaryRanks?.[1], 0))),
+            ] as [number, number],
+            growthWidths: [
+              Math.max(0, Math.trunc(finiteNumber(signal.sourceChi.growthWidths?.[0], 0))),
+              Math.max(0, Math.trunc(finiteNumber(signal.sourceChi.growthWidths?.[1], 0))),
+            ] as [number, number],
+            direction: signal.sourceChi.direction === -1 ? -1 as const : 1 as const,
+          } : undefined,
           outgroup: signal.outgroup === null
             ? null
             : Number.isFinite(signal.outgroup) && (signal.outgroup as number) >= 0 && (signal.outgroup as number) < alignment.sequences.length
@@ -1873,6 +1931,24 @@ export function parseProject(text: string): RdpProject {
         concreteTripletInputs: rawMetrics.concreteTripletInputs !== false,
         parentSamples: finiteNumber(rawMetrics.parentSamples, 0) || undefined,
         rdpSignalTruncations: Math.max(0, Math.trunc(finiteNumber(rawMetrics.rdpSignalTruncations, 0))) || undefined,
+        chiSignalTruncations: Math.max(0, Math.trunc(finiteNumber(rawMetrics.chiSignalTruncations, 0))) || undefined,
+        tripletKernelCalls: rawMetrics.tripletKernelCalls && typeof rawMetrics.tripletKernelCalls === "object"
+          ? {
+              rdp: Math.max(0, Math.trunc(finiteNumber(rawMetrics.tripletKernelCalls.rdp, 0))),
+              sourceChi: Math.max(0, Math.trunc(finiteNumber(rawMetrics.tripletKernelCalls.sourceChi, 0))),
+            }
+          : undefined,
+        detectionCycle: rawMetrics.detectionCycle && typeof rawMetrics.detectionCycle === "object" && rawMetrics.detectionCycle.enabled === true
+          ? {
+              enabled: true,
+              eventsApplied: Math.max(0, Math.trunc(finiteNumber(rawMetrics.detectionCycle.eventsApplied, 0))),
+              passes: Math.max(1, Math.trunc(finiteNumber(rawMetrics.detectionCycle.passes, 1))),
+              initialComparisons: Math.max(0, Math.trunc(finiteNumber(rawMetrics.detectionCycle.initialComparisons, 0))),
+              redoComparisons: Math.max(0, Math.trunc(finiteNumber(rawMetrics.detectionCycle.redoComparisons, 0))),
+              stoppedBecause: rawMetrics.detectionCycle.stoppedBecause === "cycle-cap" ? "cycle-cap" as const : "no-detectable-signals" as const,
+              maximumCycles: Math.max(1, Math.min(1000, Math.trunc(finiteNumber(rawMetrics.detectionCycle.maximumCycles, DEFAULT_OPTIONS.maximumDetectionCycles)))),
+            }
+          : undefined,
         timing: rawMetrics.timing && typeof rawMetrics.timing === "object"
           ? {
               distanceMs: finiteNumber(rawMetrics.timing.distanceMs, 0),

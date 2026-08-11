@@ -52,7 +52,10 @@ runtime.self.onmessage({
     options: {
       ...DEFAULT_OPTIONS,
       mode: "query-reference",
-      methods: ["SiScan"],
+      // Source SiScan currently confirms/expands candidates from a source
+      // triplet detector; its independent desktop batch orchestration remains
+      // a disclosed parity task.
+      methods: ["RDP", "MaxChi", "Chimaera", "SiScan"],
       minMethods: 1,
       candidateParents: 3,
       window: 40,

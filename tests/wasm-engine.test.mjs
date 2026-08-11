@@ -14,9 +14,8 @@ function reserve(instance, nSeq, nSites) {
   const prefixAPtr = align(distancePtr + nSeq * nSeq * 4);
   const prefixBPtr = prefixAPtr + (nSites + 1) * 4;
   const outPtr = align(prefixBPtr + (nSites + 1) * 4);
-  const statsPtr = outPtr + 96;
   const wordsPerSequence = Math.ceil(nSites / 16);
-  const packedPtr = align(statsPtr + 160);
+  const packedPtr = align(outPtr + 4096);
   const validityPtr = packedPtr + nSeq * wordsPerSequence * 4;
   const poolPtr = align(validityPtr + nSeq * wordsPerSequence * 4);
   const nearestIndexesPtr = poolPtr + nSeq * 4;
@@ -28,7 +27,7 @@ function reserve(instance, nSeq, nSites) {
   const required = dmaxOutPtr + 40;
   const missing = Math.ceil((required - instance.exports.memory.buffer.byteLength) / 65536);
   if (missing > 0) instance.exports.memory.grow(missing);
-  return { seqPtr, distancePtr, prefixAPtr, prefixBPtr, outPtr, statsPtr, packedPtr, validityPtr, poolPtr, nearestIndexesPtr, nearestDistancesPtr, cohortPtr, tractMaskPtr, backgroundMaskPtr, dmaxOutPtr, wordsPerSequence };
+  return { seqPtr, distancePtr, prefixAPtr, prefixBPtr, outPtr, packedPtr, validityPtr, poolPtr, nearestIndexesPtr, nearestDistancesPtr, cohortPtr, tractMaskPtr, backgroundMaskPtr, dmaxOutPtr, wordsPerSequence };
 }
 
 function pack(bytes, nSeq, nSites) {
@@ -219,7 +218,7 @@ test("sampled nearest-candidate kernel retains the closest references", async ()
   );
 });
 
-test("triplet kernel localizes a known internal mosaic tract", async () => {
+test("triplet count kernel evaluates a known internal mosaic tract", async () => {
   const instance = await engine();
   const nSeq = 3;
   const nSites = 300;
@@ -229,189 +228,17 @@ test("triplet kernel localizes a known internal mosaic tract", async () => {
   sequences.fill(1, nSites, nSites * 2);
   sequences.fill(0, nSites * 2, nSites * 3);
   sequences.fill(1, nSites * 2 + 90, nSites * 2 + 210);
-  const found = instance.exports.scan_pair(
-    pointers.seqPtr,
-    nSites,
-    2,
-    0,
-    1,
-    30,
-    pointers.prefixAPtr,
-    pointers.prefixBPtr,
-    pointers.outPtr,
+  instance.exports.triplet_counts(
+    pointers.seqPtr, nSites, 2, 0, 1, 90, 210, pointers.outPtr,
   );
-  assert.equal(found, 1);
-  const result = new Int32Array(instance.exports.memory.buffer, pointers.outPtr, 12);
-  assert.equal(result[0], 90);
-  assert.equal(result[1], 210);
-  assert.equal(result[2], 0);
-  assert.equal(result[3], 1);
-  assert.ok(result[4] / 1000 > 250);
-
-  instance.exports.method_stats(
-    pointers.seqPtr,
-    nSites,
-    2,
-    0,
-    1,
-    result[0],
-    result[1],
-    60,
-    5,
-    100,
-    12345,
-    127,
-    pointers.prefixAPtr,
-    pointers.prefixBPtr,
-    pointers.statsPtr,
-    0,
-  );
-  const stats = new Int32Array(instance.exports.memory.buffer, pointers.statsPtr, 33);
-  assert.equal(stats[0], 120, "GENECONV G=0 run should span the inserted tract");
-  assert.ok(stats[5] / stats[6] > 0.9, "window topology should switch with the known tract");
-  assert.ok(Math.abs(stats[17] - 90) <= 2, "left breakpoint polishing should remain at the truth");
-  assert.ok(Math.abs(stats[18] - 210) <= 2, "right breakpoint polishing should remain at the truth");
-  assert.equal(stats[11], 120, "3Seq maximum HGRW descent should span the inserted tract");
-  assert.equal(stats[19], 180, "3Seq should count major-parent matches");
-  assert.equal(stats[20], 120, "3Seq should count minor-parent matches");
-  assert.equal(stats[22], 300, "three representative windows should each contribute 100 decisive bootstraps");
-  assert.equal(stats[21], 300, "all bootstrap topologies should match the known mosaic");
-  assert.ok(Math.abs(stats[25] - 90) <= 10, `MAXCHI left peak should localize the true boundary, got ${stats[25]}`);
-  assert.ok(Math.abs(stats[26] - 210) <= 10, `MAXCHI right peak should localize the true boundary, got ${stats[26]}`);
-  assert.ok(Math.abs(stats[27] - 90) <= 10, `CHIMAERA left peak should localize the true boundary, got ${stats[27]}`);
-  assert.ok(Math.abs(stats[28] - 210) <= 10, `CHIMAERA right peak should localize the true boundary, got ${stats[28]}`);
-  assert.ok(Math.abs(stats[29] - 90) <= 60, `BOOTSCAN run should cover the left boundary, got ${stats[29]}`);
-  assert.ok(Math.abs(stats[30] - 210) <= 60, `BOOTSCAN run should cover the right boundary, got ${stats[30]}`);
-  assert.ok(Math.abs(stats[31] - 90) <= 60, `SISCAN run should cover the left boundary, got ${stats[31]}`);
-  assert.ok(Math.abs(stats[32] - 210) <= 60, `SISCAN run should cover the right boundary, got ${stats[32]}`);
-
-  instance.exports.method_stats(
-    pointers.seqPtr,
-    nSites,
-    2,
-    0,
-    1,
-    result[0],
-    result[1],
-    60,
-    5,
-    25,
-    12345,
-    2,
-    pointers.prefixAPtr,
-    pointers.prefixBPtr,
-    pointers.statsPtr,
-    0,
-  );
-  const bootscanOnly = new Int32Array(instance.exports.memory.buffer, pointers.statsPtr, 23);
-  assert.equal(bootscanOnly[0], 0, "disabled GENECONV kernel should not run");
-  assert.ok(bootscanOnly[6] > 0, "enabled BootScan kernel should run");
-  assert.equal(bootscanOnly[7], 0, "disabled MaxChi kernel should not run");
-  assert.equal(bootscanOnly[11], 0, "disabled 3SEQ kernel should not run");
-  const hmmFound = instance.exports.hmm_polish(
-    pointers.seqPtr,
-    nSites,
-    2,
-    0,
-    1,
-    82,
-    218,
-    pointers.prefixAPtr,
-    pointers.prefixBPtr,
-    pointers.outPtr,
-  );
-  assert.equal(hmmFound, 1);
-  const hmm = new Int32Array(instance.exports.memory.buffer, pointers.outPtr, 11);
-  assert.ok(Math.abs(hmm[0] - 90) <= 1, `HMM left breakpoint ${hmm[0]} should recover 90`);
-  assert.ok(Math.abs(hmm[1] - 210) <= 1, `HMM right breakpoint ${hmm[1]} should recover 210`);
-  assert.equal(hmm[2], 300, "all sites are informative in the synthetic triplet");
-  assert.equal(hmm[3], 2, "the two-state path should contain the two known ancestry switches");
-  assert.ok(hmm[4] >= 950 && hmm[5] >= 850, "candidate-seeded emissions should fit both ancestry states");
-});
-
-test("MAXCHI and CHIMAERA windows remain in informative-site coordinates", async () => {
-  const instance = await engine();
-  const nSeq = 3;
-  const nSites = 600;
-  const pointers = reserve(instance, nSeq, nSites);
-  const sequences = new Uint8Array(instance.exports.memory.buffer, pointers.seqPtr, nSeq * nSites);
-  sequences.fill(0);
-  // Only every tenth nucleotide is polymorphic. The recombinant changes from
-  // the major to the minor state for informative ranks 20..39. Adding the 540
-  // monomorphic columns must not change a 20-VNP MAXCHI/CHIMAERA window.
-  for (let rank = 0; rank < 60; rank += 1) {
-    const site = rank * 10 + 5;
-    sequences[nSites + site] = 1;
-    sequences[nSites * 2 + site] = rank >= 20 && rank < 40 ? 1 : 0;
-  }
-  instance.exports.method_stats(
-    pointers.seqPtr,
-    nSites,
-    2,
-    0,
-    1,
-    205,
-    405,
-    20,
-    1,
-    0,
-    99,
-    4 | 8,
-    pointers.prefixAPtr,
-    pointers.prefixBPtr,
-    pointers.statsPtr,
-    0,
-  );
-  const stats = new Int32Array(instance.exports.memory.buffer, pointers.statsPtr, 35);
-  assert.ok(Math.abs(stats[25] - 205) <= 12, `MAXCHI left VNP peak should map near 205, got ${stats[25]}`);
-  assert.ok(Math.abs(stats[26] - 405) <= 12, `MAXCHI right VNP peak should map near 405, got ${stats[26]}`);
-  assert.ok(Math.abs(stats[27] - 205) <= 12, `CHIMAERA left VNP peak should map near 205, got ${stats[27]}`);
-  assert.ok(Math.abs(stats[28] - 405) <= 12, `CHIMAERA right VNP peak should map near 405, got ${stats[28]}`);
-});
-
-test("GENECONV finite G-scale bridges source-scored internal mismatches", async () => {
-  const instance = await engine();
-  const nSeq = 3;
-  const nSites = 100;
-  const pointers = reserve(instance, nSeq, nSites);
-  const sequences = new Uint8Array(instance.exports.memory.buffer, pointers.seqPtr, nSeq * nSites);
-  sequences.fill(0, 0, nSites);
-  sequences.fill(1, nSites, nSites * 2);
-  sequences.fill(0, nSites * 2, nSites * 3);
-  sequences.fill(1, nSites * 2 + 30, nSites * 2 + 70);
-  sequences[nSites * 2 + 50] = 2;
-  const run = (gScale) => {
-    instance.exports.method_stats(
-      pointers.seqPtr,
-      nSites,
-      2,
-      0,
-      1,
-      30,
-      70,
-      20,
-      1,
-      0,
-      7,
-      1,
-      pointers.prefixAPtr,
-      pointers.prefixBPtr,
-      pointers.statsPtr,
-      gScale,
-    );
-    return new Int32Array(instance.exports.memory.buffer, pointers.statsPtr, 35).slice();
-  };
-  const exactRuns = run(0);
-  const mismatchTolerant = run(1);
-  assert.equal(exactRuns[0], 20, "G=0 must stop at the internal discordance");
-  assert.equal(mismatchTolerant[0], 37, "G=1 must apply the source integer mismatch penalty");
-  assert.equal(mismatchTolerant[3], 30);
-  assert.equal(mismatchTolerant[4], 70);
+  const counts = new Int32Array(instance.exports.memory.buffer, pointers.outPtr, 6);
+  assert.deepEqual([...counts.slice(0, 5)], [300, 120, 0, 180, 0]);
+  assert.ok(counts[5] > 250_000, `expected a strong tract/background contrast, got ${counts[5] / 1000}`);
 });
 
 test("RDP5 source detector localizes its own VNP-window event and polarity", async () => {
   const instance = await engine();
-  const nSeq = 3;
+  const nSeq = 4;
   const nSites = 300;
   const pointers = reserve(instance, nSeq, nSites);
   const sequences = new Uint8Array(instance.exports.memory.buffer, pointers.seqPtr, nSeq * nSites);
@@ -419,6 +246,10 @@ test("RDP5 source detector localizes its own VNP-window event and polarity", asy
   sequences.fill(1, nSites, nSites * 2); // minor parent
   sequences.fill(0, nSites * 2, nSites * 3); // recombinant background
   sequences.fill(1, nSites * 2 + 90, nSites * 2 + 210);
+  // A fourth sequence makes many otherwise invariant alignment columns
+  // globally variable. It must have no influence on the concrete 0/1/2
+  // triplet's compressed VNP stream.
+  for (let site = 0; site < nSites; site += 1) sequences[nSites * 3 + site] = (site * 3 + 1) % 4;
   // Supply the third pair-match category required by FastRecCheckP without
   // changing the true ancestry switch.
   for (let site = 12; site < nSites; site += 17) {
@@ -440,6 +271,12 @@ test("RDP5 source detector localizes its own VNP-window event and polarity", asy
   );
   assert.equal(found, 1);
   const result = new Int32Array(instance.exports.memory.buffer, pointers.outPtr, 18);
+  let expectedTripletVnps = 0;
+  for (let site = 0; site < nSites; site += 1) {
+    const values = [sequences[site], sequences[nSites + site], sequences[nSites * 2 + site]];
+    const pairMatches = Number(values[0] === values[1]) + Number(values[0] === values[2]) + Number(values[1] === values[2]);
+    if (pairMatches === 1) expectedTripletVnps += 1;
+  }
   assert.equal(result[2], 2, "source polarity should identify the requested recombinant");
   assert.equal(result[3], 0);
   assert.equal(result[4], 1);
@@ -447,6 +284,7 @@ test("RDP5 source detector localizes its own VNP-window event and polarity", asy
   assert.ok(Math.abs(result[1] - 210) <= 20, `unexpected source end ${result[1]}`);
   assert.equal(result[16], 30);
   assert.equal(result[17], 1);
+  assert.equal(result[6], expectedTripletVnps, "RDP must compress to this triplet's VNPs and ignore its invariant columns");
   const capacity = 8;
   const bestPtr = pointers.outPtr + capacity * 72;
   const totalSignals = instance.exports.scan_rdp5_triplet_all(
@@ -489,4 +327,52 @@ test("RDP5 source detector localizes its own VNP-window event and polarity", asy
     signal[2], signal[3], signal[4], signal[0], signal[1], signal[5], signal[12], signal[13], signal[14],
   ].join(":")).sort();
   assert.deepEqual(normalize(permuted), normalize(retained), "RDP all-signal output must be invariant to input triplet order for worker caching");
+  const packedTriplet = pack(sequences, nSeq, nSites);
+  new Uint32Array(instance.exports.memory.buffer, pointers.packedPtr, packedTriplet.packed.length).set(packedTriplet.packed);
+  new Uint32Array(instance.exports.memory.buffer, pointers.validityPtr, packedTriplet.validity.length).set(packedTriplet.validity);
+  const packedTotal = instance.exports.scan_rdp5_triplet_all_packed(
+    pointers.packedPtr,
+    pointers.validityPtr,
+    pointers.wordsPerSequence,
+    nSites,
+    2,
+    0,
+    1,
+    30,
+    pointers.prefixBPtr,
+    pointers.prefixAPtr,
+    pointers.outPtr,
+    capacity,
+    bestPtr,
+  );
+  const packedSignals = Array.from({ length: Math.min(capacity, packedTotal) }, (_, index) => (
+    new Int32Array(instance.exports.memory.buffer, pointers.outPtr + index * 72, 18).slice()
+  ));
+  assert.equal(packedTotal, totalSignals);
+  assert.deepEqual(normalize(packedSignals), normalize(retained), "packed production RDP scan must exactly match its byte oracle");
+
+  sequences.fill(3, nSites * 3, nSites * 4);
+  const repacked = pack(sequences, nSeq, nSites);
+  new Uint32Array(instance.exports.memory.buffer, pointers.packedPtr, repacked.packed.length).set(repacked.packed);
+  new Uint32Array(instance.exports.memory.buffer, pointers.validityPtr, repacked.validity.length).set(repacked.validity);
+  const decoyChangedTotal = instance.exports.scan_rdp5_triplet_all_packed(
+    pointers.packedPtr,
+    pointers.validityPtr,
+    pointers.wordsPerSequence,
+    nSites,
+    2,
+    0,
+    1,
+    30,
+    pointers.prefixBPtr,
+    pointers.prefixAPtr,
+    pointers.outPtr,
+    capacity,
+    bestPtr,
+  );
+  const decoyChanged = Array.from({ length: Math.min(capacity, decoyChangedTotal) }, (_, index) => (
+    new Int32Array(instance.exports.memory.buffer, pointers.outPtr + index * 72, 18).slice()
+  ));
+  assert.equal(decoyChangedTotal, packedTotal);
+  assert.deepEqual(normalize(decoyChanged), normalize(packedSignals), "a non-triplet sequence must never leak its variable columns into RDP's VNP stream");
 });

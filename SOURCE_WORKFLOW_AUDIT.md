@@ -55,9 +55,9 @@ new Review studio.
 
 ## Observable behavior crosswalk
 
-| RDP5 evidence | Observable behavior | RDP Web 0.9.2 implementation | Fidelity boundary |
+| RDP5 evidence | Observable behavior | RDP Web 0.9.3 implementation | Fidelity boundary |
 | --- | --- | --- | --- |
-| Manual §4.1 and §10.3 | Detection and unique-event inference are separate phases, and detection screens real sequence triplets. | Scan results are retained as hypotheses. Full mode enumerates every unordered combination of three concrete sequences and evaluates every possible recombinant polarity; no consensus/rest-of-alignment proxy is substituted. All seven primary families emit independent intervals, directional families run both parent orientations, and co-location is required for confirmation. RDP has a bounded source multi-excursion queue and SiScan queues every locally significant source topology run rather than only its global optimum. | Exact source multi-signal queues for GENECONV, BootScan, MaxChi, Chimaera and 3Seq plus desktop numerical fixtures remain method-specific parity gates. |
+| Manual §4.1 and §10.3 | Detection and unique-event inference are separate phases, and detection screens real sequence triplets. | Full mode emits one `a < b < c` record per concrete triple. RDP and combined MAXCHI/CHIMAERA each receive it once and resolve all pair tracks/polarities internally; packed extraction discards only that triplet's invariant columns. Kernel-call provenance proves C(N,3), and no consensus/rest-of-alignment proxy is substituted. | GENECONV, BootScan and 3Seq source batches remain disabled/pending; source SiScan presently confirms source-detector candidates rather than owning the initial batch. |
 | Manual §5.1 and §10.4; `GoToNextEventMnu_Click` | Events are reviewed in stored characterization order; next/previous wrap and can skip accepted/rejected events. | Ordered queue, previous/next wrap, best-unresolved jump, skip accepted, skip rejected, warning-only, stale-only, and minimum-method filters. | RDP5's exact internal `BestEvent` ordering has not been numerically replicated. |
 | `GoToBestMnu`, `Detect1Mnu`–`Detect7Mnu` | Jump to strongest unaccepted evidence and filter by number of detecting methods. | Best adjusted-p unresolved jump and 0–7 minimum-support filter. | Adjusted p is used as the transparent tie-breaker; exact desktop ordering remains a fixture target. |
 | Manual §5.1–5.3; `ShowBestAllMnu` / `ShowAllAllMnu` | Schematic context, event information, and method plots work together; best evidence and all evidence can be selected. | Integrated dossier, recombination map, all-method tabs, and best-evidence mode in one continuous review surface. | The original method-specific graphic primitives are not pixel-cloned. |
@@ -70,7 +70,7 @@ new Review studio.
 | Node menus in `DendrogramForm6.frm` | Mark/unmark clades, find parent candidates, and accept/reject events above a node. | Linked leaf selection and event-group decisions are operational; event-centered role reassignment is directly accessible in the inspector. | Editable internal-node/clade operations and parent search above a node remain open. |
 | Manual §4.1.3–4.1.4 and §10.4 | Descendants of one ancestral recombinant are grouped; overprinting can obscure group membership. | Every retained event tests every other sequence under all three presumed-recombinant orientations. Six seeded JC/NJ bootstrap trees, source-default 50% branch collapse, source-style tree movement, distance correlation/SDM, and detectable-signal evidence feed the tunable 2-of-3 rule; qualifying unsignalled descendants enter `GetSupers`-style ancestral groups. Group decisions and dependency reconstruction are operational. | Exact Clearcut consensus and the complete `CheckBSTree` weighting tree need desktop-corpus parity; ancestral-sequence reconstruction remains open. |
 | `AcceptMnu_Click` / `AcceptSMnu_Click` and reject counterparts | A decision can apply to the selected sequence or every sequence carrying the event. | Separate selected-hypothesis and common-ancestor-group accept/reject controls; each is one undoable, audited action. | Group membership is analyst/heuristic supplied rather than guaranteed to match RDP5 inference. |
-| `RSortMnu_Click`, `RescanBest`, and manual §4.1.6/§10.4 | Correcting an event invalidates later assumptions and triggers re-identification/rescanning. | Scientific edits mark later queue items stale. Accepted co-recombinant tracts are erased from remainder components, copied into gap-padded tract components, recursively targeted by lineage, and supplied to manual or dependency-aware rescans. Signals spanning deleted tracts split into continuous pieces and gap-near breakpoints carry structural uncertainty. | Exact desktop iteration ordering and every method-specific VNP uncertainty threshold still need comparison fixtures. |
+| `FindBestRecSignal`, `BuildFirstXOList`, redo lists, `CheckDrop`/`DropSeqs`; manual §4.1.6/§10.4 | Automated detection repeatedly selects the best signal, characterizes it, erases/extracts co-recombinant tracts and re-screens; later manual corrections invalidate downstream assumptions. | Default Run performs the full sequential cycle. Unaffected signals remain pooled; changed-origin triplets alone enter the redo scan; a pooled signal is refreshed on the current component alignment before application. Scientific edits still mark later queue items stale and manual/heuristic rescans rebuild the lineage. Crossing signals split and gap-near breakpoints carry structural uncertainty. | Exact desktop redo-list compaction/minimum-size dropping, method-specific VNP uncertainty thresholds and desktop iteration-order golden fixtures remain. |
 | `RCheckMnu`, tree recheck commands | Re-run methods or recheck a plot with a different candidate role. | Exact selected-hypothesis recalculation, role audition, method-specific views, and full/targeted unresolved rescan. | Recalculation preserves scan multiplicity conservatively but does not claim RDP5 p-value identity. |
 | Matrix menu and manual §5.5 | Compatibility, recombination, breakpoint, LD, MaxChi, and LARD matrices are interactive context. | Dense genome-position breakpoint-pair, region-separation, local-discordance, and p-distance views with coordinate inspection. | Exact RF/SH/LD/MaxChi/LARD matrix implementations remain separate parity tasks. |
 | Manual §9 | Save project, remove recombinants, remove/mask tracts, split mosaics, and partition at breakpoints. | Restorable project, CSV, input FASTA, remove, mask, codon-aware mask, split, and breakpoint-partition outputs. | Native `.rdp` project import/export is not implemented. |
@@ -93,7 +93,7 @@ global-variable architecture. Group decisions and shared-breakpoint edits are
 single undo frames, every action receives an audit entry, and stale downstream
 evidence is visible rather than silently recomputed.
 
-## Implemented through the 0.9.2 source-parity checkpoint
+## Implemented through the 0.9.3 source-parity checkpoint
 
 - Review studio replaces the disconnected main-page result stack.
 - Six-stage selected-event rail: signal, breakpoints, roles, trees, grouping,
@@ -111,9 +111,12 @@ evidence is visible rather than silently recomputed.
 - Regression tests for queue navigation, filters, best-event selection,
   grouping, checklist state, role scoring, workflow wiring, and tree wording.
 - Direct RDP5 VNP detection and source probability scaling.
-- Complete concrete-triplet enumeration by default, with all three
-  recombinant polarities and no consensus/rest-of-alignment proxy; approximate
-  parent shortlisting is opt-in and provenance-marked.
+- Complete role-agnostic concrete-triplet enumeration by default, one
+  `a < b < c` scheduler record and one source-kernel call per family, with all
+  internal polarities and no consensus/rest-of-alignment proxy. Packed and byte
+  extraction are exact; targeted/approximate modes are opt-in and marked.
+- Direct MAXCHI/CHIMAERA compressed tracks, window rules, smoothing, peak-basin
+  destruction, GrowMChiWin expansion and multi-peak queues.
 - Fixed-three-state source BURT with exact circular working-set construction,
   shifted switch/CI scanning, `MatchBPtoCI`, principal non-reassortment
   `PolishBP`, and an interactive posterior workbench, plus the manual 2–20-state
@@ -134,10 +137,9 @@ evidence is visible rather than silently recomputed.
 
 The following are not disguised as complete:
 
-- exact source multi-signal queues for GENECONV, BootScan, MaxChi, Chimaera and
-  3Seq, plus desktop numerical parity for every primary method (RDP and SiScan
-  multi-run queues, independent family locators and co-location gating are
-  operational);
+- complete source discovery batches and multi-signal queues for the currently
+  disabled GENECONV, BootScan and 3Seq families, plus independent source SiScan
+  discovery orchestration and desktop numerical parity for every method;
 - the optional RDP5 logistic/neural recombinant selectors and desktop
   golden-corpus calibration of the default decision tree;
 - editable tree nodes/clades, RF distances, ML/Bayesian inference, SH/AU tests,

@@ -66,6 +66,9 @@ test("source BURT exposes the desktop polish path and an interactive posterior w
 });
 
 test("full scans default to every concrete sequence triplet with approximate pruning clearly isolated", () => {
+  assert.doesNotMatch(page, /DEFAULT_OPTIONS, mode: "query-reference"/);
+  assert.match(page, /All-vs-all \(RDP\)/);
+  assert.match(page, /Sequence role labels do not constrain this scan/);
   assert.match(page, /Every unordered set of three actual sequences is screened/);
   assert.match(page, /All concrete triplets/);
   assert.match(page, /Use approximate parent shortlist/);
@@ -149,6 +152,17 @@ test("global reconstruction exposes tunable ordered auto-resolution and dependen
   assert.match(worker, /excludedParents/);
   assert.match(styles, /\.auto-resolve-shell\s*\{[^}]*display:\s*grid/s);
   assert.match(styles, /\.auto-advanced-grid\s*\{[^}]*grid-template-columns:\s*repeat\(3/s);
+});
+
+test("default analysis performs RDP5 sequential erase/extract detection", () => {
+  assert.match(page, /Sequential signal disassembly/);
+  assert.match(page, /maximumDetectionCycles/);
+  assert.match(page, /cyclicDetection: config\.cyclicDetection === true/);
+  assert.match(worker, /async function analyzeCyclic/);
+  assert.match(worker, /affectedOrigins/);
+  assert.match(worker, /mergeCyclePool/);
+  assert.match(worker, /Refresh every concrete triplet involving that/);
+  assert.match(worker, /let stoppedBecause = "no-detectable-signals"/);
 });
 
 test("RDP-style genome-position matrices replace the event-similarity grid", () => {

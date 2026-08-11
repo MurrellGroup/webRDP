@@ -1,5 +1,74 @@
 # Changelog
 
+## 0.9.3 — 2026-08-12
+
+- Made automated analysis follow the RDP5 manual §4.1.6 cycle by default:
+  screen the intact alignment, select the strongest supported signal,
+  identify its recombinant/co-recombinant lineage, erase the tract from each
+  remainder, append gap-padded tract components, and continue until no
+  supported signal remains. These internal cycle decisions remain
+  `unreviewed` in the analyst-facing ledger; they never masquerade as manual
+  acceptance.
+- Added a source-style redo queue. Signals whose concrete triplets do not
+  contain a sequence changed by the latest split stay in the detection pool;
+  only triplets containing an affected origin are rescanned. Before an
+  unaffected pooled signal is applied, its triplets are refreshed against the
+  current component alignment so recombinant identification and
+  co-recombinant grouping cannot remain stale.
+- Added persisted cycle provenance: characterization order, component
+  lineage, pass count, initial versus redo comparisons, stop reason, and a
+  tunable 1–1,000 pathological-loop safety cap. Both erased remainders and
+  extracted tracts remain eligible as separate evolutionary histories.
+
+- Replaced the remaining generic MAXCHI/CHIMAERA discovery shortcut with a
+  WebAssembly port of the author-supplied RDP5 scan path. MAXCHI now constructs
+  all three pair-equality tracks from concrete triplets, including
+  all-different sites; CHIMAERA constructs each of the three possible
+  recombinant-oriented binary parent-match tracks and excludes all-different
+  sites like the desktop `FSSRDP` path.
+- Ported source half-window selection, adjacent 2×H χ² windows, the critical
+  count-difference gate, missing-span/end-window bans, circular 11-position
+  smoothing, strict peak selection, source-style peak-basin destruction, and
+  `GrowMChiWinP`/`GrowMChiWinP2` symmetric peak growth with its failure ceiling.
+- Added deterministic paired-peak queues so multiple disjoint MAXCHI and
+  CHIMAERA tracts from one concrete sequence triplet become separate candidate
+  hypotheses. A tunable 1–256 retention ceiling and omitted-signal provenance
+  keep pathological scans bounded without silently hiding truncation.
+- Cached the source profiles once per unordered triplet and, in exhaustive
+  exploratory mode, emits all eligible recombinant polarities from that one
+  scan. The same single-pass optimization now applies to the order-invariant
+  RDP detector, eliminating three redundant detector scans per unordered
+  concrete triplet while preserving the C(N,3) multiplicity family.
+- Replaced the outer target-oriented scheduler with an explicit `a < b < c`
+  source batch in role-agnostic mode. Kernel-call provenance and the C(5,3)
+  regression now prove that RDP and the combined χ detector each run exactly
+  once per unordered triplet—not once per presumed recombinant.
+- Added production two-bit triplet extraction for RDP, MAXCHI and CHIMAERA.
+  Sixteen alignment columns are decoded per word, only the current triplet's
+  informative sites are materialized, and packed-versus-byte oracle tests are
+  exact across non-word-aligned lengths and missing data.
+- Added explicit decoy-sequence regressions proving that mutations outside a
+  concrete triplet cannot leak alignment-global variable columns into its RDP,
+  MAXCHI, or CHIMAERA compressed streams.
+- Fixed the page-level default that had incorrectly selected query/reference
+  mode. New analyses and every bundled example now start with role-agnostic
+  all-vs-all enumeration; the targeted mode is explicitly labelled non-parity.
+- Removed the former non-source GENECONV, BootScan, SiScan-prelocator and 3Seq
+  discovery paths from production. GENECONV, BootScan and 3Seq are disabled
+  until their full author-source batch routines are ported; source SiScan now
+  confirms every retained source-detector candidate without a generic locator.
+- Final evidence and edited-event recalculation now use the retained source
+  peak basin rather than the legacy generic χ² locator. `ChiPVal2P` calibration
+  receives the exact compressed-site count and selected source half-window.
+- Persisted track, target orientation, compressed-site count, half-window,
+  both grown boundary statistics and ranks, growth widths, direction, and the
+  complete source routine chain in project JSON and CSV. The method panel and
+  event dossier expose that ledger directly.
+- Added exact two-tract, all-different-site, deterministic queue, worker
+  provenance, recalculation, project-round-trip, and UI regressions. These are
+  routine-level source fixtures; a broad desktop-executable golden corpus,
+  especially missing-data/circular/tie edge cases, remains a validation gate.
+
 ## 0.9.2 — 2026-08-11
 
 - Changed the scientific default from an eight-parent shortlist to exhaustive

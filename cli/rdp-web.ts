@@ -5,6 +5,7 @@ import {
   DEFAULT_OPTIONS,
   MethodName,
   PRIMARY_METHODS,
+  SOURCE_READY_METHODS,
   parseAlignment,
   serializeProject,
 } from "../app/rdp-core";
@@ -17,10 +18,13 @@ Usage:
 Options:
   --mode exploratory|query-reference
   --circular
-  --methods RDP,GENECONV,BootScan,MaxChi,Chimaera,SiScan,3Seq
+  --methods RDP,MaxChi,Chimaera,SiScan
   --min-methods N
   --approximate-parent-shortlist
   --candidate-parents N          (only with approximate shortlist)
+  --one-pass                     disable RDP5 erase/extract detection cycles
+  --max-detection-cycles N       safety cap; default 250
+  --chi-signals N                MAXCHI/CHIMAERA peak pairs retained/triplet
   --bootstrap N
   --seed N
   --siscan-outgroup nearest|most-divergent|randomized
@@ -51,8 +55,11 @@ const inputPath = path.resolve(positional[0]);
 const outputPath = path.resolve(positional[1] ?? `${inputPath.replace(/\.[^.]+$/u, "")}.rdpweb`);
 const input = fs.readFileSync(inputPath, "utf8");
 const alignment = parseAlignment(input, path.basename(inputPath));
-const requestedMethods = option("--methods")?.split(",").filter((method): method is MethodName => PRIMARY_METHODS.includes(method as MethodName));
-const methods = requestedMethods?.length ? requestedMethods : [...PRIMARY_METHODS];
+const requestedNames = option("--methods")?.split(",").filter(Boolean);
+const unavailable = requestedNames?.filter((method) => PRIMARY_METHODS.includes(method as MethodName) && !SOURCE_READY_METHODS.includes(method as MethodName)) ?? [];
+if (unavailable.length) throw new Error(`${unavailable.join(", ")} ${unavailable.length === 1 ? "is" : "are"} disabled until the complete author-source batch port is available.`);
+const requestedMethods = requestedNames?.filter((method): method is MethodName => SOURCE_READY_METHODS.includes(method as MethodName));
+const methods = requestedMethods?.length ? requestedMethods : [...SOURCE_READY_METHODS];
 const requestedOutgroup = option("--siscan-outgroup");
 const manualOutgroup = Number(option("--siscan-outgroup-sequence"));
 const requestedPositions = option("--siscan-positions");
@@ -63,9 +70,12 @@ const options = {
   mode: option("--mode") === "query-reference" ? "query-reference" as const : "exploratory" as const,
   circular: arguments_.includes("--circular"),
   exhaustive: !arguments_.includes("--approximate-parent-shortlist"),
+  cyclicDetection: !arguments_.includes("--one-pass"),
+  maximumDetectionCycles: Math.max(1, Math.min(1000, Number(option("--max-detection-cycles") ?? DEFAULT_OPTIONS.maximumDetectionCycles))),
   methods,
   minMethods: Math.min(methods.length, Math.max(1, Number(option("--min-methods") ?? DEFAULT_OPTIONS.minMethods))),
   candidateParents: Math.max(3, Number(option("--candidate-parents") ?? DEFAULT_OPTIONS.candidateParents)),
+  chiSignalsPerTriplet: Math.max(1, Math.min(256, Number(option("--chi-signals") ?? DEFAULT_OPTIONS.chiSignalsPerTriplet))),
   bootstrapReplicates: Math.max(0, Number(option("--bootstrap") ?? DEFAULT_OPTIONS.bootstrapReplicates)),
   randomSeed: Number(option("--seed") ?? DEFAULT_OPTIONS.randomSeed) >>> 0,
   siskanOutgroupMode: Number.isFinite(manualOutgroup) && manualOutgroup >= 1
@@ -106,7 +116,7 @@ const result = new Promise<Record<string, unknown>>((resolve, reject) => {
 });
 
 await import("../public/rdp-worker.js");
-runtime.self.onmessage({ data: { type: "analyze", jobId: 1, alignment, options } });
+runtime.self.onmessage({ data: { type: "analyze", jobId: 1, alignment, options, cyclicDetection: options.cyclicDetection } });
 const message = await result;
 process.stderr.write("\n");
 const events = message.events as ReturnType<typeof JSON.parse>;
@@ -118,6 +128,11 @@ const metrics = {
   parentSamples: Number(message.parentSamples),
   timing: message.timing as { distanceMs: number; scanMs: number; statisticsMs: number; diagnosticsMs?: number },
   diagnostics: message.diagnostics as NonNullable<Parameters<typeof serializeProject>[0]["metrics"]>["diagnostics"],
+  disassembly: message.disassembly as NonNullable<Parameters<typeof serializeProject>[0]["metrics"]>["disassembly"],
+  rdpSignalTruncations: Number(message.rdpSignalTruncations) || undefined,
+  chiSignalTruncations: Number(message.chiSignalTruncations) || undefined,
+  tripletKernelCalls: message.tripletKernelCalls as NonNullable<Parameters<typeof serializeProject>[0]["metrics"]>["tripletKernelCalls"],
+  detectionCycle: message.detectionCycle as NonNullable<Parameters<typeof serializeProject>[0]["metrics"]>["detectionCycle"],
 };
 fs.writeFileSync(outputPath, serializeProject({
   alignment,

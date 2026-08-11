@@ -14,29 +14,29 @@ node bench/benchmark.mjs 100 10000
 
 The August 2026 development-container run for 100 sequences × 10,000 sites
 (one million aligned nucleotides), eight parent candidates per recombinant,
-2,800 O(L) triplet comparisons, method-family statistics on the 500 strongest
-raw signals, and windowless HMM refinement on those retained signals. The same
+2,632 unique concrete-triplet comparisons, source RDP plus combined
+MAXCHI/CHIMAERA detection, and statistic extraction on the 500 strongest raw
+signals. The same
 command also runs an independent 4 × 80 kb source SiScan fixture with 100
 window and 1,000 final-region permutations. It reported:
 
 | Stage | Time |
 | --- | ---: |
-| Scalar distance reference | 136.45 ms |
-| Packed production distance | 8.93 ms |
-| Packed distance speed-up | 15.28× |
-| Triplet candidate scans | 189.38 ms |
-| Seven-family evidence + 100×3 bootstrap kernels | 733.27 ms |
-| Legacy HMM compatibility kernel | 57.10 ms |
-| Packed 30-taxon VisRD/dMax role statistic | 81.50 ms |
-| Source PHI, 100 taxa × 256 retained / 9,928 informative sites | 41.07 ms |
-| Production-kernel total | 1,111.24 ms |
-| Triplet scan throughput | 147.9 million site-comparisons/s |
-| VisRD throughput | 1.209 billion site-quartets/s |
-| Source SiScan, 4 × 80 kb, 100/1,000 permutations | 287.30 ms |
+| Scalar distance reference | 148.37 ms |
+| Packed production distance | 8.69 ms |
+| Packed distance speed-up | 17.07× |
+| Source triplet candidate scans | 953.97 ms |
+| Retained-candidate statistic extraction | 175.22 ms |
+| Packed 30-taxon VisRD/dMax role statistic | 83.57 ms |
+| Source PHI, 100 taxa × 256 retained / 9,928 informative sites | 42.56 ms |
+| Production-kernel total | 1,264.02 ms |
+| Source triplet scan throughput | 27.6 million site-triplets/s |
+| VisRD throughput | 1.179 billion site-quartets/s |
+| Source SiScan, 4 × 80 kb, 100/1,000 permutations | 252.51 ms |
 
 `npm run bench:gate` enforces deliberately hardware-tolerant CI ceilings for
 the same workload (150 ms packed distance, 500 ms for the production 30-taxon
-VisRD/dMax cohort, 500 ms for bounded source PHI, 2 s production total, and at least 30 million triplet
+VisRD/dMax cohort, 500 ms for bounded source PHI, 2 s production total, and at least 25 million source triplet
 site-comparisons/s), plus a 2 s ceiling and exact 30,000–45,000 tract-recovery
 gate for the 80 kb source SiScan workload, so large regressions cannot ship
 silently while ordinary runner variance remains harmless.
@@ -62,9 +62,19 @@ display matrix without allocating an N² matrix.
   exceed 50 million.
 - Large-data parent panels combine nearest sampled references with stratified
   references so dense clone groups do not consume every candidate slot.
-- Parent pruning defaults to K=8, changing the dominant triplet cost from
-  O(N³L) toward O(NK²L).
-- Prefix sums make each retained parent-pair scan O(L).
+- Full parity mode defaults to all C(N,3) concrete triplets. Parent pruning is
+  an explicit non-parity preview that changes O(N³L) toward O(NK²L).
+- The source-only scheduler materializes only `a < b < c`; RDP and the combined
+  MAXCHI/CHIMAERA kernel are each invoked once per unordered triplet.
+- Two-bit production extraction advances sixteen alignment columns per word,
+  builds informative coordinates for the current triplet only, and is required
+  to match the byte oracle exactly.
+- Cyclical detection does not repeat the full O(N³L) screen after every event.
+  It retains unaffected signals, invalidates only hypotheses whose concrete
+  roles contain a newly split origin, and re-runs only triplets containing an
+  affected origin—the browser equivalent of RDP5's redo list. A pooled signal
+  is refreshed against the current component alignment before application, so
+  this optimization does not reuse stale role/group characterization.
 - The entire computation runs in a dedicated worker, and cancellation
   terminates that worker immediately.
 - Sequence bytes are packed into a single typed array; the kernel allocates no
@@ -87,11 +97,9 @@ display matrix without allocating an N² matrix.
   taxa. Selection is deterministic and position-balanced; projects record
   retained and total informative-site counts and never label a bounded result
   as an all-site PHI test.
-- A method bitmask now prevents disabled GENECONV, BootScan, MaxChi, Chimaera,
-  SiScan, 3SEQ, and local-polishing loops from running. In particular, disabled
-  BootScan performs no resampling and disabled 3SEQ performs no exact DP.
-- Exact 3SEQ dynamic programming has a four-million-operation event guard and
-  a 20-million-operation job budget, with tuple caching and a labeled fallback.
+- Production discovery currently enables only the direct-source RDP and
+  MAXCHI/CHIMAERA paths. GENECONV, BootScan and 3Seq stay disabled until their
+  full source batch ports land; source SiScan confirms retained candidates.
 - Pre-scan dataset summaries, uncomputed matrix fallbacks and local NJ trees
   use explicit stratified work bounds; the overview and alignment viewer cap
   rendered rows while preserving every event-bearing sequence and searchable

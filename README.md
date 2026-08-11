@@ -48,18 +48,44 @@ circular working-sequence padding/cropping, shifted switch enumeration,
 non-reassortment `PolishBP` adoption, same-switch, missing-data and
 information-reversion rules are now active. Every selected event exposes an
 interactive posterior/state/switch plot and a persisted source-decision
-ledger. The
-former cross-method CUSUM discovery shortcut has also been removed: every
-enabled family now contributes its own interval and a method can confirm an
-event only when that interval is co-located with the event. GENECONV uses the
-source finite-G mismatch penalty and `CalcKMaxP`/`GCCalcPValP` probability
-path (including the G=0 special case); MAXCHI and CHIMAERA scan compressed
-informative-site coordinates and use the source peak multiplier. Unique
-unordered triplets define both the default exhaustive scan and the multiplicity
-family: every method receives three explicit sequence records, never a pair
-plus an alignment-consensus/rest-of-alignment proxy. Distance-pruned parent
-shortlisting survives only as a visibly approximate opt-in. Order-invariant RDP
-triplets are cached to avoid redundant three-polarity source scans. Direct
+ledger.
+Version 0.9.3 replaces the former MAXCHI/CHIMAERA peak-pair approximation with
+the author-supplied RDP5 control flow in WebAssembly: three MAXCHI pair-equality
+tracks, three recombinant-oriented CHIMAERA tracks, source compressed-site and
+half-window rules, missing/end-window bans, 11-position smoothing, peak-basin
+destruction, `GrowMChiWin` expansion, and bounded multi-tract queues. Every
+retained call records both grown boundary statistics, ranks, growth widths and
+its source routine chain. Exhaustive exploratory scans evaluate each unordered
+concrete triplet once for RDP, MAXCHI and CHIMAERA and emit all eligible
+polarities from that cached pass, avoiding three redundant detector scans.
+The direct source fixtures cover multiple disjoint tracts and the important
+MAXCHI-versus-CHIMAERA treatment of all-different sites; executable golden-
+corpus validation remains required before a numerical-parity claim. The
+production scheduler now mirrors the desktop `AList` batch shape: it walks
+only `a < b < c`, invokes RDP once and the combined MAXCHI/CHIMAERA kernel once,
+and resolves all internal pair tracks and recombinant orientations inside that
+concrete triplet. Sixteen-site two-bit extraction skips invariant columns
+without rereading three full sequence strings; byte-oracle regressions require
+identical event rows, including missing data. Every detector receives three
+explicit sequence records, never a pair plus an alignment-consensus/rest-of-
+alignment proxy. The main page no longer overrides this role-agnostic default
+with query/reference mode; designated references are unnecessary. Distance-
+pruned and query/reference screening survive only as visibly non-parity opt-ins.
+The default Run command now also executes the manual §4.1.6 detection cycle:
+it selects the strongest remaining signal, splits every inferred
+co-recombinant into erased remainder and gap-padded tract components, then
+redoes only concrete triplets containing an origin changed by that split.
+Unaffected signals stay in the pool, but each is refreshed against the current
+component alignment before it is characterized and applied. The cycle stops
+only when no supported signal remains (or a disclosed, tunable safety cap is
+reached), and its internally applied events remain visibly unreviewed for the
+analyst.
+
+Scientific integrity takes precedence over a seven-method checkbox count.
+GENECONV, BootScan and 3Seq are disabled in production until their complete
+author-source batch paths replace the retired simplified locators. SiScan is
+run through its source confirmation path on candidates from the source
+triplet detectors; its former oriented prelocator is retired. Direct
 ports of `MakePhPrScore`, `MakeTrpGroups`/`MakeTrpScore`,
 `MakeINList`/`MakeOUCheck`, `SimpleDist`, `MakeSSDistB`, `GetBadDists`,
 `MakeEList`/`MakeListCorr`, `MakeLDist`/`MakeRCompat`, `CalcMaxD`/
@@ -70,14 +96,12 @@ the role workbench exposes every value/weight and auto-resolution holds source-
 challenged or sub-60%-confidence assignments. The truth-annotated synthetic
 dataset library, method-by-method result interpretation, safe-by-default
 fresh/accepted exports, scan-scope event recalculation, and project audit ledger
-remain available. The exact
-bounded 3SEQ calibration, seeded p-distance bootstrapping, challenge
-diagnostics, breakpoint matrices, annotation workflows, and WebAssembly worker
-architecture remain available.
+remain available. Challenge diagnostics, breakpoint matrices, annotation
+workflows, and the WebAssembly worker architecture remain available.
 
 The project is MIT licensed. Source-compatible RDP5 routines are included with
-the RDP authors' permission and collaboration; OpenRDP remains an additional
-algorithmic reference. See `SCIENTIFIC_BASIS.md` for the
+the RDP authors' permission and collaboration; the author-supplied RDP5
+VB/native source is the sole detector specification. See `SCIENTIFIC_BASIS.md` for the
 implementation/validation ledger and `FEATURE_AUDIT.md` for the product-level
 gap ledger. Details are in `THIRD_PARTY_NOTICES.md`.
 
@@ -140,7 +164,7 @@ implementation.
 
 The tests cover scalar/packed distance equivalence, the RDP5 multi-signal VNP event locator,
 the C(5,3) full-concrete-triplet invariant, order-invariant cached triplets,
-independent non-RDP discovery, co-location
+source-detector discovery with exact current-triplet site compression, co-location
 gating, finite-G GENECONV fragment scoring/KA calibration, informative-site
 MAXCHI/CHIMAERA windows and source peak correction,
 source SiScan quartet categories, outgroup selection, cached/streamed MSVC
@@ -149,7 +173,8 @@ source PHI incompatibility graphs, analytic moments and lower-tail calibration,
 exact HGRW tails, seeded bootstraps, sampled large-dataset parent selection,
 source-mode BURT circular padding, VB6 ties, CI matching, missing-edge and
 reversion behavior plus manual step-up BURT localization, recursive
-erase/extract signal disassembly, deleted-tract splitting and uncertainty,
+erase/extract signal disassembly, affected-triplet redo scheduling,
+current-component refresh, deleted-tract splitting and uncertainty,
 RDP5 weighted event merging, bootstrapped-JC/NJ tree evidence, and
 three-orientation co-recombinant clustering, direct source PhPr/SubDist/
 TrpScore/OuCheck/O:E/dMax/parsimony/conflict/set-distance role identification,

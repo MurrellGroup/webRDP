@@ -35,7 +35,7 @@ runtime.self.onmessage({
     alignment,
     options: {
       ...DEFAULT_OPTIONS,
-      methods: ["RDP"],
+      methods: ["RDP", "MaxChi", "Chimaera"],
       correction: "none",
       alpha: 1,
       minMethods: 1,
@@ -51,4 +51,4 @@ assert.equal(message.comparisons, 10, "five sequences must produce C(5,3)=10 uno
 assert.equal(message.tripletMode, "all-concrete-triplets");
 assert.equal(message.concreteTripletInputs, true);
 assert.match(String(message.engine), /all concrete sequence triplets/);
-
+assert.deepEqual(message.tripletKernelCalls, { rdp: 10, sourceChi: 10 }, "source kernels must run once—not three times—for each unordered triplet");

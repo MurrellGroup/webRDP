@@ -15,8 +15,9 @@ observable RDP5 formulas and graph algorithm from the supplied source and
 attributes the PHI method to Bruen, Philippe & Bryant (2006); it does not bundle
 PHIPACK source or binaries.
 
-No source code from PoonLab/OpenRDP is included; OpenRDP is GPL-3.0-licensed.
-Its bundled external executables are also not bundled or invoked here.
+Detector code is written against the separately authorized RDP5 source/manual
+materials supplied by the original authors. No other recombination package is
+used as an implementation reference.
 
 AssemblyScript is used only as an Apache-2.0-licensed compiler toolchain. The
 compiled WebAssembly module in `public/wasm/rdp.wasm` contains RDP Web kernels,

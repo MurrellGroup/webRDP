@@ -50,18 +50,6 @@ runtime.self.onmessage({
 });
 
 const message = await result;
-const events = message.events as Array<{
-  recombinant: number;
-  start: number;
-  end: number;
-  methodSignals: Array<{ method: string; locator: string }>;
-  evidence: Array<{ method: string; calibration: string; supported: boolean }>;
-}>;
-assert.ok(events.length > 0, "GENECONV must discover candidates when RDP is disabled");
-assert.ok(events.every((event) => event.methodSignals.every((signal) => signal.method !== "shared-screen")), "the retired shared CUSUM seed must not reappear");
-assert.ok(events.every((event) => event.methodSignals.some((signal) => signal.method === "GENECONV")), "retained GENECONV candidates must carry their own locator provenance");
-assert.ok(events.every((event) => event.evidence.length === 1 && event.evidence[0].method === "GENECONV" && event.evidence[0].supported), "single-method evidence must be calibrated from the co-located GENECONV signal");
-const mosaic = events.find((event) => event.recombinant === 0);
-assert.ok(mosaic, "the independent GENECONV scan must recover the Mosaic-X positive control");
-assert.ok(mosaic.end > mosaic.start, "the independently discovered fragment must define a tract");
-
+const events = message.events as Array<unknown>;
+assert.equal(events.length, 0, "a method awaiting its complete author-source port must not silently run a simplified discovery kernel");
+assert.deepEqual(message.tripletKernelCalls, { rdp: 0, sourceChi: 0 });

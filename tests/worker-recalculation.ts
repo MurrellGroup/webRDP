@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { DEFAULT_OPTIONS, demoEvent, makeDemoAlignment } from "../app/rdp-core";
+import { DEFAULT_OPTIONS, SOURCE_READY_METHODS, demoEvent, makeDemoAlignment } from "../app/rdp-core";
 
 const wasm = fs.readFileSync(new URL("../public/wasm/rdp.wasm", import.meta.url));
 const runtime = globalThis as typeof globalThis & {
@@ -39,10 +39,14 @@ const patch = message.patch as {
   hypothesisTests: number;
   recalculationNote: string;
 };
-assert.equal(patch.evidence.length, 7);
+assert.deepEqual(
+  patch.evidence.map((item) => item.method),
+  SOURCE_READY_METHODS,
+  "edited-event recalculation must expose only production source ports",
+);
 assert.equal(patch.evidenceStale, false);
 assert.ok(patch.informativeSites > 250);
-assert.match(patch.evidence.find((item) => item.method === "3Seq")?.calibration ?? "", /HGRW/);
+assert.ok(!patch.evidence.some((item) => ["GENECONV", "BootScan", "3Seq"].includes(item.method)));
 assert.match(patch.evidence[0].correctionScope, /56 scanned triplets/);
 assert.equal(patch.hypothesisTests, 56);
 assert.match(patch.recalculationNote, /conservative Bonferroni/);
