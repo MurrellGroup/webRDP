@@ -1,5 +1,7 @@
 import { performance } from "node:perf_hooks";
 import fs from "node:fs";
+import { buildSourceSiScanRandomization, runSourceSiScan } from "../public/rdp-siscan.js";
+import { sourcePhiTest } from "../public/rdp-phi.js";
 
 const nSeq = Number(process.argv[2] ?? 100);
 const nSites = Number(process.argv[3] ?? 10_000);
@@ -16,7 +18,12 @@ const prefixAPtr = align(distancePtr + nSeq * nSeq * 4);
 const prefixBPtr = prefixAPtr + (nSites + 1) * 4;
 const outPtr = align(prefixBPtr + (nSites + 1) * 4);
 const statsPtr = outPtr + 64;
-const required = statsPtr + 96;
+const roleCohortCount = Math.min(30, nSeq);
+const roleCohortPtr = align(statsPtr + 160);
+const tractMaskPtr = align(roleCohortPtr + roleCohortCount * 4);
+const backgroundMaskPtr = tractMaskPtr + wordsPerSequence * 4;
+const dmaxOutPtr = align(backgroundMaskPtr + wordsPerSequence * 4, 8);
+const required = dmaxOutPtr + 40;
 const missing = Math.ceil((required - instance.exports.memory.buffer.byteLength) / 65536);
 if (missing > 0) instance.exports.memory.grow(missing);
 
@@ -118,6 +125,7 @@ for (const candidate of retained) {
     prefixAPtr,
     prefixBPtr,
     statsPtr,
+    1,
   );
 }
 const statisticsMs = performance.now() - statisticsStart;
@@ -139,6 +147,77 @@ for (const candidate of retained) {
 }
 const hmmMs = performance.now() - hmmStart;
 
+// VisRD is the most expensive term in the source recombinant-role consensus.
+// Keep its production cohort and bit-packed path in the performance ledger so
+// a superficially faster detector cannot hide a role-classification regression.
+const roleCohort = new Int32Array(instance.exports.memory.buffer, roleCohortPtr, roleCohortCount);
+for (let index = 0; index < roleCohortCount; index += 1) roleCohort[index] = index;
+const tractMask = new Uint32Array(instance.exports.memory.buffer, tractMaskPtr, wordsPerSequence);
+const backgroundMask = new Uint32Array(instance.exports.memory.buffer, backgroundMaskPtr, wordsPerSequence);
+for (let site = 0; site < nSites; site += 1) {
+  const word = site >>> 4;
+  const bit = 1 << ((site & 15) * 2);
+  if (site >= Math.floor(nSites / 3) && site < Math.floor(2 * nSites / 3)) tractMask[word] |= bit;
+  else backgroundMask[word] |= bit;
+}
+const dmaxStart = performance.now();
+if (roleCohortCount >= 4) instance.exports.dmax_visrd_packed(
+  packedPtr,
+  validityPtr,
+  wordsPerSequence,
+  roleCohortPtr,
+  roleCohortCount,
+  0,
+  1,
+  2,
+  tractMaskPtr,
+  backgroundMaskPtr,
+  dmaxOutPtr,
+);
+const dmaxMs = performance.now() - dmaxStart;
+
+// The source PHI graph is quadratic in retained informative sites. Exercise
+// the worker's adaptive site ceiling against the full production taxon count
+// so the browser safeguard cannot regress into an unnoticed stall.
+const phiStart = performance.now();
+const phiResult = sourcePhiTest(sequences, nSeq, nSites, {
+  window: Math.min(100, nSites),
+  maxInformativeSites: nSeq > 256 ? 160 : nSeq > 96 ? 256 : 384,
+});
+const sourcePhiMs = performance.now() - phiStart;
+
+// Long-genome Sister-Scanning exercises the source-compatible 15-category
+// vertical-permutation path and its bounded-memory random stream.  This is a
+// separate worker-JavaScript hot path, not hidden inside the native total.
+const sisterLength = 80_000;
+const sisterEncoded = new Uint8Array(sisterLength * 4);
+for (let site = 0; site < sisterLength; site += 1) {
+  const inside = site >= 30_000 && site < 45_000;
+  sisterEncoded[site] = inside ? 1 : 0;
+  sisterEncoded[sisterLength + site] = 0;
+  sisterEncoded[sisterLength * 2 + site] = 1;
+  sisterEncoded[sisterLength * 3 + site] = 2;
+}
+const sisterRandomization = buildSourceSiScanRandomization(sisterLength, 1000, 1511506142);
+const sisterStart = performance.now();
+const sisterResult = runSourceSiScan(sisterEncoded, sisterLength, 4, [0, 1, 2], {
+  window: 600,
+  step: 100,
+  scanPermutations: 100,
+  pValuePermutations: 1000,
+  candidatePool: [3],
+  randomization: sisterRandomization,
+  seed: 1511506142,
+});
+const sourceSiScanMs = performance.now() - sisterStart;
+const choose = (count, size) => {
+  if (count < size) return 0;
+  let value = 1;
+  for (let index = 1; index <= size; index += 1) value = value * (count - size + index) / index;
+  return value;
+};
+const dmaxQuartets = choose(roleCohortCount, 4) - choose(Math.max(0, roleCohortCount - 3), 4);
+
 const report = {
   dataset: `${nSeq} × ${nSites}`,
   nucleotides: nSeq * nSites,
@@ -153,7 +232,18 @@ const report = {
   scanMs: Number(scanMs.toFixed(2)),
   statisticsMs: Number(statisticsMs.toFixed(2)),
   hmmMs: Number(hmmMs.toFixed(2)),
-  totalMs: Number((distanceMs + scanMs + statisticsMs + hmmMs).toFixed(2)),
+  dmaxCohort: roleCohortCount,
+  dmaxQuartets,
+  dmaxMs: Number(dmaxMs.toFixed(2)),
+  dmaxMillionSiteQuartetsPerSecond: Number(((dmaxQuartets * nSites) / (dmaxMs * 1000)).toFixed(1)),
+  sourcePhiMs: Number(sourcePhiMs.toFixed(2)),
+  sourcePhiInformativeSites: phiResult.informativeSites,
+  sourcePhiTotalInformativeSites: phiResult.totalInformativeSites,
+  sourceSiScanDataset: `4 × ${sisterLength}`,
+  sourceSiScanMs: Number(sourceSiScanMs.toFixed(2)),
+  sourceSiScanRecovered: sisterResult ? [sisterResult.start, sisterResult.end] : null,
+  sourceSiScanMaterializedTable: Boolean(sisterRandomization.values),
+  totalMs: Number((distanceMs + scanMs + statisticsMs + hmmMs + dmaxMs + sourcePhiMs).toFixed(2)),
   millionSiteComparisonsPerSecond: Number(((comparisons * nSites) / (scanMs * 1000)).toFixed(1)),
 };
 
@@ -162,7 +252,11 @@ console.log(JSON.stringify(report, null, 2));
 if (process.env.RDP_PERFORMANCE_GATE === "1") {
   const failures = [];
   if (report.distanceMs > 150) failures.push(`packed distance ${report.distanceMs} ms > 150 ms`);
-  if (report.totalMs > 1_500) failures.push(`production total ${report.totalMs} ms > 1500 ms`);
+  if (report.dmaxMs > 500) failures.push(`packed VisRD dMax ${report.dmaxMs} ms > 500 ms`);
+  if (report.sourcePhiMs > 500) failures.push(`bounded source PHI ${report.sourcePhiMs} ms > 500 ms`);
+  if (report.sourceSiScanMs > 2_000) failures.push(`80 kb source SiScan ${report.sourceSiScanMs} ms > 2000 ms`);
+  if (String(report.sourceSiScanRecovered) !== "30000,45000") failures.push(`source SiScan recovered ${report.sourceSiScanRecovered} instead of 30000,45000`);
+  if (report.totalMs > 2_000) failures.push(`production total ${report.totalMs} ms > 2000 ms`);
   if (report.millionSiteComparisonsPerSecond < 30) failures.push(`scan throughput ${report.millionSiteComparisonsPerSecond} M/s < 30 M/s`);
   if (failures.length) throw new Error(`Performance regression gate failed: ${failures.join("; ")}`);
 }

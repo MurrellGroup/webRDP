@@ -51,12 +51,194 @@ export interface MethodEvidence {
   correctionScope?: string;
 }
 
+export interface MethodSignal {
+  method: MethodName | "shared-screen";
+  start: number;
+  end: number;
+  wraps: boolean;
+  statistic: number;
+  locator: string;
+  sourceRoutine?: string;
+  outgroup?: number | null;
+  outgroupMode?: "nearest" | "most-divergent" | "randomized" | "manual";
+  outgroupSampled?: boolean;
+  permutations?: number;
+  scanPermutations?: number;
+  pattern?: number;
+  scoreFamily?: "pattern" | "sum";
+  baselineTopology?: number;
+  inferredTopology?: number;
+  profile?: Array<{
+    position: number;
+    z: number;
+    topology: number;
+    baselineTopology: number;
+    pattern?: number;
+    scoreFamily?: "pattern" | "sum";
+  }>;
+}
+
 export interface BreakpointModel {
-  method: "two-state-hmm" | "local-chi-square" | "manual";
+  method: "burt-hmm" | "two-state-hmm" | "local-chi-square" | "manual";
   informativeSites: number;
   stateSwitches?: number;
   majorFit?: number;
   minorFit?: number;
+  states?: number;
+  logLikelihood?: number;
+  bic?: number;
+  aic?: number;
+  criterion?: string;
+  randomStarts?: number;
+  iterations?: number;
+  selectedState?: number;
+  posteriorThreshold?: number;
+  sourceParity?: boolean;
+  sourceCompatibility?: string;
+  confidence99Start?: [number, number];
+  confidence99End?: [number, number];
+  emissions?: number[][];
+  transitions?: number[][];
+  switches?: Array<{ position: number; fromState: number; toState: number; confidence95: [number, number]; confidence99?: [number, number] }>;
+  posteriorTrace?: Array<{ position: number; state: number; probabilities: number[] }>;
+  modelSelection?: Array<{ states: number; logLikelihood: number; bic: number; aic: number; iterations: number; winningRestart: number }>;
+}
+
+export interface AncestralCluster {
+  inference: "rdp5-three-set" | "manual";
+  representativeId: string;
+  memberEventIds: string[];
+  sequenceMembers: number[];
+  confidence: number;
+  evidenceCounts: { phylogenetic: number; distance: number; detectableSignal: number; sourceSimilarity?: number };
+  partialOverprint: boolean;
+  sourceMerge?: { threshold: number; pairDistances: Array<{ eventIds: [string, string]; distance: number; belowThreshold: boolean }> };
+  pairwise: Array<Record<string, unknown>>;
+}
+
+export interface CoRecombinantSet {
+  presumedRecombinant: number;
+  parents: number[];
+  sequenceMembers: number[];
+  testedSequences: number;
+  requiredEvidenceSets: number;
+  evidence: Array<{
+    sequence: number;
+    sets: number;
+    phylogenetic: boolean;
+    distance: boolean;
+    detectableSignal: boolean;
+    bestCorrelation?: { r: number; pValue: number; inversion: number };
+    topologyMargin?: number;
+    treeBootstrap?: {
+      replicates: number;
+      cutoff: number;
+      cohortTaxa: number;
+      sourceSequenceCount: number;
+      included: boolean;
+      exactSiteBootstrap: boolean;
+      sourceScore: number;
+    };
+    regionEvidence?: Array<{
+      pair: string;
+      phylogenetic: boolean;
+      movesTogether: boolean;
+      sisterTogether: boolean;
+      topologyMargin: number;
+      treeSourceScore: number;
+      bootstrapSupport: number;
+      bootstrapReplicates: number;
+      bootstrapCutoff: number;
+      treeExcluded: boolean;
+      correlationR: number;
+      correlationP: number;
+      correlationInversion: number;
+      correlationPermutations?: number[];
+      correlationSdmFiltered: boolean;
+    }>;
+  }>;
+}
+
+export interface AnalysisComponentReference {
+  originIndex: number;
+  kind: "remainder" | "extracted-tract";
+  lineage: string[];
+  sourceEventId?: string;
+  parentLineage?: string[];
+  start?: number;
+  end?: number;
+  wraps?: boolean;
+  erasedEventIds: string[];
+}
+
+export interface EventComponentProvenance {
+  reconstruction: "rdp5-signal-disassembly";
+  appliedEventIds: string[];
+  recombinant: AnalysisComponentReference;
+  majorParent: AnalysisComponentReference;
+  minorParent: AnalysisComponentReference;
+}
+
+export interface StructuralBreakpointUncertainty {
+  source: "rdp5-erased-signal-boundary";
+  originalStart: number;
+  originalEnd: number;
+  originalWraps: boolean;
+  piece: number;
+  pieces: number;
+  uncertainStart: boolean;
+  uncertainEnd: boolean;
+  adjacentEventIds: string[];
+}
+
+export interface RecombinantIdentificationTest {
+  id: string;
+  label: string;
+  sourceRoutine: string;
+  direction: "lower" | "higher";
+  values: Array<number | null>;
+  points: number[];
+  fullWeight: number;
+  partialWeight: number;
+  winnerIndexes: number[];
+  decisive: boolean;
+}
+
+export interface RecombinantIdentificationOrientation {
+  recombinant: number;
+  majorParent: number;
+  minorParent: number;
+  affinitySwitch: number;
+  candidateIndex: number;
+  sourcePoints: number;
+  sourceScore: number;
+  sourceShare: number;
+}
+
+export interface RecombinantIdentification {
+  inference: "rdp5-source-profile-consensus" | "rdp5-source-distance-consensus";
+  candidates: number[];
+  recommended: number;
+  recommendedMajorParent: number;
+  recommendedMinorParent: number;
+  confidence: number;
+  ambiguous: boolean;
+  sourceThreshold: number;
+  orientations: RecombinantIdentificationOrientation[];
+  tests: RecombinantIdentificationTest[];
+  cohortSize: number;
+  sourceSequenceCount: number;
+  sampled: boolean;
+  treeEvidence: boolean;
+  bootstrapReplicates: number;
+  bootstrapCutoff: number;
+  quartetCohortSize?: number;
+  quartetCounts?: number[];
+  dmaxWasmAccelerated?: boolean;
+  sourceTieBreak?: string;
+  sourceTieBreakValues?: number[] | null;
+  implementedComponents: string[];
+  pendingComponents: string[];
 }
 
 export interface EventAuditEntry {
@@ -93,6 +275,18 @@ export interface AlignmentDiagnostics {
   proximityPermutationP: number;
   proximityPermutationReplicates: number;
   ambiguityFraction: number;
+  phiPValue?: number;
+  phiStatistic?: number;
+  phiMean?: number;
+  phiVariance?: number;
+  phiZ?: number;
+  phiInformativeSites?: number;
+  phiTotalInformativeSites?: number;
+  phiK?: number;
+  phiWindow?: number;
+  phiSubsampled?: boolean;
+  phiValidNormalApproximation?: boolean;
+  phiCompatibility?: string;
 }
 
 export interface RdpEvent {
@@ -106,6 +300,7 @@ export interface RdpEvent {
   confidenceStart: [number, number];
   confidenceEnd: [number, number];
   breakpointModel?: BreakpointModel;
+  methodSignals?: MethodSignal[];
   evidence: MethodEvidence[];
   chiSquare: number;
   informativeSites: number;
@@ -114,6 +309,11 @@ export interface RdpEvent {
   note: string;
   source: "wasm" | "example" | "manual";
   groupId: string | null;
+  ancestralCluster?: AncestralCluster;
+  coRecombinantSets?: CoRecombinantSet[];
+  componentProvenance?: EventComponentProvenance;
+  structuralUncertainty?: StructuralBreakpointUncertainty;
+  recombinantIdentification?: RecombinantIdentification;
   alternativeParents?: number[];
   hypothesisTests?: number;
   recalculationNote?: string;
@@ -127,6 +327,15 @@ export interface AnalysisOptions {
   testReferences: boolean;
   circular: boolean;
   window: number;
+  rdpWindow: number;
+  rdpSignalsPerTriplet: number;
+  geneconvGScale: number;
+  siskanOutgroupMode: "nearest" | "most-divergent" | "randomized" | "manual";
+  siskanOutgroupSequence: number | null;
+  siskanPositionMode: "triplet-variable" | "quartet-variable" | "all";
+  siskanGapMode: "strip" | "fifth-state";
+  siskanScanPermutations: number;
+  siskanPValuePermutations: number;
   step: number;
   alpha: number;
   correction: "bonferroni" | "holm" | "none";
@@ -135,6 +344,26 @@ export interface AnalysisOptions {
   methods: MethodName[];
   exhaustive: boolean;
   polishBreakpoints: boolean;
+  burtMode: "rdp5-source" | "manual-step-up";
+  burtRandomStarts: number;
+  burtMaxIterations: number;
+  burtMaxStates: number;
+  burtExhaustiveModels: boolean;
+  burtPosteriorThreshold: number;
+  ancestralClustering: boolean;
+  clusterFlankVnps: number;
+  clusterMinimumSets: 1 | 2 | 3;
+  clusterCorrelationAlpha: number;
+  clusterCorrelationR: number;
+  clusterSignalOverlap: number;
+  clusterTopologyMargin: number;
+  clusterBootstrapReplicates: number;
+  clusterBootstrapCutoff: number;
+  clusterBootstrapBlocks: number;
+  clusterTreeTaxaLimit: number;
+  clusterMinimumConfidence: number;
+  clusterSourceSimilarity: number;
+  clusterReciprocal: boolean;
   checkMisalignment: boolean;
   bootstrapReplicates: number;
   randomSeed: number;
@@ -479,8 +708,8 @@ export function demoEvent(): RdpEvent {
       score: 30 - index * 1.6,
       supported: true,
       statistic: [0.82, 31, 0.97, 42.1, 38.6, 9.8, 13.4][index],
-      statisticLabel: ["identity shift", "concordant run", "bootstrap topology support", "boundary χ²", "boundary χ²", "category Z", "maximum HGRW descent"][index],
-      calibration: ["binomial", "G-scale 0 run", "seeded p-distance bootstrap + window sign", "χ²", "binary-triplet χ²", "category Z", "exact HGRW first-passage DP"][index],
+      statisticLabel: ["identity shift", "fragment score", "bootstrap topology support", "boundary χ²", "boundary χ²", "Sister-Scanning category/sum Z", "maximum HGRW descent"][index],
+      calibration: ["binomial", "source finite-G fragment / KA", "seeded p-distance bootstrap + window sign", "χ²", "binary-triplet χ²", "RDP5 vertical permutation Z", "exact HGRW first-passage DP"][index],
     })),
     chiSquare: 132.4,
     informativeSites: 284,
@@ -943,6 +1172,15 @@ export const DEFAULT_OPTIONS: AnalysisOptions = {
   testReferences: false,
   circular: false,
   window: 120,
+  rdpWindow: 30,
+  rdpSignalsPerTriplet: 128,
+  geneconvGScale: 1,
+  siskanOutgroupMode: "nearest",
+  siskanOutgroupSequence: null,
+  siskanPositionMode: "triplet-variable",
+  siskanGapMode: "strip",
+  siskanScanPermutations: 100,
+  siskanPValuePermutations: 1000,
   step: 5,
   alpha: 0.05,
   correction: "bonferroni",
@@ -951,6 +1189,26 @@ export const DEFAULT_OPTIONS: AnalysisOptions = {
   methods: [...PRIMARY_METHODS],
   exhaustive: false,
   polishBreakpoints: true,
+  burtMode: "rdp5-source",
+  burtRandomStarts: 21,
+  burtMaxIterations: 100,
+  burtMaxStates: 20,
+  burtExhaustiveModels: false,
+  burtPosteriorThreshold: 0.995,
+  ancestralClustering: true,
+  clusterFlankVnps: 60,
+  clusterMinimumSets: 2,
+  clusterCorrelationAlpha: 0.05,
+  clusterCorrelationR: 0.83,
+  clusterSignalOverlap: 0.3,
+  clusterTopologyMargin: 0.005,
+  clusterBootstrapReplicates: 100,
+  clusterBootstrapCutoff: 0.5,
+  clusterBootstrapBlocks: 128,
+  clusterTreeTaxaLimit: 32,
+  clusterMinimumConfidence: 0.55,
+  clusterSourceSimilarity: 0.1,
+  clusterReciprocal: false,
   checkMisalignment: true,
   bootstrapReplicates: 100,
   randomSeed: 1511506142,
@@ -967,8 +1225,10 @@ export interface RdpProject {
     engine: string;
     matrixMode?: string;
     parentSamples?: number;
-    timing?: { distanceMs: number; scanMs: number; statisticsMs: number; diagnosticsMs?: number };
+    timing?: { distanceMs: number; scanMs: number; statisticsMs: number; diagnosticsMs?: number; clusteringMs?: number };
     diagnostics?: AlignmentDiagnostics;
+    disassembly?: { appliedEvents: number; components: number; erasedCanonicalBases: number };
+    rdpSignalTruncations?: number;
   } | null;
   distance: number[];
   auditLog: ProjectAuditEntry[];
@@ -1039,10 +1299,165 @@ export function parseProject(text: string): RdpProject {
     mode: rawOptions.mode === "query-reference" ? "query-reference" : "exploratory",
     testReferences: rawOptions.testReferences === true,
     correction: rawOptions.correction === "holm" || rawOptions.correction === "none" ? rawOptions.correction : "bonferroni",
+    window: Math.max(12, Math.min(Math.max(12, alignment.length), Math.trunc(finiteNumber(rawOptions.window, DEFAULT_OPTIONS.window)))),
+    step: Math.max(1, Math.min(Math.max(1, alignment.length), Math.trunc(finiteNumber(rawOptions.step, DEFAULT_OPTIONS.step)))),
+    alpha: Math.max(1e-12, Math.min(1, finiteNumber(rawOptions.alpha, DEFAULT_OPTIONS.alpha))),
+    minMethods: Math.max(1, Math.min(Math.max(1, methods.length), Math.trunc(finiteNumber(rawOptions.minMethods, DEFAULT_OPTIONS.minMethods)))),
+    candidateParents: Math.max(2, Math.min(300, Math.trunc(finiteNumber(rawOptions.candidateParents, DEFAULT_OPTIONS.candidateParents)))),
+    rdpWindow: Math.max(5, Math.min(300, Math.trunc(finiteNumber(rawOptions.rdpWindow, DEFAULT_OPTIONS.rdpWindow)))),
+    rdpSignalsPerTriplet: Math.max(1, Math.min(256, Math.trunc(finiteNumber(rawOptions.rdpSignalsPerTriplet, DEFAULT_OPTIONS.rdpSignalsPerTriplet)))),
+    geneconvGScale: Math.max(0, Math.min(100, finiteNumber(rawOptions.geneconvGScale, DEFAULT_OPTIONS.geneconvGScale))),
+    siskanOutgroupMode: rawOptions.siskanOutgroupMode === "most-divergent" || rawOptions.siskanOutgroupMode === "randomized" || rawOptions.siskanOutgroupMode === "manual"
+      ? rawOptions.siskanOutgroupMode
+      : "nearest",
+    siskanOutgroupSequence: Number.isFinite(rawOptions.siskanOutgroupSequence)
+      && (rawOptions.siskanOutgroupSequence as number) >= 0
+      && (rawOptions.siskanOutgroupSequence as number) < alignment.sequences.length
+      ? Math.trunc(rawOptions.siskanOutgroupSequence as number)
+      : null,
+    siskanPositionMode: rawOptions.siskanPositionMode === "quartet-variable" || rawOptions.siskanPositionMode === "all"
+      ? rawOptions.siskanPositionMode
+      : "triplet-variable",
+    siskanGapMode: rawOptions.siskanGapMode === "fifth-state" ? "fifth-state" : "strip",
+    siskanScanPermutations: Math.max(2, Math.min(1000, Math.trunc(finiteNumber(rawOptions.siskanScanPermutations, DEFAULT_OPTIONS.siskanScanPermutations)))),
+    siskanPValuePermutations: Math.max(
+      Math.max(2, Math.min(1000, Math.trunc(finiteNumber(rawOptions.siskanScanPermutations, DEFAULT_OPTIONS.siskanScanPermutations)))),
+      Math.min(10_000, Math.trunc(finiteNumber(rawOptions.siskanPValuePermutations, DEFAULT_OPTIONS.siskanPValuePermutations))),
+    ),
     bootstrapReplicates: Math.max(0, Math.min(1000, Math.trunc(finiteNumber(rawOptions.bootstrapReplicates, DEFAULT_OPTIONS.bootstrapReplicates)))),
     randomSeed: Math.trunc(finiteNumber(rawOptions.randomSeed, DEFAULT_OPTIONS.randomSeed)) >>> 0,
+    burtMode: rawOptions.burtMode === "manual-step-up" ? "manual-step-up" : "rdp5-source",
+    burtRandomStarts: Math.max(1, Math.min(64, Math.trunc(finiteNumber(rawOptions.burtRandomStarts, DEFAULT_OPTIONS.burtRandomStarts)))),
+    burtMaxIterations: Math.max(2, Math.min(250, Math.trunc(finiteNumber(rawOptions.burtMaxIterations, DEFAULT_OPTIONS.burtMaxIterations)))),
+    burtMaxStates: Math.max(2, Math.min(20, Math.trunc(finiteNumber(rawOptions.burtMaxStates, DEFAULT_OPTIONS.burtMaxStates)))),
+    burtExhaustiveModels: rawOptions.burtExhaustiveModels === true,
+    burtPosteriorThreshold: Math.max(0.5, Math.min(0.9999, finiteNumber(rawOptions.burtPosteriorThreshold, DEFAULT_OPTIONS.burtPosteriorThreshold))),
+    ancestralClustering: rawOptions.ancestralClustering !== false,
+    clusterFlankVnps: Math.max(4, Math.min(200, Math.trunc(finiteNumber(rawOptions.clusterFlankVnps, DEFAULT_OPTIONS.clusterFlankVnps)))),
+    clusterMinimumSets: ([1, 2, 3].includes(Math.trunc(finiteNumber(rawOptions.clusterMinimumSets, 2))) ? Math.trunc(finiteNumber(rawOptions.clusterMinimumSets, 2)) : 2) as 1 | 2 | 3,
+    clusterCorrelationAlpha: Math.max(1e-6, Math.min(0.5, finiteNumber(rawOptions.clusterCorrelationAlpha, DEFAULT_OPTIONS.clusterCorrelationAlpha))),
+    clusterCorrelationR: Math.max(0, Math.min(0.999999, finiteNumber(rawOptions.clusterCorrelationR, DEFAULT_OPTIONS.clusterCorrelationR))),
+    clusterSignalOverlap: Math.max(0.05, Math.min(1, finiteNumber(rawOptions.clusterSignalOverlap, DEFAULT_OPTIONS.clusterSignalOverlap))),
+    clusterTopologyMargin: Math.max(0, Math.min(1, finiteNumber(rawOptions.clusterTopologyMargin, DEFAULT_OPTIONS.clusterTopologyMargin))),
+    clusterBootstrapReplicates: Math.max(0, Math.min(1000, Math.trunc(finiteNumber(rawOptions.clusterBootstrapReplicates, DEFAULT_OPTIONS.clusterBootstrapReplicates)))),
+    clusterBootstrapCutoff: Math.max(0, Math.min(1, finiteNumber(rawOptions.clusterBootstrapCutoff, DEFAULT_OPTIONS.clusterBootstrapCutoff))),
+    clusterBootstrapBlocks: Math.max(8, Math.min(4096, Math.trunc(finiteNumber(rawOptions.clusterBootstrapBlocks, DEFAULT_OPTIONS.clusterBootstrapBlocks)))),
+    clusterTreeTaxaLimit: Math.max(4, Math.min(300, Math.trunc(finiteNumber(rawOptions.clusterTreeTaxaLimit, DEFAULT_OPTIONS.clusterTreeTaxaLimit)))),
+    clusterMinimumConfidence: Math.max(0, Math.min(1, finiteNumber(rawOptions.clusterMinimumConfidence, DEFAULT_OPTIONS.clusterMinimumConfidence))),
+    clusterSourceSimilarity: Math.max(0, Math.min(1, finiteNumber(rawOptions.clusterSourceSimilarity, DEFAULT_OPTIONS.clusterSourceSimilarity))),
+    clusterReciprocal: rawOptions.clusterReciprocal === true,
   };
   const rawEvents = Array.isArray(raw.events) ? raw.events : [];
+  const parseComponentReference = (value: unknown): AnalysisComponentReference | undefined => {
+    if (!value || typeof value !== "object") return undefined;
+    const candidate = value as Partial<AnalysisComponentReference>;
+    const originIndex = Math.trunc(finiteNumber(candidate.originIndex, -1));
+    if (originIndex < 0 || originIndex >= alignment.sequences.length) return undefined;
+    const kind = candidate.kind === "extracted-tract" ? "extracted-tract" : candidate.kind === "remainder" ? "remainder" : null;
+    if (!kind) return undefined;
+    const lineage = Array.isArray(candidate.lineage)
+      ? candidate.lineage.filter((item): item is string => typeof item === "string" && item.length > 0)
+      : [];
+    const parentLineage = Array.isArray(candidate.parentLineage)
+      ? candidate.parentLineage.filter((item): item is string => typeof item === "string" && item.length > 0)
+      : undefined;
+    return {
+      originIndex,
+      kind,
+      lineage,
+      sourceEventId: typeof candidate.sourceEventId === "string" ? candidate.sourceEventId : undefined,
+      parentLineage,
+      start: Number.isFinite(candidate.start) ? Math.max(0, Math.min(alignment.length - 1, Math.trunc(candidate.start as number))) : undefined,
+      end: Number.isFinite(candidate.end) ? Math.max(0, Math.min(alignment.length, Math.trunc(candidate.end as number))) : undefined,
+      wraps: candidate.wraps === true,
+      erasedEventIds: Array.isArray(candidate.erasedEventIds)
+        ? candidate.erasedEventIds.filter((item): item is string => typeof item === "string" && item.length > 0)
+        : [],
+    };
+  };
+  const parseRecombinantIdentification = (value: unknown): RecombinantIdentification | undefined => {
+    if (!value || typeof value !== "object") return undefined;
+    const candidate = value as Partial<RecombinantIdentification>;
+    const sequenceIndex = (item: unknown): number | null => {
+      const index = Math.trunc(finiteNumber(item, -1));
+      return index >= 0 && index < alignment.sequences.length ? index : null;
+    };
+    const candidates = Array.isArray(candidate.candidates)
+      ? candidate.candidates.flatMap((item) => {
+          const index = sequenceIndex(item);
+          return index === null ? [] : [index];
+        })
+      : [];
+    const recommended = sequenceIndex(candidate.recommended);
+    const recommendedMajorParent = sequenceIndex(candidate.recommendedMajorParent);
+    const recommendedMinorParent = sequenceIndex(candidate.recommendedMinorParent);
+    if (candidates.length !== 3 || new Set(candidates).size !== 3 || recommended === null || recommendedMajorParent === null || recommendedMinorParent === null) return undefined;
+    const orientations = Array.isArray(candidate.orientations) ? candidate.orientations.flatMap((item): RecombinantIdentificationOrientation[] => {
+      if (!item || typeof item !== "object") return [];
+      const recombinant = sequenceIndex(item.recombinant);
+      const majorParent = sequenceIndex(item.majorParent);
+      const minorParent = sequenceIndex(item.minorParent);
+      if (recombinant === null || majorParent === null || minorParent === null || new Set([recombinant, majorParent, minorParent]).size !== 3) return [];
+      return [{
+        recombinant,
+        majorParent,
+        minorParent,
+        affinitySwitch: finiteNumber(item.affinitySwitch, 0),
+        candidateIndex: Math.max(0, Math.min(2, Math.trunc(finiteNumber(item.candidateIndex, 0)))),
+        sourcePoints: Math.max(0, finiteNumber(item.sourcePoints, 0)),
+        sourceScore: Math.max(0, Math.min(100, finiteNumber(item.sourceScore, 0))),
+        sourceShare: Math.max(0, Math.min(1, finiteNumber(item.sourceShare, 0))),
+      }];
+    }) : [];
+    if (orientations.length !== 3) return undefined;
+    const tests = Array.isArray(candidate.tests) ? candidate.tests.flatMap((item): RecombinantIdentificationTest[] => {
+      if (!item || typeof item !== "object" || typeof item.id !== "string") return [];
+      const values = Array.isArray(item.values) ? item.values.slice(0, 3).map((entry) => typeof entry === "number" && Number.isFinite(entry) ? entry : null) : [];
+      const points = Array.isArray(item.points) ? item.points.slice(0, 3).map((entry) => finiteNumber(entry, 0)) : [];
+      if (values.length !== 3 || points.length !== 3) return [];
+      return [{
+        id: item.id,
+        label: typeof item.label === "string" ? item.label : item.id,
+        sourceRoutine: typeof item.sourceRoutine === "string" ? item.sourceRoutine : "imported source test",
+        direction: item.direction === "higher" ? "higher" : "lower",
+        values,
+        points,
+        fullWeight: Math.max(0, finiteNumber(item.fullWeight, 0)),
+        partialWeight: Math.max(0, finiteNumber(item.partialWeight, 0)),
+        winnerIndexes: Array.isArray(item.winnerIndexes) ? item.winnerIndexes.map((entry) => Math.trunc(finiteNumber(entry, -1))).filter((entry) => entry >= 0 && entry < 3) : [],
+        decisive: item.decisive === true,
+      }];
+    }) : [];
+    return {
+      inference: candidate.inference === "rdp5-source-profile-consensus" ? "rdp5-source-profile-consensus" : "rdp5-source-distance-consensus",
+      candidates,
+      recommended,
+      recommendedMajorParent,
+      recommendedMinorParent,
+      confidence: Math.max(0, Math.min(1, finiteNumber(candidate.confidence, 1 / 3))),
+      ambiguous: candidate.ambiguous === true,
+      sourceThreshold: Math.max(0, Math.min(1, finiteNumber(candidate.sourceThreshold, 0.6))),
+      orientations,
+      tests,
+      cohortSize: Math.max(3, Math.trunc(finiteNumber(candidate.cohortSize, 3))),
+      sourceSequenceCount: Math.max(3, Math.trunc(finiteNumber(candidate.sourceSequenceCount, alignment.sequences.length))),
+      sampled: candidate.sampled === true,
+      treeEvidence: candidate.treeEvidence === true,
+      bootstrapReplicates: Math.max(0, Math.trunc(finiteNumber(candidate.bootstrapReplicates, 0))),
+      bootstrapCutoff: Math.max(0, Math.min(1, finiteNumber(candidate.bootstrapCutoff, 0.5))),
+      quartetCohortSize: Math.max(0, Math.trunc(finiteNumber(candidate.quartetCohortSize, 0))),
+      quartetCounts: Array.isArray(candidate.quartetCounts) ? candidate.quartetCounts.slice(0, 3).map((item) => Math.max(0, Math.trunc(finiteNumber(item, 0)))) : [],
+      dmaxWasmAccelerated: candidate.dmaxWasmAccelerated === true,
+      sourceTieBreak: typeof candidate.sourceTieBreak === "string" ? candidate.sourceTieBreak : undefined,
+      sourceTieBreakValues: candidate.sourceTieBreakValues === null
+        ? null
+        : Array.isArray(candidate.sourceTieBreakValues)
+          ? candidate.sourceTieBreakValues.slice(0, 3).map((item) => finiteNumber(item, 0))
+          : undefined,
+      implementedComponents: Array.isArray(candidate.implementedComponents) ? candidate.implementedComponents.filter((item): item is string => typeof item === "string") : [],
+      pendingComponents: Array.isArray(candidate.pendingComponents) ? candidate.pendingComponents.filter((item): item is string => typeof item === "string") : [],
+    };
+  };
   const events = rawEvents.flatMap((value, index): RdpEvent[] => {
     const event = value as Partial<RdpEvent>;
     const recombinant = Math.trunc(finiteNumber(event.recombinant, -1));
@@ -1100,15 +1515,113 @@ export function parseProject(text: string): RdpProject {
         : [Math.max(0, end - confidence), Math.min(alignment.length, end + confidence)],
       breakpointModel: event.breakpointModel && typeof event.breakpointModel === "object"
         ? {
-            method: event.breakpointModel.method === "two-state-hmm" || event.breakpointModel.method === "manual"
+            method: event.breakpointModel.method === "burt-hmm" || event.breakpointModel.method === "two-state-hmm" || event.breakpointModel.method === "manual"
               ? event.breakpointModel.method
               : "local-chi-square",
             informativeSites: Math.trunc(finiteNumber(event.breakpointModel.informativeSites, 0)),
             stateSwitches: Math.trunc(finiteNumber(event.breakpointModel.stateSwitches, 0)) || undefined,
             majorFit: finiteNumber(event.breakpointModel.majorFit, 0) || undefined,
             minorFit: finiteNumber(event.breakpointModel.minorFit, 0) || undefined,
+            states: Math.trunc(finiteNumber(event.breakpointModel.states, 0)) || undefined,
+            logLikelihood: Number.isFinite(event.breakpointModel.logLikelihood) ? event.breakpointModel.logLikelihood : undefined,
+            bic: Number.isFinite(event.breakpointModel.bic) ? event.breakpointModel.bic : undefined,
+            aic: Number.isFinite(event.breakpointModel.aic) ? event.breakpointModel.aic : undefined,
+            criterion: typeof event.breakpointModel.criterion === "string" ? event.breakpointModel.criterion : undefined,
+            randomStarts: Math.trunc(finiteNumber(event.breakpointModel.randomStarts, 0)) || undefined,
+            iterations: Math.trunc(finiteNumber(event.breakpointModel.iterations, 0)) || undefined,
+            selectedState: Number.isFinite(event.breakpointModel.selectedState) ? Math.trunc(event.breakpointModel.selectedState as number) : undefined,
+            posteriorThreshold: finiteNumber(event.breakpointModel.posteriorThreshold, 0) || undefined,
+            sourceParity: event.breakpointModel.sourceParity === true,
+            sourceCompatibility: typeof event.breakpointModel.sourceCompatibility === "string" ? event.breakpointModel.sourceCompatibility : undefined,
+            confidence99Start: Array.isArray(event.breakpointModel.confidence99Start) && event.breakpointModel.confidence99Start.length === 2
+              ? [finiteNumber(event.breakpointModel.confidence99Start[0], 0), finiteNumber(event.breakpointModel.confidence99Start[1], alignment.length)]
+              : undefined,
+            confidence99End: Array.isArray(event.breakpointModel.confidence99End) && event.breakpointModel.confidence99End.length === 2
+              ? [finiteNumber(event.breakpointModel.confidence99End[0], 0), finiteNumber(event.breakpointModel.confidence99End[1], alignment.length)]
+              : undefined,
+            emissions: Array.isArray(event.breakpointModel.emissions)
+              ? event.breakpointModel.emissions.map((row) => Array.isArray(row) ? row.map((item) => finiteNumber(item, 0)) : [])
+              : undefined,
+            transitions: Array.isArray(event.breakpointModel.transitions)
+              ? event.breakpointModel.transitions.map((row) => Array.isArray(row) ? row.map((item) => finiteNumber(item, 0)) : [])
+              : undefined,
+            switches: Array.isArray(event.breakpointModel.switches) ? event.breakpointModel.switches.flatMap((entry) => {
+              if (!entry || typeof entry !== "object" || !Array.isArray(entry.confidence95) || entry.confidence95.length !== 2) return [];
+              return [{
+                position: Math.trunc(finiteNumber(entry.position, 0)),
+                fromState: Math.trunc(finiteNumber(entry.fromState, 0)),
+                toState: Math.trunc(finiteNumber(entry.toState, 0)),
+                confidence95: [finiteNumber(entry.confidence95[0], 0), finiteNumber(entry.confidence95[1], alignment.length)] as [number, number],
+                confidence99: Array.isArray(entry.confidence99) && entry.confidence99.length === 2
+                  ? [finiteNumber(entry.confidence99[0], 0), finiteNumber(entry.confidence99[1], alignment.length)] as [number, number]
+                  : undefined,
+              }];
+            }) : undefined,
+            posteriorTrace: Array.isArray(event.breakpointModel.posteriorTrace) ? event.breakpointModel.posteriorTrace.flatMap((entry) => {
+              if (!entry || typeof entry !== "object" || !Array.isArray(entry.probabilities)) return [];
+              return [{
+                position: Math.trunc(finiteNumber(entry.position, 0)),
+                state: Math.trunc(finiteNumber(entry.state, 0)),
+                probabilities: entry.probabilities.map((item) => finiteNumber(item, 0)),
+              }];
+            }) : undefined,
+            modelSelection: Array.isArray(event.breakpointModel.modelSelection) ? event.breakpointModel.modelSelection.flatMap((entry) => {
+              if (!entry || typeof entry !== "object") return [];
+              return [{
+                states: Math.trunc(finiteNumber(entry.states, 0)),
+                logLikelihood: finiteNumber(entry.logLikelihood, 0),
+                bic: finiteNumber(entry.bic, 0),
+                aic: finiteNumber(entry.aic, 0),
+                iterations: Math.trunc(finiteNumber(entry.iterations, 0)),
+                winningRestart: Math.trunc(finiteNumber(entry.winningRestart, 0)),
+              }];
+            }) : undefined,
           }
         : undefined,
+      methodSignals: Array.isArray(event.methodSignals) ? event.methodSignals.flatMap((signal) => {
+        if (!signal || typeof signal !== "object") return [];
+        const method = signal.method === "shared-screen" || PRIMARY_METHODS.includes(signal.method as MethodName)
+          ? signal.method as MethodName | "shared-screen"
+          : null;
+        if (!method) return [];
+        const signalStart = Math.max(0, Math.min(alignment.length - 1, Math.trunc(finiteNumber(signal.start, start))));
+        const signalEnd = Math.max(0, Math.min(alignment.length, Math.trunc(finiteNumber(signal.end, end))));
+        return [{
+          method,
+          start: signalStart,
+          end: signalEnd,
+          wraps: signal.wraps === true && signalStart > signalEnd,
+          statistic: finiteNumber(signal.statistic, 0),
+          locator: typeof signal.locator === "string" ? signal.locator : "imported locator",
+          sourceRoutine: typeof signal.sourceRoutine === "string" ? signal.sourceRoutine : undefined,
+          outgroup: signal.outgroup === null
+            ? null
+            : Number.isFinite(signal.outgroup) && (signal.outgroup as number) >= 0 && (signal.outgroup as number) < alignment.sequences.length
+              ? Math.trunc(signal.outgroup as number)
+              : undefined,
+          outgroupMode: signal.outgroupMode === "most-divergent" || signal.outgroupMode === "randomized" || signal.outgroupMode === "manual"
+            ? signal.outgroupMode
+            : signal.outgroupMode === "nearest" ? "nearest" : undefined,
+          outgroupSampled: signal.outgroupSampled === true,
+          permutations: Number.isFinite(signal.permutations) ? Math.max(2, Math.min(10_000, Math.trunc(signal.permutations as number))) : undefined,
+          scanPermutations: Number.isFinite(signal.scanPermutations) ? Math.max(2, Math.min(1000, Math.trunc(signal.scanPermutations as number))) : undefined,
+          pattern: Number.isFinite(signal.pattern) ? Math.max(0, Math.min(15, Math.trunc(signal.pattern as number))) : undefined,
+          scoreFamily: signal.scoreFamily === "sum" ? "sum" : signal.scoreFamily === "pattern" ? "pattern" : undefined,
+          baselineTopology: Number.isFinite(signal.baselineTopology) ? Math.max(0, Math.min(2, Math.trunc(signal.baselineTopology as number))) : undefined,
+          inferredTopology: Number.isFinite(signal.inferredTopology) ? Math.max(0, Math.min(2, Math.trunc(signal.inferredTopology as number))) : undefined,
+          profile: Array.isArray(signal.profile) ? signal.profile.slice(0, 512).flatMap((entry) => {
+            if (!entry || typeof entry !== "object") return [];
+            return [{
+              position: Math.max(0, Math.min(alignment.length - 1, Math.trunc(finiteNumber(entry.position, 0)))),
+              z: finiteNumber(entry.z, 0),
+              topology: Math.max(0, Math.min(2, Math.trunc(finiteNumber(entry.topology, 0)))),
+              baselineTopology: Math.max(0, Math.min(2, Math.trunc(finiteNumber(entry.baselineTopology, 0)))),
+              pattern: Number.isFinite(entry.pattern) ? Math.max(0, Math.min(15, Math.trunc(entry.pattern as number))) : undefined,
+              scoreFamily: entry.scoreFamily === "sum" ? "sum" as const : entry.scoreFamily === "pattern" ? "pattern" as const : undefined,
+            }];
+          }) : undefined,
+        }];
+      }) : undefined,
       evidence,
       chiSquare: finiteNumber(event.chiSquare, 0),
       informativeSites: Math.trunc(finiteNumber(event.informativeSites, 0)),
@@ -1117,6 +1630,145 @@ export function parseProject(text: string): RdpProject {
       note: typeof event.note === "string" ? event.note : "",
       source: event.source === "manual" || event.source === "example" ? event.source : "wasm",
       groupId: typeof event.groupId === "string" && event.groupId.trim() ? event.groupId.trim() : null,
+      ancestralCluster: event.ancestralCluster && typeof event.ancestralCluster === "object"
+        && typeof event.ancestralCluster.representativeId === "string"
+        ? {
+            inference: event.ancestralCluster.inference === "manual" ? "manual" : "rdp5-three-set",
+            representativeId: event.ancestralCluster.representativeId,
+            memberEventIds: Array.isArray(event.ancestralCluster.memberEventIds) ? event.ancestralCluster.memberEventIds.filter((item): item is string => typeof item === "string") : [],
+            sequenceMembers: Array.isArray(event.ancestralCluster.sequenceMembers) ? event.ancestralCluster.sequenceMembers.map((item) => Math.trunc(finiteNumber(item, -1))).filter((item) => item >= 0 && item < alignment.sequences.length) : [],
+            confidence: Math.max(0, Math.min(1, finiteNumber(event.ancestralCluster.confidence, 0))),
+            evidenceCounts: event.ancestralCluster.evidenceCounts && typeof event.ancestralCluster.evidenceCounts === "object" ? {
+              phylogenetic: Math.trunc(finiteNumber(event.ancestralCluster.evidenceCounts.phylogenetic, 0)),
+              distance: Math.trunc(finiteNumber(event.ancestralCluster.evidenceCounts.distance, 0)),
+              detectableSignal: Math.trunc(finiteNumber(event.ancestralCluster.evidenceCounts.detectableSignal, 0)),
+              sourceSimilarity: Math.trunc(finiteNumber(event.ancestralCluster.evidenceCounts.sourceSimilarity, 0)),
+            } : { phylogenetic: 0, distance: 0, detectableSignal: 0 },
+            partialOverprint: event.ancestralCluster.partialOverprint === true,
+            sourceMerge: event.ancestralCluster.sourceMerge && typeof event.ancestralCluster.sourceMerge === "object"
+              ? {
+                  threshold: Math.max(0, Math.min(1, finiteNumber(event.ancestralCluster.sourceMerge.threshold, options.clusterSourceSimilarity))),
+                  pairDistances: Array.isArray(event.ancestralCluster.sourceMerge.pairDistances) ? event.ancestralCluster.sourceMerge.pairDistances.flatMap((entry) => {
+                    if (!entry || typeof entry !== "object" || !Array.isArray(entry.eventIds) || entry.eventIds.length !== 2) return [];
+                    return [{
+                      eventIds: [String(entry.eventIds[0]), String(entry.eventIds[1])] as [string, string],
+                      distance: finiteNumber(entry.distance, 100),
+                      belowThreshold: entry.belowThreshold === true,
+                    }];
+                  }) : [],
+                }
+              : undefined,
+            pairwise: Array.isArray(event.ancestralCluster.pairwise) ? event.ancestralCluster.pairwise.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object") : [],
+          }
+        : undefined,
+      coRecombinantSets: Array.isArray(event.coRecombinantSets) ? event.coRecombinantSets.flatMap((set) => {
+        if (!set || typeof set !== "object") return [];
+        const presumedRecombinant = Math.trunc(finiteNumber(set.presumedRecombinant, -1));
+        if (presumedRecombinant < 0 || presumedRecombinant >= alignment.sequences.length) return [];
+        const parents = Array.isArray(set.parents)
+          ? set.parents.map((item) => Math.trunc(finiteNumber(item, -1))).filter((item) => item >= 0 && item < alignment.sequences.length)
+          : [];
+        const sequenceMembers = Array.isArray(set.sequenceMembers)
+          ? [...new Set(set.sequenceMembers.map((item) => Math.trunc(finiteNumber(item, -1))).filter((item) => item >= 0 && item < alignment.sequences.length))]
+          : [presumedRecombinant];
+        const setEvidence = Array.isArray(set.evidence) ? set.evidence.flatMap((entry) => {
+          if (!entry || typeof entry !== "object") return [];
+          const sequence = Math.trunc(finiteNumber(entry.sequence, -1));
+          if (sequence < 0 || sequence >= alignment.sequences.length) return [];
+          const bestCorrelation = entry.bestCorrelation && typeof entry.bestCorrelation === "object"
+            ? {
+                r: finiteNumber(entry.bestCorrelation.r, 0),
+                pValue: Math.max(0, Math.min(1, finiteNumber(entry.bestCorrelation.pValue, 1))),
+                inversion: Math.trunc(finiteNumber(entry.bestCorrelation.inversion, 0)),
+              }
+            : undefined;
+          const treeBootstrap = entry.treeBootstrap && typeof entry.treeBootstrap === "object"
+            ? {
+                replicates: Math.max(0, Math.min(1000, Math.trunc(finiteNumber(entry.treeBootstrap.replicates, 0)))),
+                cutoff: Math.max(0, Math.min(1, finiteNumber(entry.treeBootstrap.cutoff, 0.5))),
+                cohortTaxa: Math.max(0, Math.trunc(finiteNumber(entry.treeBootstrap.cohortTaxa, 0))),
+                sourceSequenceCount: Math.max(0, Math.trunc(finiteNumber(entry.treeBootstrap.sourceSequenceCount, alignment.sequences.length))),
+                included: entry.treeBootstrap.included === true,
+                exactSiteBootstrap: entry.treeBootstrap.exactSiteBootstrap === true,
+                sourceScore: finiteNumber(entry.treeBootstrap.sourceScore, 0),
+              }
+            : undefined;
+          const regionEvidence = Array.isArray(entry.regionEvidence) ? entry.regionEvidence.flatMap((region) => {
+            if (!region || typeof region !== "object") return [];
+            return [{
+              pair: typeof region.pair === "string" ? region.pair : "regional comparison",
+              phylogenetic: region.phylogenetic === true,
+              movesTogether: region.movesTogether === true,
+              sisterTogether: region.sisterTogether === true,
+              topologyMargin: finiteNumber(region.topologyMargin, 0),
+              treeSourceScore: finiteNumber(region.treeSourceScore, 0),
+              bootstrapSupport: finiteNumber(region.bootstrapSupport, 0),
+              bootstrapReplicates: Math.max(0, Math.trunc(finiteNumber(region.bootstrapReplicates, 0))),
+              bootstrapCutoff: Math.max(0, Math.min(1, finiteNumber(region.bootstrapCutoff, 0.5))),
+              treeExcluded: region.treeExcluded === true,
+              correlationR: finiteNumber(region.correlationR, 0),
+              correlationP: Math.max(0, Math.min(1, finiteNumber(region.correlationP, 1))),
+              correlationInversion: Math.trunc(finiteNumber(region.correlationInversion, 0)),
+              correlationPermutations: Array.isArray(region.correlationPermutations)
+                ? region.correlationPermutations.slice(0, 6).map((value) => finiteNumber(value, 0))
+                : undefined,
+              correlationSdmFiltered: region.correlationSdmFiltered === true,
+            }];
+          }) : undefined;
+          return [{
+            sequence,
+            sets: Math.max(0, Math.min(3, Math.trunc(finiteNumber(entry.sets, 0)))),
+            phylogenetic: entry.phylogenetic === true,
+            distance: entry.distance === true,
+            detectableSignal: entry.detectableSignal === true,
+            bestCorrelation,
+            topologyMargin: finiteNumber(entry.topologyMargin, 0),
+            treeBootstrap,
+            regionEvidence,
+          }];
+        }) : [];
+        return [{
+          presumedRecombinant,
+          parents,
+          sequenceMembers,
+          testedSequences: Math.max(0, Math.trunc(finiteNumber(set.testedSequences, 0))),
+          requiredEvidenceSets: Math.max(1, Math.min(3, Math.trunc(finiteNumber(set.requiredEvidenceSets, 2)))),
+          evidence: setEvidence,
+        }];
+      }) : undefined,
+      componentProvenance: event.componentProvenance && typeof event.componentProvenance === "object"
+        ? (() => {
+            const recombinantComponent = parseComponentReference(event.componentProvenance.recombinant);
+            const majorParentComponent = parseComponentReference(event.componentProvenance.majorParent);
+            const minorParentComponent = parseComponentReference(event.componentProvenance.minorParent);
+            if (!recombinantComponent || !majorParentComponent || !minorParentComponent) return undefined;
+            return {
+              reconstruction: "rdp5-signal-disassembly" as const,
+              appliedEventIds: Array.isArray(event.componentProvenance.appliedEventIds)
+                ? event.componentProvenance.appliedEventIds.filter((item): item is string => typeof item === "string" && item.length > 0)
+                : [],
+              recombinant: recombinantComponent,
+              majorParent: majorParentComponent,
+              minorParent: minorParentComponent,
+            };
+          })()
+        : undefined,
+      structuralUncertainty: event.structuralUncertainty && typeof event.structuralUncertainty === "object"
+        ? {
+            source: "rdp5-erased-signal-boundary",
+            originalStart: Math.max(0, Math.min(alignment.length - 1, Math.trunc(finiteNumber(event.structuralUncertainty.originalStart, start)))),
+            originalEnd: Math.max(0, Math.min(alignment.length, Math.trunc(finiteNumber(event.structuralUncertainty.originalEnd, end)))),
+            originalWraps: event.structuralUncertainty.originalWraps === true,
+            piece: Math.max(1, Math.trunc(finiteNumber(event.structuralUncertainty.piece, 1))),
+            pieces: Math.max(1, Math.trunc(finiteNumber(event.structuralUncertainty.pieces, 1))),
+            uncertainStart: event.structuralUncertainty.uncertainStart === true,
+            uncertainEnd: event.structuralUncertainty.uncertainEnd === true,
+            adjacentEventIds: Array.isArray(event.structuralUncertainty.adjacentEventIds)
+              ? event.structuralUncertainty.adjacentEventIds.filter((item): item is string => typeof item === "string" && item.length > 0)
+              : [],
+          }
+        : undefined,
+      recombinantIdentification: parseRecombinantIdentification(event.recombinantIdentification),
       alternativeParents: Array.isArray(event.alternativeParents)
         ? [...new Set(event.alternativeParents.map((item) => Math.trunc(finiteNumber(item, -1))).filter((item) => item >= 0 && item < alignment.sequences.length && item !== recombinant && item !== majorParent && item !== minorParent))]
         : [],
@@ -1151,12 +1803,14 @@ export function parseProject(text: string): RdpProject {
         engine: rawMetrics.engine,
         matrixMode: typeof rawMetrics.matrixMode === "string" ? rawMetrics.matrixMode : undefined,
         parentSamples: finiteNumber(rawMetrics.parentSamples, 0) || undefined,
+        rdpSignalTruncations: Math.max(0, Math.trunc(finiteNumber(rawMetrics.rdpSignalTruncations, 0))) || undefined,
         timing: rawMetrics.timing && typeof rawMetrics.timing === "object"
           ? {
               distanceMs: finiteNumber(rawMetrics.timing.distanceMs, 0),
               scanMs: finiteNumber(rawMetrics.timing.scanMs, 0),
               statisticsMs: finiteNumber(rawMetrics.timing.statisticsMs, 0),
               diagnosticsMs: finiteNumber(rawMetrics.timing.diagnosticsMs, 0) || undefined,
+              clusteringMs: finiteNumber(rawMetrics.timing.clusteringMs, 0) || undefined,
             }
           : undefined,
         diagnostics: rawMetrics.diagnostics && typeof rawMetrics.diagnostics === "object"
@@ -1173,6 +1827,27 @@ export function parseProject(text: string): RdpProject {
               proximityPermutationP: finiteNumber(rawMetrics.diagnostics.proximityPermutationP, 1),
               proximityPermutationReplicates: Math.trunc(finiteNumber(rawMetrics.diagnostics.proximityPermutationReplicates, 0)),
               ambiguityFraction: finiteNumber(rawMetrics.diagnostics.ambiguityFraction, 0),
+              phiPValue: finiteNumber(rawMetrics.diagnostics.phiPValue, 1),
+              phiStatistic: finiteNumber(rawMetrics.diagnostics.phiStatistic, 0),
+              phiMean: finiteNumber(rawMetrics.diagnostics.phiMean, 0),
+              phiVariance: Math.max(0, finiteNumber(rawMetrics.diagnostics.phiVariance, 0)),
+              phiZ: finiteNumber(rawMetrics.diagnostics.phiZ, 0),
+              phiInformativeSites: Math.max(0, Math.trunc(finiteNumber(rawMetrics.diagnostics.phiInformativeSites, 0))),
+              phiTotalInformativeSites: Math.max(0, Math.trunc(finiteNumber(rawMetrics.diagnostics.phiTotalInformativeSites, 0))),
+              phiK: Math.max(0, Math.trunc(finiteNumber(rawMetrics.diagnostics.phiK, 0))),
+              phiWindow: Math.max(0, Math.trunc(finiteNumber(rawMetrics.diagnostics.phiWindow, 0))),
+              phiSubsampled: rawMetrics.diagnostics.phiSubsampled === true,
+              phiValidNormalApproximation: rawMetrics.diagnostics.phiValidNormalApproximation === true,
+              phiCompatibility: typeof rawMetrics.diagnostics.phiCompatibility === "string"
+                ? rawMetrics.diagnostics.phiCompatibility.slice(0, 240)
+                : undefined,
+            }
+          : undefined,
+        disassembly: rawMetrics.disassembly && typeof rawMetrics.disassembly === "object"
+          ? {
+              appliedEvents: Math.max(0, Math.trunc(finiteNumber(rawMetrics.disassembly.appliedEvents, 0))),
+              components: Math.max(0, Math.trunc(finiteNumber(rawMetrics.disassembly.components, 0))),
+              erasedCanonicalBases: Math.max(0, Math.trunc(finiteNumber(rawMetrics.disassembly.erasedCanonicalBases, 0))),
             }
           : undefined,
       }

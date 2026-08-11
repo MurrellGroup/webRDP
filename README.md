@@ -4,17 +4,61 @@ RDP Web is a local-first, browser-based recombination analysis workbench. It
 combines optimized WebAssembly kernels with an interactive workflow for
 alignment/project import, method-specific screening, event verification,
 breakpoint editing, matrices/topology checks, and recombination-aware exports.
-Version 0.6 adds a collection-level event reconstruction workspace, arbitrary
+Version 0.6 added a collection-level event reconstruction workspace, arbitrary
 multi-parent alignment highlighting, linked and continuously connected local
 trees, full-screen analysis panels, deterministic hydration-safe rendering,
-and a single reliable workspace scrolling model. Version 0.6.1 also makes
+and a single reliable workspace scrolling model. Version 0.6.1 also made
 panel paint containment structural and adds dense RDP4-style breakpoint-pair,
 recombination-region, and local-discordance genome matrices with interactive
-coordinate readouts and accessible scientific palettes. Version 0.7 adds a
+coordinate readouts and accessible scientific palettes. Version 0.7 added a
 tunable ordered auto-resolver with conservative/balanced/aggressive profiles,
 explicit evidence gates, dependency-aware targeted rescans, transitive safety
-holds, live dry-runs, rescan-round caps, and one-step workflow undo. The
-truth-annotated synthetic
+holds, live dry-runs, rescan-round caps, and one-step workflow undo. Version
+0.8 rebuilds the primary analysis surface from a direct audit of the RDP5 user
+manual and author-supplied desktop source: a six-stage Review studio, ordered
+and filterable reconstruction queue, best-unresolved navigation, integrated
+event dossier/checklist, best-versus-all method evidence, three-polarity role
+audition, tract-versus-background trees, and separate per-sequence and
+whole-group decisions. Version 0.9 advances numerical source compatibility: the
+active RDP5 VNP-window detector now retains multiple raw excursions per
+triplet, fixed-three-state BURT fitting/backtrace provides posterior breakpoint
+intervals, and accepted events drive the manual's erase/extract/rescan
+component workflow. Signals crossing deleted tracts are split into continuous
+pieces and gap-adjacent breakpoints are marked uncertain. Weighted
+ancestral-event merging and the all-sequence/all-three-orientation
+co-recombinant screen are ports from the author-supplied desktop source. Its
+phylogenetic set now uses six seeded JC/NJ bootstrap trees with low-support
+branches collapsed; distance-correlation and detectable-signal sets complete
+the configurable 2-of-3 rule, including descendants without their own raw
+detection. Version 0.9.1 replaces the remaining SiScan confirmation surrogate
+with the supplied RDP5 Sister-Scanning path: source 15-category and sum scores,
+tree/direct/manual fourth-sequence selection, horizontal or vertical
+randomization, topology-run enumeration, region shrinkage, and whole-region Z
+calibration. Every locally significant run becomes its own hypothesis and the
+fast WASM category pass is only a locator. Long-genome scans reproduce the
+desktop MSVC random stream without materializing its potentially multi-gigabyte
+table and reuse exact permutation-prefix ranges across triplets. See
+`SOURCE_WORKFLOW_AUDIT.md` for the source-to-web crosswalk. The
+same checkpoint replaces the PHI-style warning surrogate with direct ports of
+RDP5's multistate `pair_score`, `PHI`, and analytic mean/variance path; any
+browser work-ceiling subset is explicitly reported with its all-site count.
+The
+former cross-method CUSUM discovery shortcut has also been removed: every
+enabled family now contributes its own interval and a method can confirm an
+event only when that interval is co-located with the event. GENECONV uses the
+source finite-G mismatch penalty and `CalcKMaxP`/`GCCalcPValP` probability
+path (including the G=0 special case); MAXCHI and CHIMAERA scan compressed
+informative-site coordinates and use the source peak multiplier. Unique
+unordered triplets define the multiplicity family, and order-invariant RDP
+triplets are cached to avoid redundant three-polarity source scans. Direct
+ports of `MakePhPrScore`, `MakeTrpGroups`/`MakeTrpScore`,
+`MakeINList`/`MakeOUCheck`, `SimpleDist`, `MakeSSDistB`, `GetBadDists`,
+`MakeEList`/`MakeListCorr`, `MakeLDist`/`MakeRCompat`, `CalcMaxD`/
+`CMaxD2P3`, and the default `MakeConsensusC` decision tree now persist an
+18-statistic recombinant-identification ledger, final-trim penalty, and six
+joint rules for all three polarities;
+the role workbench exposes every value/weight and auto-resolution holds source-
+challenged or sub-60%-confidence assignments. The truth-annotated synthetic
 dataset library, method-by-method result interpretation, safe-by-default
 fresh/accepted exports, scan-scope event recalculation, and project audit ledger
 remain available. The exact
@@ -22,11 +66,11 @@ bounded 3SEQ calibration, seeded p-distance bootstrapping, challenge
 diagnostics, breakpoint matrices, annotation workflows, and WebAssembly worker
 architecture remain available.
 
-The project is MIT licensed and maintains a strict clean-room boundary from
-OpenRDP (GPL-3.0) and the proprietary Windows RDP package. See
-`SCIENTIFIC_BASIS.md` for the implementation/validation ledger and
-`FEATURE_AUDIT.md` for the product-level gap ledger. Licensing details are in
-`THIRD_PARTY_NOTICES.md`.
+The project is MIT licensed. Source-compatible RDP5 routines are included with
+the RDP authors' permission and collaboration; OpenRDP remains an additional
+algorithmic reference. See `SCIENTIFIC_BASIS.md` for the
+implementation/validation ledger and `FEATURE_AUDIT.md` for the product-level
+gap ledger. Details are in `THIRD_PARTY_NOTICES.md`.
 
 ## Local development
 
@@ -84,15 +128,29 @@ Use `npm run cli -- --help` for method, circular-genome, query/reference, and
 exhaustive-search options. This is a local batch interface, not a separate
 algorithm implementation.
 
-The tests cover scalar/packed distance equivalence, exact HGRW tails, seeded
-bootstraps, sampled large-dataset parent selection, windowless two-state HMM
-breakpoint localization, origin-spanning circular events, rate-variation and
+The tests cover scalar/packed distance equivalence, the RDP5 multi-signal VNP event locator,
+order-invariant cached triplets, independent non-RDP discovery, co-location
+gating, finite-G GENECONV fragment scoring/KA calibration, informative-site
+MAXCHI/CHIMAERA windows and source peak correction,
+source SiScan quartet categories, outgroup selection, cached/streamed MSVC
+randomization, topology-run calibration and multi-event expansion,
+source PHI incompatibility graphs, analytic moments and lower-tail calibration,
+exact HGRW tails, seeded bootstraps, sampled large-dataset parent selection,
+source-mode and manual step-up BURT breakpoint localization, recursive
+erase/extract signal disassembly, deleted-tract splitting and uncertainty,
+RDP5 weighted event merging, bootstrapped-JC/NJ tree evidence, and
+three-orientation co-recombinant clustering, direct source PhPr/SubDist/
+TrpScore/OuCheck/O:E/dMax/parsimony/conflict/set-distance role identification,
+historical-event set closure, origin-spanning circular events, rate-variation and
 gap-block challenges, exact manual-event recalculation, NJ/hotspot routines, a
 513-sequence large-path integration fixture, annotation-aware masking, and
 lossless `.rdpweb` project round-trips, parent-affinity classification,
 ordered/nested event reconstruction, connected tree geometry, global scroll
 ownership, full-screen panel controls, deterministic server rendering, and
-auto-resolution scoring/rescan barriers.
+auto-resolution scoring/rescan barriers. The source-guided regressions also
+cover filtered/wrapping event navigation, best-event selection, group
+membership, checklist freshness, source-weighted role polarity, and tract/background
+tree workflow wiring.
 
 ## Current status
 

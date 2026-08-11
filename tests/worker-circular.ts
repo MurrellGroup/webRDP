@@ -71,7 +71,7 @@ assert.ok(Math.abs(event.start - 520) <= 2, `circular start ${event.start} shoul
 assert.ok(Math.abs(event.end - 100) <= 2, `circular end ${event.end} should recover 100`);
 assert.equal(event.majorParent, 1);
 assert.equal(event.minorParent, 2);
-assert.equal(event.breakpointModel?.method, "two-state-hmm");
+assert.equal(event.breakpointModel?.method, "burt-hmm");
 assert.equal(event.breakpointModel?.stateSwitches, 2);
-assert.equal(message.comparisons, 2, "circular mode should correct for both tested origins");
+assert.equal(message.comparisons, 1, "dual coordinate origins must count as one biological hypothesis");
 assert.match(String(message.engine), /dual-origin circular scan/);

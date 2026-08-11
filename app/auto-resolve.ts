@@ -14,6 +14,7 @@ export interface AutoResolveSettings {
   maximumBreakpointUncertainty: number;
   maximumParentConflict: number;
   maximumRateFold: number;
+  minimumRoleConfidence: number;
   blockSevereWarnings: boolean;
   revisitReviewed: boolean;
   consensusWeight: number;
@@ -21,6 +22,7 @@ export interface AutoResolveSettings {
   informationWeight: number;
   breakpointWeight: number;
   diagnosticsWeight: number;
+  roleWeight: number;
   rescanStrategy: AutoResolveRescanStrategy;
   rescanRiskThreshold: number;
   overlapTriggerFraction: number;
@@ -43,6 +45,7 @@ export const AUTO_RESOLVE_PRESETS: Record<AutoResolvePresetName, AutoResolveSett
     maximumBreakpointUncertainty: 0.15,
     maximumParentConflict: 0.1,
     maximumRateFold: 2,
+    minimumRoleConfidence: 0.7,
     blockSevereWarnings: true,
     revisitReviewed: false,
     consensusWeight: 30,
@@ -50,6 +53,7 @@ export const AUTO_RESOLVE_PRESETS: Record<AutoResolvePresetName, AutoResolveSett
     informationWeight: 15,
     breakpointWeight: 15,
     diagnosticsWeight: 15,
+    roleWeight: 15,
     rescanStrategy: "targeted",
     rescanRiskThreshold: 35,
     overlapTriggerFraction: 0.15,
@@ -70,6 +74,7 @@ export const AUTO_RESOLVE_PRESETS: Record<AutoResolvePresetName, AutoResolveSett
     maximumBreakpointUncertainty: 0.3,
     maximumParentConflict: 0.2,
     maximumRateFold: 3,
+    minimumRoleConfidence: 0.6,
     blockSevereWarnings: true,
     revisitReviewed: false,
     consensusWeight: 28,
@@ -77,6 +82,7 @@ export const AUTO_RESOLVE_PRESETS: Record<AutoResolvePresetName, AutoResolveSett
     informationWeight: 16,
     breakpointWeight: 14,
     diagnosticsWeight: 20,
+    roleWeight: 12,
     rescanStrategy: "adaptive",
     rescanRiskThreshold: 48,
     overlapTriggerFraction: 0.25,
@@ -97,6 +103,7 @@ export const AUTO_RESOLVE_PRESETS: Record<AutoResolvePresetName, AutoResolveSett
     maximumBreakpointUncertainty: 0.5,
     maximumParentConflict: 0.35,
     maximumRateFold: 5,
+    minimumRoleConfidence: 0.5,
     blockSevereWarnings: false,
     revisitReviewed: false,
     consensusWeight: 25,
@@ -104,6 +111,7 @@ export const AUTO_RESOLVE_PRESETS: Record<AutoResolvePresetName, AutoResolveSett
     informationWeight: 15,
     breakpointWeight: 10,
     diagnosticsWeight: 30,
+    roleWeight: 8,
     rescanStrategy: "adaptive",
     rescanRiskThreshold: 65,
     overlapTriggerFraction: 0.4,
@@ -125,6 +133,9 @@ export interface AutoResolveMetrics {
   breakpointUncertainty: number;
   parentConflict: number;
   rateFold: number;
+  roleConfidence: number;
+  roleMatchesCurrent: boolean;
+  roleAmbiguous: boolean;
   severeWarnings: number;
 }
 
@@ -208,6 +219,10 @@ function scoreEvent(event: RdpEvent, length: number, settings: AutoResolveSettin
   const uncertainty = breakpointUncertainty(event, length);
   const parentConflict = Math.max(0, event.diagnostics.parentConflictRate || 0);
   const fold = rateFold(event.diagnostics.rateRatio);
+  const roleIdentification = event.recombinantIdentification;
+  const roleConfidence = roleIdentification?.confidence ?? 1;
+  const roleMatchesCurrent = !roleIdentification || roleIdentification.recommended === event.recombinant;
+  const roleAmbiguous = roleIdentification?.ambiguous ?? false;
   const severeWarnings = severeWarningCount(event);
   const metrics: AutoResolveMetrics = {
     supportingMethods,
@@ -217,6 +232,9 @@ function scoreEvent(event: RdpEvent, length: number, settings: AutoResolveSettin
     breakpointUncertainty: uncertainty,
     parentConflict,
     rateFold: fold,
+    roleConfidence,
+    roleMatchesCurrent,
+    roleAmbiguous,
     severeWarnings,
   };
 
@@ -259,14 +277,23 @@ function scoreEvent(event: RdpEvent, length: number, settings: AutoResolveSettin
   const foldQuality = clamp(1 - (fold - 1) / Math.max(0.0001, (settings.maximumRateFold - 1) * 2));
   const warningQuality = 1 / (1 + severeWarnings);
   const diagnosticQuality = (conflictQuality + foldQuality + (event.diagnostics.diffuseIncompatibility ? 0 : 1) + warningQuality) / 4;
-  const weightedTotal = settings.consensusWeight + settings.significanceWeight + settings.informationWeight + settings.breakpointWeight + settings.diagnosticsWeight;
+  const roleQuality = roleMatchesCurrent && !roleAmbiguous ? roleConfidence : Math.max(0, 1 - roleConfidence);
+  const effectiveRoleWeight = roleIdentification ? settings.roleWeight : 0;
+  const weightedTotal = settings.consensusWeight + settings.significanceWeight + settings.informationWeight + settings.breakpointWeight + settings.diagnosticsWeight + effectiveRoleWeight;
   const score = Math.round(100 * (
     consensusQuality * settings.consensusWeight
     + significanceQuality(bestCorrectedP, settings.maximumCorrectedP) * settings.significanceWeight
     + informationQuality * settings.informationWeight
     + precisionQuality * settings.breakpointWeight
     + diagnosticQuality * settings.diagnosticsWeight
+    + roleQuality * effectiveRoleWeight
   ) / Math.max(1, weightedTotal));
+
+  const roleGate = !roleIdentification || (
+    roleMatchesCurrent
+    && !roleAmbiguous
+    && roleConfidence >= settings.minimumRoleConfidence
+  );
 
   const acceptanceGates = supportingMethods >= settings.minimumSupportingMethods
     && bestCorrectedP <= settings.maximumCorrectedP
@@ -274,6 +301,7 @@ function scoreEvent(event: RdpEvent, length: number, settings: AutoResolveSettin
     && uncertainty <= settings.maximumBreakpointUncertainty
     && parentConflict <= settings.maximumParentConflict
     && fold <= settings.maximumRateFold
+    && roleGate
     && !event.diagnostics.diffuseIncompatibility
     && (!settings.blockSevereWarnings || severeWarnings === 0);
   const rejectionEvidence = supportingMethods < settings.minimumSupportingMethods
@@ -282,17 +310,20 @@ function scoreEvent(event: RdpEvent, length: number, settings: AutoResolveSettin
     || fold > settings.maximumRateFold
     || event.diagnostics.diffuseIncompatibility
     || (settings.blockSevereWarnings && severeWarnings > 0);
-  const recommendation: AutoResolveRecommendation = acceptanceGates && score >= settings.acceptScore
-    ? "accept"
-    : rejectionEvidence && score <= settings.rejectScore
-      ? "reject"
-      : "review";
+  const recommendation: AutoResolveRecommendation = !roleGate
+    ? "review"
+    : acceptanceGates && score >= settings.acceptScore
+      ? "accept"
+      : rejectionEvidence && score <= settings.rejectScore
+        ? "reject"
+        : "review";
   const reasons = [
     `${supportingMethods}/${testedMethods} methods pass adjusted P ≤ ${settings.maximumCorrectedP}.`,
     `Best adjusted P is ${formatP(bestCorrectedP)}; ${event.informativeSites} informative sites.`,
     `Breakpoint uncertainty is ${(uncertainty * 100).toFixed(1)}% of tract length.`,
     `Parent conflict ${(parentConflict * 100).toFixed(1)}%; rate-density deviation ${fold.toFixed(2)}×.`,
   ];
+  if (roleIdentification) reasons.push(`Source role consensus is ${(roleConfidence * 100).toFixed(1)}% for ${roleMatchesCurrent ? "the current recombinant" : "another triplet member"}${roleAmbiguous ? " and is flagged ambiguous" : ""}.`);
   if (event.diagnostics.diffuseIncompatibility) reasons.push("Diffuse incompatibility diagnostic is active.");
   if (severeWarnings) reasons.push(`${severeWarnings} high-risk warning${severeWarnings === 1 ? "" : "s"} matched the configured blocker.`);
   if (recommendation === "review") reasons.push("The score falls inside the analyst-review band or a hard acceptance gate failed.");

@@ -71,9 +71,15 @@ const diagnostics = message.diagnostics as {
   fourGameteFraction: number;
   proximityPermutationP: number;
   proximityPermutationReplicates: number;
+  phiPValue: number;
+  phiInformativeSites: number;
+  phiCompatibility: string;
 };
 assert.equal(diagnostics.sampledSequences, 3);
 assert.ok(diagnostics.testedSitePairs > 0);
 assert.ok(diagnostics.fourGameteFraction >= 0 && diagnostics.fourGameteFraction <= 1);
 assert.ok(diagnostics.proximityPermutationP > 0 && diagnostics.proximityPermutationP <= 1);
 assert.equal(diagnostics.proximityPermutationReplicates, 199);
+assert.equal(diagnostics.phiPValue, 1, "PHI requires at least four sequences");
+assert.equal(diagnostics.phiInformativeSites, 0);
+assert.match(diagnostics.phiCompatibility, /PHITest2/);

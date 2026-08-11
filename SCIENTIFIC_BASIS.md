@@ -1,14 +1,16 @@
 # RDP Web scientific basis and validation ledger
 
-RDP Web is a clean-room, MIT-licensed browser implementation of an RDP-style
-recombination workflow. This document distinguishes what is operational from
-what still requires numerical validation or implementation before the project
-can claim parity with RDP5.
+RDP Web is an MIT-licensed browser implementation of the RDP recombination
+workflow. Published methods and permitted source-compatible RDP5 ports coexist;
+this ledger distinguishes what is operational from what still needs desktop
+corpus validation or implementation before the project can claim full parity.
 
 ## Ground rules
 
-- Published method papers and the public RDP5 manual are behavioral sources.
-- No OpenRDP (GPL-3.0) or Windows RDP source code is copied or translated.
+- Published papers, the RDP5 manual, and author-supplied RDP5 desktop source are
+  authoritative references. Selected active routines are ported with the
+  authors' permission; `SOURCE_PARITY.md` records routine-level provenance.
+- No OpenRDP GPL-3.0 source is bundled.
 - No 3Seq or GENECONV executable is bundled; both have distribution terms that
   are unsuitable for an MIT-only project.
 - A matching name in the interface means that an independent statistic informed
@@ -24,19 +26,20 @@ can claim parity with RDP5.
 | Aligned FASTA, CLUSTAL, PHYLIP, NEXUS import | Operational, local-only | Corpus of difficult interleaved/quoted files |
 | Fully exploratory triplet scan | Operational | RDP5/OpenRDP fixture comparison and simulation ROC curves |
 | Query vs reference scan | Operational roles, editable reference groups, group-diversified parent shortlist, and opt-in reference-as-recombinant testing | RDP5 naming/group parity fixtures |
-| RDP evidence | Exact binomial tail on informative-site identity shifts with within-triplet window correction | RDP5 window/reference-mode corrected-p parity |
-| GENECONV evidence | G-scale 0 concordant-fragment scan with a conservative run bound | Mismatch scoring, KA parameters and global permutation parity |
+| RDP evidence | Source-compatible `FindSubSeqPB3` → `XOHomologyP2` → `FindNextP` → `DefineEventP2` VNP-window locator, RDP5 common/different tract rule, polarity assignment, multiple distinct excursions per triplet with a tunable retention ceiling, and `ProbCalcP/P2`-equivalent binomial-tail scaling | Golden desktop corpus across ties, missing data, circular origins, raw-signal multiplicity, and correction modes |
+| GENECONV evidence | Independent triplet-polymorphic fragment scan; G=0 exact-run special case; finite-G source integer mismatch penalty; direct `CalcKMaxP`/`GCCalcPValP` lambda/K probability; tunable G-scale | Indel-run modes, overlapping-fragment suppression, pair-scan/global-polymorphism mode, permutations and desktop rounding corpus |
 | BootScan/RecScan evidence | Seeded native p-distance triplet bootstrap at tract/flank windows plus an all-window topology sign statistic | Full multi-taxon NJ/substitution-model and cutoff parity |
-| MaxChi evidence | Pairwise variable/non-variable χ² at shared candidate boundaries | Independent candidate scan, polymorphic-window and corrected-p parity |
-| Chimaera evidence | Compressed binary-triplet χ² at shared candidate boundaries | Independent candidate scan, RDP5 window and event-region parity |
-| SiScan evidence | Oriented site-category Z surrogate | Fourth-sequence selection and vertical/horizontal permutations |
-| 3Seq evidence | Maximum HGRW descent with exact first-passage dynamic programming inside a bounded work budget and a conservative large-case fallback | Published large-table/algorithm scale comparisons and RDP5 corrected-p parity |
-| Breakpoint polishing | Candidate-seeded, windowless two-state HMM/Viterbi path with local χ² fallback | BURT 2–20-state step-up fitting, random-start training, EM, and confidence-interval parity |
+| MaxChi evidence | Independent pairwise variable/non-variable χ² peak-pair scan in compressed triplet-polymorphic coordinates with the RDP5 informative-half-window × three-pair peak correction | Exact `GrowMChiWin`, smoothing/ban-window/table rounding, multi-peak queue and desktop corpus |
+| Chimaera evidence | Independent recombinant/parent-match binary compression and variable-site χ² peak-pair scan with the RDP5 peak correction | Exact peak growth, missing-data windows, multi-peak queue and desktop corpus |
+| SiScan evidence | Fast directional WASM locator followed by the source `GetSSOL` → 15-category/sum → `DoPerms3P`/`MakeZValue2` → `FindMaxZ` → `ShrinkRegionC` confirmation path. Nearest tree/direct, most-divergent, randomized, and analyst-selected fourth sequences; triplet/quartet/all-position and gap modes; separate window/final permutation controls; all significant topology runs; source whole-region probability; deterministic seeds; and streamed large-genome random tables are operational. | Desktop golden corpus for missing/tie behavior, exact GUI defaults across historical versions, and plot-by-plot comparison |
+| 3Seq evidence | Independently localized maximum HGRW descent with exact first-passage dynamic programming inside a bounded work budget and a conservative large-case fallback | Published large-table/algorithm scale comparisons and RDP5 corrected-p parity |
+| Breakpoint polishing | Source-compatible fixed-three-state `BenHMM`/`DoHMMCyclesSerial` fitting with 21 random starts, MSVC RNG, source backtrace/sentinel behavior, 95/99% posterior intervals; plus manual-spec 2–20-state BIC/AIC step-up mode | Golden desktop corpus for tie/backtrace edge cases and circular events |
+| Event clustering | Source `GetSupers` daughter-distance/overlap score with WPGMA-like average linkage, plus §4.1.4 characterization of every sequence under all three presumed-recombinant orientations. Source-style 60-VNP regions, outside-flank averaging, six-cell category vectors, `CalCR` relabeling/inversion checks, `MakeProperRCorr` SDM filtering, detectable-signal overlap, and the configurable 2-of-3 rule retain co-recombinant descendants even without an independent raw signal. Six seeded JC/NJ bootstrap trees are constructed per event, low-support branches are collapsed at the source 50% default, and tree-movement evidence is recorded with cohort/block provenance. | Exact `Clearcut` consensus/tree-distance equivalence, full `CheckBSTree` weighting, and desktop event-corpus parity; long regions use tunable balanced site blocks unless the block count covers every site |
 | Circular genomes | Opt-in dual-origin triplet scan, circular-breakpoint deduplication, native wrapping coordinates, plots, editing, and masking | Broader circular simulation corpus and RDP5 numerical comparison |
-| False-positive flags | Gap/boundary checks, bounded four-gamete incompatibility, seeded four-gamete proximity permutation, PHI-style contrast, local rate-density shift, and parent-conflict diagnostics exposed as review evidence | Exact PHI p-values, tree-conditioned homoplasy and broader challenge calibration |
+| False-positive flags | Direct RDP5/PHIPACK `PHITest2` multistate incompatibility graph, PHI statistic, analytic mean/variance and normal tail; bounded four-gamete proximity permutation; gap/boundary, local rate-density, and parent-conflict diagnostics exposed as review evidence | Desktop PHI golden-corpus calibration, exact VB random thinning above the work ceiling, tree-conditioned homoplasy and broader challenge calibration |
 | Alignment verification | Base view plus arbitrary 2–6-parent affinity highlighting; unique/shared/novel/missing states; parent-informative-site filtering; event-parent defaults; bounded memory guard | Very-large alignment virtualization, codon/amino-acid overlays, and user studies |
-| Event verification and editing | Draggable/numeric breakpoints, seven selected-triplet method profiles, manual create/duplicate/delete, recombinant/parent reassignment, automatic ancestry groups, ordered review queue, tunable heuristic auto-resolution, transitive dependency holds, targeted/adaptive rescans, downstream-stale propagation, global mosaic map, overprint/recombinant-parent links, scan-scope recalculation, undo/redo, partial recovery, IndexedDB autosave, and event/project audit trails with deletion tombstones | RDP5 auto-decision calibration, full RDP signal erasure/splitting, historical direction inference, unknown-parent/reassortment/ancestral propagation parity, and user studies |
-| Pairwise matrix and local topology contrast | Dense sequence p-distance matrix for up to 64 already-calculated sequences, closest-pair contrast, dedicated left/tract/right native NJ comparison, adaptive nearest context, linked leaf marking, continuous branch geometry with explicit zero-length nodes, cohort display, and Newick export | ML trees, clade operations, and exact SH/AU/RF matrices |
+| Event verification and editing | Source-guided six-stage Review studio; draggable/numeric breakpoints; seven selected-triplet method profiles; best/all evidence modes; manual create/duplicate/delete; persisted three-polarity default-RDP5 ledger with 18 standalone source statistics, the final-trim penalty, and six joint rules, including historical-event set closure, source quantization, and packed-WASM quartet dMax; individual/group decisions; shared breakpoints; ancestry groups; ordered queue; role-aware tunable auto-resolution; dependency holds and targeted/adaptive rescans; recursive erase/extract reconstruction; structural-gap uncertainty; stale propagation; global mosaic; dependency links; exact-hypothesis recalculation; undo/redo; partial recovery; IndexedDB autosave; audit trails | Optional logistic/neural role selectors, desktop-corpus calibration and auto-decision calibration, exact per-method deleted-boundary thresholds, historical direction inference, unknown-parent/reassortment/ancestral propagation parity, and user studies |
+| Pairwise matrix and local topology contrast | Dense sequence p-distance matrix for up to 64 already-calculated sequences, closest-pair contrast, dedicated tract/combined-background or left/tract/right native NJ comparison, explicit unrooted interpretation, adaptive nearest context, linked leaf marking, continuous branch geometry with explicit zero-length nodes, cohort display, and Newick export | ML/Bayesian trees, clade operations, and exact SH/AU/RF matrices |
 | Genome-position pattern matrices | Symmetric breakpoint-pair counts with RDP4 Figure 2c semantics; split region matrix with observed tract-separation counts and analytical circular random-placement residuals; split sampled local p-distance-profile RMS/correlation-loss matrix | RDP4/RDP5 permutation calibration, SH/RF numerical parity, confidence overlays, and feature-association matrices |
 | Breakpoint density | Descriptive density and seeded uniform-null hotspot permutation, integrated with the dense breakpoint-pair matrix | RDP5 hot/cold-spot model parity and association covariates |
 | Recombination-free outputs | Remove, mask, CDS-phase-aware mask, split and partition, including wrapping tracts | More frame/feature edge cases and every RDP5 export variant |
@@ -81,14 +84,27 @@ resolved recombinant as a later parent proxy, reciprocal nested-parent use,
 and shared co-recombinant groups. Crossing the configured risk threshold
 creates a barrier. The remaining queue is not processed until an impacted-only,
 adaptive, or full unresolved-target rescan completes and the plan is rebuilt.
-During that rescan, accepted recombinant sequences are excluded from the parent
-pool so their mosaic structure cannot be reused as if it were a clean parent;
-they may still be rescanned as targets to expose additional events. Close
-same-parent rediscoveries of accepted tracts are suppressed, while nested and
-alternative-parent hypotheses are retained. Parent-pool exclusion is a
-conservative browser heuristic, not RDP's full component-sequence disassembly.
-This mirrors the iterative disassembly/rescan rationale described for RDP4
-without claiming numerical or historical-direction parity with RDP5.
+During that rescan, every accepted tract is erased from the selected
+co-recombinant remainder rows and copied into a gap-padded internal component,
+including recursive lineage targeting for nested events. Extracted components
+remain eligible as targets and parent proxies while accepted mosaic remainders
+are withheld. New signals crossing structural gaps are divided into continuous
+pieces and breakpoints within the RDP VNP-window distance of deleted sequence
+are marked uncertain. Internal component indexes are never exposed as user
+sequence identities; their lineage is retained in the event dossier and
+project. This implements the manual's §4.1.6 state transition, while exact
+method-specific uncertainty thresholds and historical direction still require
+desktop-corpus validation.
+
+The Review studio follows the manual and desktop source's user-facing
+transaction loop rather than imitating the old form layout. Queue navigation
+can skip accepted/rejected items and filter by method count; selected evidence,
+breakpoint editing, role challenges, tract/background trees, grouping, and
+decisions are kept in one continuous context. Rescanned events use the direct
+desktop-default `MakeConsensusC` ensemble; imported/manual events without a
+saved source ledger retain the clearly labeled bounded identity-switch
+diagnostic until recalculated. Group-wide decisions and shared breakpoint edits are atomic
+undo/audit actions and invalidate affected downstream evidence.
 
 ## Engine design
 
@@ -98,21 +114,42 @@ The WebAssembly engine uses three layers:
    Sixteen bases are compared per 32-bit word, with a separate validity mask.
 2. Large alignments avoid the O(N²L) matrix. A 64/128/256-site deterministic
    screen plus a stratified panel identifies plausible parents, while the
-   visible matrix is calculated exactly for the first 24 sequences.
-3. Each retained recombinant/parent triplet is scanned in O(L) with prefix sums
-   and a detrended cumulative-sum excursion. The candidate tract is evaluated
-   by method-specific GENECONV-run, topology-window, MAXCHI, CHIMAERA,
-   SISCAN-category, and maximum-HGRW-descent kernels. Candidate discovery is
-   still shared and is not yet seven independent scans. A WebAssembly bitmask
-   skips disabled kernels; seeded column bootstraps run natively only when
-   BootScan is enabled.
+   visible matrix is calculated exactly for the first 24 sequences. The
+   clustering normalizer uses a separate streaming packed kernel to obtain the
+   exact global maximum distance without materializing an N×N matrix.
+3. The enabled RDP method has an independent O(L) source-compatible VNP scan
+   that retains multiple distinct excursions per triplet up to a visible,
+   tunable ceiling and reports any truncation. Its order-invariant result set
+   is cached per unordered triplet to avoid repeating the native scan during
+   the three target passes.
+   Every other enabled family now contributes its own full-alignment interval:
+   GENECONV fragments, topology windows, compressed-variable-site MAXCHI,
+   binary CHIMAERA, a fast oriented SISCAN locator, and maximum-HGRW descent.
+   Directional families are run in both parent orientations. A method is
+   excluded from an event's evidence family unless its interval is co-located
+   with that event. A WebAssembly bitmask skips disabled kernels; seeded column
+   bootstraps run natively only when BootScan is enabled. A preliminary SiScan
+   interval is then confirmed by the supplied-source fourth-sequence,
+   15-category, vertical-permutation and topology-run workflow; its several
+   significant runs are queued independently. Fixed-outgroup windows use
+   rolling category counts and cached exact permutation-prefix ranges, while
+   very large historical random tables are regenerated from the identical
+   MSVC stream rather than materialized.
 4. Exact 3SEQ first-passage probabilities are computed in the worker within a
    per-event and per-job work budget; larger cases retain a labeled
    conservative bound so one alignment cannot monopolize the browser.
-5. Breakpoints can be refined with an O(L) two-state Viterbi pass over only
-   parent-discriminating sites. Circular mode adds one half-genome rotation,
-   maps candidates back to native coordinates, and corrects probabilities for
-   both tested origins; the linear fast path pays none of that scan cost.
+5. Breakpoints can be refined with source-compatible fixed-three-state BURT or
+   the manual's optional 2–20-state step-up model over parent-discriminating
+   sites. Circular mode adds one half-genome rotation and maps candidates back
+   to native coordinates; because the second origin is a coordinate-coverage
+   device rather than another biological hypothesis, it is not double-counted
+   in the multiplicity family. The linear fast path pays none of that scan cost.
+
+Exploratory multiplicity counts unique unordered triplets rather than the
+three target-oriented passes. Query/reference mode counts each query-specific
+reference pair. This matches the hypothesis family more closely and prevents
+the implementation detail of polarity evaluation or circular rotation from
+inflating adjusted p-values.
 
 Default parent pruning changes the triplet cost from O(N³L) toward O(NK²L),
 where K defaults to eight. For large N the parent screen is O(N²S), where S is

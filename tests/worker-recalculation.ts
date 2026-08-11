@@ -47,3 +47,42 @@ assert.match(patch.evidence[0].correctionScope, /56 scanned triplets/);
 assert.equal(patch.hypothesisTests, 56);
 assert.match(patch.recalculationNote, /conservative Bonferroni/);
 assert.ok(patch.diagnostics.rateRatio > 0);
+
+const predecessor = { ...demoEvent(), id: "accepted-predecessor", decision: "accepted" as const, evidenceStale: false, start: 782, end: 1_538, wraps: false };
+const derived = {
+  ...demoEvent(),
+  id: "derived-component-event",
+  start: 900,
+  end: 1_250,
+  evidenceStale: true,
+  componentProvenance: {
+    reconstruction: "rdp5-signal-disassembly" as const,
+    appliedEventIds: [predecessor.id],
+    recombinant: { originIndex: predecessor.recombinant, kind: "extracted-tract" as const, lineage: [predecessor.id], sourceEventId: predecessor.id, parentLineage: [], start: predecessor.start, end: predecessor.end, wraps: false, erasedEventIds: [] },
+    majorParent: { originIndex: predecessor.majorParent, kind: "remainder" as const, lineage: [], erasedEventIds: [] },
+    minorParent: { originIndex: predecessor.minorParent, kind: "remainder" as const, lineage: [], erasedEventIds: [] },
+  },
+};
+const componentResult = new Promise<Record<string, unknown>>((resolve, reject) => {
+  runtime.postMessage = (payload: unknown) => {
+    const componentMessage = payload as Record<string, unknown>;
+    if (componentMessage.type === "recalculated") resolve(componentMessage);
+    if (componentMessage.type === "error") reject(new Error(String(componentMessage.message)));
+  };
+});
+runtime.self.onmessage({
+  data: {
+    type: "recalculate",
+    jobId: 12,
+    alignment: makeDemoAlignment(),
+    options: { ...DEFAULT_OPTIONS, mode: "query-reference" },
+    event: derived,
+    disassemblyEvents: [predecessor],
+    comparisons: 56,
+  },
+});
+const componentMessage = await componentResult;
+const componentPatch = componentMessage.patch as { componentProvenance: { recombinant: { kind: string; lineage: string[] } }; recalculationNote: string };
+assert.equal(componentPatch.componentProvenance.recombinant.kind, "extracted-tract");
+assert.deepEqual(componentPatch.componentProvenance.recombinant.lineage, [predecessor.id]);
+assert.match(componentPatch.recalculationNote, /signal-disassembly lineage was rebuilt/);

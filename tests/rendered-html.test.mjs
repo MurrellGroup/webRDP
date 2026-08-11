@@ -33,14 +33,14 @@ test("renders deterministic development HTML with preview metadata", async () =>
   );
   const html = await response.text();
   assert.match(html, developmentPreviewMeta);
-  assert.match(html, /Events &amp; evidence/);
+  assert.match(html, /Review studio/);
   assert.match(html, /Local trees/);
   assert.match(html, /Global reconstruction/);
-  assert.match(html, /Method-by-method result/);
+  assert.match(html, /Method-by-method confirmation/);
   assert.match(html, /Known synthetic truth for orientation only/);
   assert.match(
     html,
-    /<div(?=[^>]*class="panel-body")(?=[^>]*tabindex="0")(?=[^>]*role="region")(?=[^>]*aria-label="Method-by-method result content")[^>]*>/,
+    /<div(?=[^>]*class="panel-body")(?=[^>]*tabindex="0")(?=[^>]*role="region")(?=[^>]*aria-label="Method-by-method confirmation content")[^>]*>/,
   );
   const secondResponse = await render();
   assert.equal(secondResponse.status, 200);

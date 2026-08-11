@@ -22,6 +22,12 @@ Options:
   --candidate-parents N
   --bootstrap N
   --seed N
+  --siscan-outgroup nearest|most-divergent|randomized
+  --siscan-outgroup-sequence N   (1-based; selects manual mode)
+  --siscan-positions triplet-variable|quartet-variable|all
+  --siscan-gaps strip|fifth-state
+  --siscan-scan-permutations N
+  --siscan-final-permutations N
   --exhaustive
   --help
 
@@ -46,16 +52,39 @@ const outputPath = path.resolve(positional[1] ?? `${inputPath.replace(/\.[^.]+$/
 const input = fs.readFileSync(inputPath, "utf8");
 const alignment = parseAlignment(input, path.basename(inputPath));
 const requestedMethods = option("--methods")?.split(",").filter((method): method is MethodName => PRIMARY_METHODS.includes(method as MethodName));
+const methods = requestedMethods?.length ? requestedMethods : [...PRIMARY_METHODS];
+const requestedOutgroup = option("--siscan-outgroup");
+const manualOutgroup = Number(option("--siscan-outgroup-sequence"));
+const requestedPositions = option("--siscan-positions");
+const requestedGapMode = option("--siscan-gaps");
+const siskanScanPermutations = Math.max(2, Math.min(1000, Number(option("--siscan-scan-permutations") ?? DEFAULT_OPTIONS.siskanScanPermutations)));
 const options = {
   ...DEFAULT_OPTIONS,
   mode: option("--mode") === "query-reference" ? "query-reference" as const : "exploratory" as const,
   circular: arguments_.includes("--circular"),
   exhaustive: arguments_.includes("--exhaustive"),
-  methods: requestedMethods?.length ? requestedMethods : [...PRIMARY_METHODS],
-  minMethods: Math.max(1, Number(option("--min-methods") ?? DEFAULT_OPTIONS.minMethods)),
+  methods,
+  minMethods: Math.min(methods.length, Math.max(1, Number(option("--min-methods") ?? DEFAULT_OPTIONS.minMethods))),
   candidateParents: Math.max(3, Number(option("--candidate-parents") ?? DEFAULT_OPTIONS.candidateParents)),
   bootstrapReplicates: Math.max(0, Number(option("--bootstrap") ?? DEFAULT_OPTIONS.bootstrapReplicates)),
   randomSeed: Number(option("--seed") ?? DEFAULT_OPTIONS.randomSeed) >>> 0,
+  siskanOutgroupMode: Number.isFinite(manualOutgroup) && manualOutgroup >= 1
+    ? "manual" as const
+    : requestedOutgroup === "most-divergent" || requestedOutgroup === "randomized"
+      ? requestedOutgroup
+      : "nearest" as const,
+  siskanOutgroupSequence: Number.isFinite(manualOutgroup) && manualOutgroup >= 1 && manualOutgroup <= alignment.sequences.length
+    ? Math.trunc(manualOutgroup - 1)
+    : null,
+  siskanPositionMode: requestedPositions === "quartet-variable" || requestedPositions === "all"
+    ? requestedPositions
+    : "triplet-variable" as const,
+  siskanGapMode: requestedGapMode === "fifth-state" ? "fifth-state" as const : "strip" as const,
+  siskanScanPermutations,
+  siskanPValuePermutations: Math.max(
+    siskanScanPermutations,
+    Math.min(10_000, Number(option("--siscan-final-permutations") ?? DEFAULT_OPTIONS.siskanPValuePermutations)),
+  ),
 };
 
 const wasmPath = fileURLToPath(new URL("../public/wasm/rdp.wasm", import.meta.url));

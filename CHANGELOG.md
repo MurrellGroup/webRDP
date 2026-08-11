@@ -1,5 +1,136 @@
 # Changelog
 
+## 0.9.1 — 2026-08-11
+
+- Replaced SiScan's final category-Z surrogate with the author-supplied RDP5
+  Sister-Scanning workflow: `GetSSOL` nearest/tree/direct outgroup selection,
+  the source 15 quartet-pattern categories and topology sums,
+  `DoPerms3P`/`MakeZValue2` vertical randomization, `FindMaxZ` topology runs,
+  `ShrinkRegionC` boundary refinement, and the desktop `NormalZ × L/region`
+  probability convention.
+- Added tunable nearest, most-divergent, horizontal-randomization, and explicit
+  analyst-selected fourth-sequence modes; triplet/quartet/all-position modes;
+  gap stripping/fifth-state modes; separate discovery/final permutation counts;
+  and full settings/project sanitization.
+- Preserved every significant source SiScan topology run for an ordered
+  triplet as a distinct event rather than retaining only the global optimum.
+  The fast WebAssembly category run is now only a candidate locator and can
+  never by itself count as SiScan support.
+- Added deterministic source provenance to every SiScan interval: fourth
+  sequence, selection path, pattern/sum family, topology change, scan/final
+  permutations, source routine chain, calibrated Z, raw probability, and a
+  bounded saved topology-window trace used by the interactive method plot.
+- Made the source workflow practical for long genomes: large `MakeVRand`
+  tables are regenerated from the identical MSVC stream instead of
+  materialized, fixed-outgroup window counts roll incrementally, and exact
+  vertical-permutation prefix ranges are cached across triplets. The 80 kb
+  source benchmark recovers a 15 kb tract in about 270 ms in the development
+  container while avoiding an approximately 80 MB random table.
+- Added direct quartet-table, outgroup, `NormalZ`, cached/streamed RNG
+  equivalence, exact synthetic-breakpoint, worker provenance, and two-signal
+  event-queue regressions, plus a long-genome performance gate.
+- Fixed method toggling so the minimum-support threshold is reduced with the
+  enabled-method count instead of leaving a hidden impossible threshold.
+- Replaced the PHI-labelled proximity surrogate with direct translations of
+  RDP5's `PHITest2`, `PHI`, `pair_score`, `GetFandG`, and
+  `AnalyticMeanVariance`: parsimony-informative sites now feed the source
+  multistate reticulation graph score and analytic normal tail. Large browser
+  jobs use a deterministic position-balanced site ceiling and record both the
+  retained and all-site counts instead of silently claiming an all-site test.
+
+## 0.9.0 — 2026-08-11
+
+- Added the RDP5 §4.1.6 working-alignment cycle: accepted co-recombinant tracts
+  are erased, copied into gap-padded component sequences, recursively split by
+  lineage for nested events, and rescanned. Signals crossing deleted sequence
+  are split into continuous pieces, and breakpoints near structural gaps are
+  persisted and displayed as uncertain.
+- Replaced the clustering topology proxy with six seeded Jukes–Cantor
+  neighbor-joining bootstrap trees per event, source-default 50% branch
+  collapse, source-style tree-position scoring, deterministic large-cohort
+  pruning, and tunable exact-site/balanced-block bootstrap controls.
+- Extended the direct RDP5 detector to retain multiple distinct raw excursions
+  per triplet, with a tunable 1–256 signal ceiling and explicit truncation
+  provenance, while preserving the compatibility export for the strongest
+  signal.
+- Enforced distinct reference-group parents in grouped query/reference scans
+  and moved rescanned event clustering onto the private disassembled component
+  alignment before mapping all roles back to original user sequences.
+- Ported the active RDP5 variable-nucleotide-position triplet detector from the
+  author-supplied source, including exact two-equal/one-different categories,
+  circular `2h+1` windows, pair ranking, medium-pair dominance,
+  `FindNextP`/`DefineEventP2` delineation, role polarity, and source probability
+  scaling.
+- Added source-mode BURT breakpoint refinement with the desktop fixed-three-
+  state model, 21 random starts, MSVC-compatible random stream, 100-iteration
+  ceiling, historical backtrace/sentinel behavior, and 95/99% confidence
+  intervals. The manual's tunable 2–20-state step-up mode remains available.
+- Ported the RDP5 `GetSupers` event-similarity merge and the principal
+  `MakeSDMP2`/`FillRmat`/`CalCR` co-recombinant logic: every retained event now
+  tests every other sequence under all three presumed-recombinant orientations,
+  applies the source six-cell distance correlations and SDM plausibility
+  filter, combines phylogenetic, distance, and detectable-signal evidence, and
+  retains sequences passing the configurable 2-of-3 rule even when they had no
+  independently retained signal.
+- Added an exact packed streaming maximum-distance kernel so source-normalized
+  event clustering remains memory-bounded on browser-scale alignments.
+- Stored method-specific full-alignment intervals for all seven methods and
+  exposed their ownership in plots, the inspector, project JSON, and CSV.
+- Removed the shared non-RDP candidate seed: every primary family now owns its
+  locator, directional families scan both parent orientations, and a method can
+  confirm an event only when its interval is co-located. Multiplicity now counts
+  unique unordered exploratory triplets and caches order-invariant RDP results.
+- Ported finite-G GENECONV fragment scoring plus `CalcKMaxP`/`GCCalcPValP`, and
+  moved MaxChi/Chimaera discovery into compressed informative-site coordinates
+  with the source probability multiplier.
+- Added a persisted RDP5 recombinant-identification ledger using direct
+  `MakePhPrScore`, `MakeTrpGroups`/`MakeTrpScore`, `MakeINList`/
+  `MakeOUCheck`, `SimpleDist`, `MakeSSDistB`, `GetBadDists`, `FindSets`,
+  `MakeEList`/`MakeListCorr`, `MakeLDist`/`MakeRCompat`, packed-WASM
+  `CalcMaxD`/`CMaxD2P3`, and default `MakeConsensusC` behavior. All 18
+  standalone source statistics, the final-trim penalty, six joint rules, VB6
+  banker’s-rounding gates, four-stage parsimony cascade,
+  historical-event set closure, PS gates, and final-trim penalties are shown
+  per polarity with the source 60% ambiguity rule; the auto-resolver has
+  tunable role-confidence gates and weights.
+- Added the desktop `GetWinPPfromDists`/TBreak tie path and a production-cohort
+  VisRD performance gate; the packed kernel evaluates a 30-taxon, 10 kb role
+  cohort in the release benchmark instead of leaving role latency unmeasured.
+- Added source-parity regressions for detector boundaries and probability,
+  BURT fitting/backtrace behavior, co-recombinant orientation screening,
+  unsignalled descendants, clustering, circular events, project round trips,
+  source recombinant-role identification, unique-triplet comparison scope,
+  independent method discovery, and the large-alignment worker path.
+
+## 0.8.0 — 2026-08-11
+
+- Audited the complete 52-page RDP5 manual plus the author-supplied Visual
+  Basic/native-source archive with the RDP authors' permission, and added a
+  source/manual-to-web workflow crosswalk with explicit parity boundaries.
+- Replaced the primary event stack with an integrated Review studio organized
+  around the desktop program's actual refinement sequence: signal,
+  breakpoints, roles, trees, co-recombinant grouping, decision, and rescan.
+- Added a bounded ordered queue with wrapping previous/next navigation,
+  best-unresolved selection, skip-accepted/rejected switches, minimum-method,
+  warning-only, and stale-only filters.
+- Added a selected-event dossier and review checklist for method confirmation,
+  breakpoint precision/freshness, role polarity, false-positive challenges,
+  and common-ancestor grouping; all-method and best-evidence modes now share
+  the same review surface.
+- Added a transparent three-polarity role-assignment workbench that auditions
+  each triplet member as the recombinant, exposes tract/background identities,
+  switch signal and informative-site count, and clearly labels the score as a
+  fast diagnostic rather than RDP5 classifier parity.
+- Added distinct per-sequence and whole-event-group decisions plus one-action
+  shared breakpoint transfer. Group edits are audited, undoable, and mark
+  affected downstream hypotheses stale.
+- Changed the local-tree default to recombinant tract versus combined
+  background, retained optional left/tract/right comparison, and clarified
+  that the connected rectangular NJ drawings are unrooted and
+  midpoint-oriented only for readability.
+- Added queue, grouping, checklist, polarity, workflow-wiring, and tree-guidance
+  regression coverage.
+
 ## 0.7.0 — 2026-08-11
 
 - Added an explainable ordered auto-resolver to Global reconstruction with

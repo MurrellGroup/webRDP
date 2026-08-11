@@ -3,7 +3,8 @@ import { affinityDescription, classifyParentAffinity, parentInformativeSites } f
 import { buildReconstructionModel, eventOverlapBases } from "../app/reconstruction";
 import { computeBreakpointPairDensity, computeLocalDiscordanceMatrices, computeRegionSeparationMatrices, eventContainsPosition } from "../app/pattern-matrices";
 import { AUTO_RESOLVE_PRESETS, applyAutoResolutionPlan, filterResolvedEventDuplicates, planAutoResolution, rescanTargetsForBarrier } from "../app/auto-resolve";
-import type { RdpEvent } from "../app/rdp-core";
+import { DEFAULT_REVIEW_FILTERS, bestUnresolvedEventId, buildReviewChecklist, eventGroupIndexes, filteredReviewIndexes, navigateReviewEvent, roleAssignmentTrials } from "../app/review-workflow";
+import type { AlignmentData, RdpEvent } from "../app/rdp-core";
 import { layoutNeighborJoiningTree } from "../app/tree-layout";
 
 assert.deepEqual(classifyParentAffinity("A", ["A", "C"]), { kind: "unique", parentSlots: [0] });
@@ -92,6 +93,41 @@ const strongEvent = makeEvent(20, {
   decision: "unreviewed",
   diagnostics: { tractVariableDensity: 0.2, backgroundVariableDensity: 0.18, rateRatio: 1.1, parentConflictRate: 0.02, parentDiscriminatingSites: 140, diffuseIncompatibility: false },
 });
+
+const reviewEvents = [
+  { ...strongEvent, id: "review-accepted", decision: "accepted" as const },
+  { ...strongEvent, id: "review-first", decision: "unreviewed" as const, evidence: evidence(3, 1e-4) },
+  { ...strongEvent, id: "review-rejected", decision: "rejected" as const },
+  { ...strongEvent, id: "review-best", decision: "unreviewed" as const, evidence: evidence(5, 1e-10), warnings: ["Check parent proxy"] },
+];
+assert.deepEqual(filteredReviewIndexes(reviewEvents, DEFAULT_REVIEW_FILTERS), [1, 3]);
+assert.equal(navigateReviewEvent(reviewEvents, "review-first", 1, DEFAULT_REVIEW_FILTERS), "review-best");
+assert.equal(navigateReviewEvent(reviewEvents, "review-best", 1, DEFAULT_REVIEW_FILTERS), "review-first", "ordered review navigation wraps after applying skip filters");
+assert.equal(navigateReviewEvent(reviewEvents, "review-first", -1, DEFAULT_REVIEW_FILTERS), "review-best");
+assert.equal(bestUnresolvedEventId(reviewEvents, DEFAULT_REVIEW_FILTERS), "review-best");
+assert.equal(bestUnresolvedEventId([{ ...reviewEvents[0], evidence: evidence(7, 1e-30) }, ...reviewEvents.slice(1)], { ...DEFAULT_REVIEW_FILTERS, skipAccepted: false }), "review-best", "best-unresolved navigation must never jump to a reviewed event");
+assert.deepEqual(filteredReviewIndexes(reviewEvents, { ...DEFAULT_REVIEW_FILTERS, warningsOnly: true }), [3]);
+assert.deepEqual(eventGroupIndexes([{ ...strongEvent, id: "group-a", groupId: "ancestor-1" }, { ...strongEvent, id: "group-b", groupId: "ancestor-1" }, { ...strongEvent, id: "group-c", groupId: null }], { ...strongEvent, id: "group-a", groupId: "ancestor-1" }), [0, 1]);
+assert.equal(buildReviewChecklist(strongEvent, 1_000).find((item) => item.key === "methods")?.state, "pass");
+assert.equal(buildReviewChecklist({ ...strongEvent, evidenceStale: true }, 1_000).find((item) => item.key === "breakpoints")?.state, "fail");
+
+const roleAlignment: AlignmentData = {
+  name: "role-polarity-fixture",
+  format: "generated",
+  length: 12,
+  createdAt: 0,
+  sequences: [
+    { name: "mosaic", sequence: "AAAACCCCAAAA" },
+    { name: "major", sequence: "AAAAAAAAAAAA" },
+    { name: "minor", sequence: "CCCCCCCCCCCC" },
+  ],
+};
+const roleEvent = makeEvent(40, { recombinant: 0, majorParent: 1, minorParent: 2, start: 4, end: 8, confidenceStart: [4, 4], confidenceEnd: [8, 8] });
+const trials = roleAssignmentTrials(roleAlignment, roleEvent);
+assert.equal(trials[0].key, "current");
+assert.equal(trials[0].tractMinorIdentity, 1);
+assert.equal(trials[0].backgroundMajorIdentity, 1);
+assert.equal(trials[0].score, Math.max(...trials.map((trial) => trial.score)), "the polarity diagnostic should rank the synthetic generating assignment first");
 const dependentEvent = makeEvent(21, {
   recombinant: 3,
   majorParent: 0,
@@ -117,6 +153,33 @@ const conservativePlan = planAutoResolution([strongEvent, dependentEvent, weakEv
 assert.equal(conservativePlan.entries[0].recommendation, "accept");
 assert.equal(conservativePlan.entries[1].recommendation, "accept");
 assert.equal(conservativePlan.entries[2].recommendation, "reject");
+const challengedRole = {
+  inference: "rdp5-source-profile-consensus" as const,
+  candidates: [0, 1, 2],
+  recommended: 1,
+  recommendedMajorParent: 0,
+  recommendedMinorParent: 2,
+  confidence: 0.8,
+  ambiguous: false,
+  sourceThreshold: 0.6,
+  orientations: [
+    { recombinant: 0, majorParent: 1, minorParent: 2, affinitySwitch: 0, candidateIndex: 0, sourcePoints: 10, sourceScore: 25, sourceShare: 0.1 },
+    { recombinant: 1, majorParent: 0, minorParent: 2, affinitySwitch: 0.2, candidateIndex: 1, sourcePoints: 80, sourceScore: 100, sourceShare: 0.8 },
+    { recombinant: 2, majorParent: 1, minorParent: 0, affinitySwitch: 0, candidateIndex: 2, sourcePoints: 10, sourceScore: 25, sourceShare: 0.1 },
+  ],
+  tests: [],
+  cohortSize: 4,
+  sourceSequenceCount: 4,
+  sampled: false,
+  treeEvidence: true,
+  bootstrapReplicates: 100,
+  bootstrapCutoff: 0.5,
+  implementedComponents: ["PhPr"],
+  pendingComponents: ["dMax"],
+} satisfies NonNullable<RdpEvent["recombinantIdentification"]>;
+const roleChallengePlan = planAutoResolution([{ ...strongEvent, recombinantIdentification: challengedRole }], 1_000, AUTO_RESOLVE_PRESETS.aggressive);
+assert.equal(roleChallengePlan.entries[0].recommendation, "review", "auto-resolution must hold a strong event when the source role consensus selects another triplet member");
+assert.match(roleChallengePlan.entries[0].reasons.join(" "), /another triplet member/);
 assert.equal(conservativePlan.barriers[0].afterEventIndex, 0, "recombinant-parent use must stop the ordered queue after its causal event");
 assert.deepEqual(conservativePlan.barriers[0].impactedTargetIndexes, [2, 3]);
 const firstAutoBatch = applyAutoResolutionPlan([strongEvent, dependentEvent, weakEvent], conservativePlan, conservativePlan.barriers[0].afterEventIndex, "conservative", "2026-08-11T00:00:00.000Z");

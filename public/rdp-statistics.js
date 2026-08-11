@@ -1,6 +1,6 @@
-// Clean-room probability calibrations for the RDP Web method-family kernels.
-// This module is deliberately dependency-free so the worker remains a single
-// static-site download and can run unchanged from a GitHub Pages subpath.
+// Probability calibrations for the RDP Web method-family kernels. Source-mode
+// calculations port the RDP5 implementation supplied by the original authors;
+// this dependency-free module still runs unchanged from a GitHub Pages subpath.
 
 export const METHODS = ["RDP", "GENECONV", "BootScan", "MaxChi", "Chimaera", "SiScan", "3Seq"];
 
@@ -108,6 +108,14 @@ function regularizedBeta(x, a, b) {
   return clampProbability(1 - (front * betaFraction(b, a, 1 - x)) / b);
 }
 
+export function studentTTwoSided(tStatistic, degreesOfFreedom) {
+  const t = Math.abs(Number(tStatistic));
+  const df = Number(degreesOfFreedom);
+  if (!Number.isFinite(t) || !(df > 0)) return 1;
+  if (t === 0) return 1;
+  return clampProbability(regularizedBeta(df / (df + t * t), df / 2, 0.5));
+}
+
 export function binomialUpper(successes, trials, probability) {
   if (successes <= 0) return 1;
   if (successes > trials) return Number.MIN_VALUE;
@@ -172,10 +180,81 @@ export function threeSeqExactP(upSteps, downSteps, observedDescent, maxOperation
   return { p, exact: true };
 }
 
-function identityRunUpperBound(run, eligible, backgroundMatches) {
-  if (run <= 0 || eligible <= 0) return 1;
-  const background = Math.max(1e-9, Math.min(1 - 1e-9, backgroundMatches / eligible));
-  return clampProbability(Math.max(1, eligible - run + 1) * Math.pow(background, run));
+// Direct G-scale 0 specialization of RDP5 CalcKMaxP + GCCalcPValP.
+// In the source, lambda=-log(Q), K=P and the Karlin-Altschul-like
+// probability is 1-exp[-exp{-(lambda*S-log(K*L))}]. With P=mismatches/L
+// and Q=matches/L this reduces to 1-exp[-mismatches*Q^S].
+export function geneconvSourceG0Probability(run, eligible, matchingSites) {
+  const length = Math.trunc(eligible);
+  const matches = Math.trunc(matchingSites);
+  const mismatches = length - matches;
+  if (run <= 3 || length <= 0 || matches <= 0 || mismatches <= 0) return 1;
+  const q = matches / length;
+  const poissonMean = mismatches * Math.pow(q, run);
+  return clampProbability(-Math.expm1(-poissonMean));
+}
+
+export function geneconvSourceProbability(score, eligible, matchingSites, gScale = 1) {
+  if (!(gScale > 0)) return geneconvSourceG0Probability(score, eligible, matchingSites);
+  const length = Math.trunc(eligible);
+  const matches = Math.trunc(matchingSites);
+  const mismatches = length - matches;
+  if (score <= 3 || length <= 0 || matches <= 0 || mismatches <= 0) return 1;
+  const mismatchProbability = mismatches / length;
+  const matchProbability = matches / length;
+  const mismatchPenalty = Math.floor(length * gScale / mismatches) + 1;
+  const weightedMismatch = mismatchPenalty * mismatchProbability;
+  if (!(weightedMismatch > matchProbability)) return 1;
+  let z = Math.exp((2 * Math.log(weightedMismatch / matchProbability)) / (mismatchPenalty + 1));
+  for (let iteration = 0; iteration < 10_000; iteration += 1) {
+    const inversePower = Math.pow(z, -mismatchPenalty);
+    const residual = matchProbability * z + mismatchProbability * inversePower - 1;
+    const derivative = matchProbability - weightedMismatch * inversePower / z;
+    if (!(Math.abs(derivative) > 1e-15)) return 1;
+    const delta = residual / derivative;
+    z -= delta;
+    if (!(z > 1) || !Number.isFinite(z)) return 1;
+    if (Math.abs(delta) <= 1e-6 && Math.abs(residual) <= 1e-6) break;
+  }
+  const lambda = Math.log(z);
+  const k = (z - 1) * (
+    matchProbability
+      - weightedMismatch * Math.exp(-(mismatchPenalty + 1) * lambda)
+  );
+  if (!(lambda > 0) || !(k > 0)) return 1;
+  const kaScore = lambda * score - Math.log(k * length);
+  if (!(kaScore > 0)) return 1;
+  const poissonMean = Math.exp(-Math.min(kaScore, 745));
+  return clampProbability(kaScore < 32 ? -Math.expm1(-poissonMean) : poissonMean);
+}
+
+// FastRecCheckMC/FastRecCheckChim apply the one-degree-of-freedom chi-square
+// tail to the best peak, multiply by the number of half-window placements in
+// compressed informative-site space, then by the three pairwise triplet
+// orientations. Experiment-wide correction is applied separately below.
+export function sourceChiWindowProbability(statistic, informativeSites, fullWindow) {
+  const halfWindow = Math.max(8, Math.floor(fullWindow / 2));
+  const placements = Math.max(1, informativeSites / halfWindow);
+  return clampProbability(chiSquareP(statistic) * placements * 3);
+}
+
+export function rdp5SourceProbability(source) {
+  if (!source || source.tractSites <= 0 || source.common <= 0 || source.mediumSites <= 0) return null;
+  const originalLength = Math.trunc(source.tractSites);
+  let tractLength = originalLength;
+  let common = Math.trunc(source.common);
+  let exponent = 1;
+  if (tractLength >= 170) {
+    exponent = tractLength / 169;
+    const different = Math.round((tractLength - common) * 169 / tractLength);
+    tractLength = 169;
+    common = tractLength - different;
+  }
+  const identity = Math.max(1e-12, Math.min(1 - 1e-12, source.mediumSites / Math.max(1, source.informativeSites ?? 1)));
+  const probabilitySites = Math.max(1, source.probabilitySites ?? source.informativeSites ?? 1);
+  let probability = binomialUpper(common, tractLength, identity) * (probabilitySites / tractLength);
+  if (exponent > 1.000001) probability = probability > 0 ? Math.pow(probability, exponent) : 0.05;
+  return clampProbability(Math.max(1e-300, probability));
 }
 
 function corrected(raw, correction, comparisons) {
@@ -189,8 +268,12 @@ export function methodEvidence(candidate, stats, options, comparisons, nSites) {
   const outsideTotal = candidate.outsideMinor + candidate.outsideMajor;
   const backgroundMinor = candidate.outsideMinor / Math.max(1, outsideTotal);
   const windowTests = Math.max(1, Math.floor(Math.max(0, nSites - options.window) / Math.max(1, options.step)) + 1);
-  const partitionTests = Math.max(1, nSites - 1);
-  const sisterZ = stats.siskanScore / Math.sqrt(Math.max(1, stats.siskanSites));
+  const sourceSiScanAvailable = Number.isFinite(stats.siskanSourceZ)
+    && Number.isFinite(stats.siskanSourceP)
+    && typeof stats.siskanSourceRoutine === "string";
+  const sisterZ = sourceSiScanAvailable
+    ? stats.siskanSourceZ
+    : stats.siskanScore / Math.sqrt(Math.max(1, stats.siskanSites));
   const descent = stats.threeSeqDescent ?? stats.threeSeqBridge / 1000;
   const exactThreeSeq = options.methods.includes("3Seq")
     ? threeSeqExactP(
@@ -208,19 +291,24 @@ export function methodEvidence(candidate, stats, options, comparisons, nSites) {
     ? binomialUpper(stats.bootscanBootstrapConsistent, stats.bootscanBootstrapReplicates, 0.5)
     : 1;
   const windowSignP = binomialUpper(stats.bootscanConsistent, stats.bootscanWindows, 0.5);
+  const sourceRdpP = rdp5SourceProbability(stats.rdpSource
+    ? { ...stats.rdpSource, informativeSites: candidate.informative }
+    : null);
+  const hasSignalLedger = Array.isArray(candidate.methodSignals);
+  const locatedMethods = new Set((candidate.methodSignals ?? []).map((signal) => signal.method));
 
   const calculations = {
     RDP: {
-      p: clampProbability(binomialUpper(candidate.insideMinor, insideTotal, backgroundMinor) * windowTests),
+      p: sourceRdpP ?? clampProbability(binomialUpper(candidate.insideMinor, insideTotal, backgroundMinor) * windowTests),
       statistic: candidate.insideMinor / Math.max(1, insideTotal) - backgroundMinor,
       statisticLabel: "identity shift",
-      calibration: "binomial · window-corrected",
+      calibration: sourceRdpP === null ? "binomial · window-corrected fallback" : "RDP5 ProbCalcP/P2-equivalent binomial tail",
     },
     GENECONV: {
-      p: identityRunUpperBound(stats.genconvRun, stats.genconvEligible, stats.genconvMatches),
+      p: geneconvSourceProbability(stats.genconvRun, stats.genconvEligible, stats.genconvMatches, options.geneconvGScale ?? 1),
       statistic: stats.genconvRun,
-      statisticLabel: "concordant run",
-      calibration: "G-scale 0 run bound",
+      statisticLabel: "fragment score",
+      calibration: `RDP5 CalcKMaxP/GCCalcPValP · G-scale ${options.geneconvGScale ?? 1}`,
     },
     BootScan: {
       p: bootstrapAvailable ? Math.max(windowSignP, bootstrapP) : windowSignP,
@@ -233,22 +321,26 @@ export function methodEvidence(candidate, stats, options, comparisons, nSites) {
         : "distance-window sign test",
     },
     MaxChi: {
-      p: clampProbability(chiSquareP(stats.maxChi) * partitionTests),
+      p: sourceChiWindowProbability(stats.maxChi, stats.genconvEligible, options.window),
       statistic: stats.maxChi,
       statisticLabel: "minimum boundary χ²",
-      calibration: "χ² · partition-corrected",
+      calibration: "RDP5 ChiPVal2P · informative half-window × 3",
     },
     Chimaera: {
-      p: clampProbability(chiSquareP(stats.chimaera) * partitionTests),
+      p: sourceChiWindowProbability(stats.chimaera, stats.threeSeqSites, options.window),
       statistic: stats.chimaera,
       statisticLabel: "minimum boundary χ²",
-      calibration: "binary-triplet χ²",
+      calibration: "RDP5 ChiPVal2P · binary half-window × 3",
     },
     SiScan: {
-      p: clampProbability(normalTwoSided(sisterZ) * windowTests),
+      p: sourceSiScanAvailable
+        ? clampProbability(stats.siskanSourceP)
+        : clampProbability(normalTwoSided(sisterZ) * windowTests),
       statistic: sisterZ,
-      statisticLabel: "oriented category Z",
-      calibration: "fast category-Z surrogate",
+      statisticLabel: sourceSiScanAvailable ? "Sister-Scanning category/sum Z" : "oriented category Z",
+      calibration: sourceSiScanAvailable
+        ? `RDP5 vertical permutation Z (${stats.siskanPValuePermutations} replicates) · ${stats.siskanOutgroupMode} outgroup · ${stats.siskanPositionMode}`
+        : "fast category-Z locator fallback",
     },
     "3Seq": {
       p: exactThreeSeq.p ?? clampProbability(threeSeqBound),
@@ -262,6 +354,20 @@ export function methodEvidence(candidate, stats, options, comparisons, nSites) {
     .filter((method) => options.methods.includes(method))
     .map((method) => {
       const calculation = calculations[method];
+      const coLocated = !hasSignalLedger || locatedMethods.has(method);
+      if (!coLocated) {
+        return {
+          method,
+          pValue: 1,
+          correctedP: 1,
+          score: 0,
+          supported: false,
+          statistic: calculation.statistic,
+          statisticLabel: calculation.statisticLabel,
+          calibration: "no co-located discovery signal",
+          correctionScope: "Not entered into the retained signal family",
+        };
+      }
       const pValue = clampProbability(calculation.p);
       const correctedP = corrected(pValue, options.correction, comparisons);
       return {

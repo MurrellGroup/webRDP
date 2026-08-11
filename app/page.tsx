@@ -66,6 +66,18 @@ import {
   type AutoResolvePresetName,
   type AutoResolveSettings,
 } from "./auto-resolve";
+import {
+  DEFAULT_REVIEW_FILTERS,
+  bestCorrectedP,
+  bestUnresolvedEventId,
+  buildReviewChecklist,
+  eventGroupIndexes,
+  filteredReviewIndexes,
+  navigateReviewEvent,
+  roleAssignmentTrials,
+  supportingMethodCount,
+  type ReviewQueueFilters,
+} from "./review-workflow";
 
 type Tab = "explore" | "reconstruction" | "trees" | "alignment" | "patterns" | "export" | "methods";
 type RunState = "idle" | "running" | "complete" | "error";
@@ -83,8 +95,10 @@ interface RunMetrics {
   engine: string;
   matrixMode?: string;
   parentSamples?: number;
-  timing?: { distanceMs: number; scanMs: number; statisticsMs: number; diagnosticsMs?: number };
+  timing?: { distanceMs: number; scanMs: number; statisticsMs: number; diagnosticsMs?: number; clusteringMs?: number };
   diagnostics?: AlignmentDiagnostics;
+  disassembly?: { appliedEvents: number; components: number; erasedCanonicalBases: number };
+  rdpSignalTruncations?: number;
 }
 
 interface AutoResolveStatus {
@@ -113,6 +127,7 @@ interface AutoResolveSession {
 interface AnalysisLaunchConfig {
   excludedTargets?: number[];
   excludedParents?: number[];
+  disassemblyEvents?: RdpEvent[];
   retainedEvents?: RdpEvent[];
   filterResolvedAgainst?: RdpEvent[];
   resetEditHistory?: boolean;
@@ -121,47 +136,57 @@ interface AnalysisLaunchConfig {
   onComplete?: (events: RdpEvent[]) => void;
 }
 
+function acceptedMosaicOrigins(events: RdpEvent[]): number[] {
+  const origins = new Set<number>();
+  for (const event of events) {
+    origins.add(event.recombinant);
+    const orientation = event.coRecombinantSets?.find((set) => set.presumedRecombinant === event.recombinant);
+    for (const member of orientation?.sequenceMembers ?? event.ancestralCluster?.sequenceMembers ?? []) origins.add(member);
+  }
+  return [...origins];
+}
+
 const METHOD_META: Record<MethodName, { family: string; detail: string; limit: string; citation: string }> = {
   RDP: {
     family: "Identity / triplet",
-    detail: "Informative-site triplet scan with binomial assessment of identity runs.",
-    limit: "Current candidate generation is shared with the triplet CUSUM screen; numerical parity with desktop RDP is not established.",
+    detail: "RDP5 pair-match VNP scan with source event delineation and binomial-tail assessment.",
+    limit: "The active FindSubSeqPB3 → XOHomologyP2 → FindNextP → DefineEventP2 path is ported; corpus-level numerical validation against desktop output remains in progress.",
     citation: "https://doi.org/10.1093/bioinformatics/16.6.562",
   },
   GENECONV: {
     family: "Substitution distribution",
-    detail: "Unusually long fragments of pairwise identity relative to the alignment background.",
-    limit: "Uses a G-scale-0 run bound, not the complete GENECONV mismatch-penalty and permutation model.",
+    detail: "RDP5 fragment scoring with a tunable G-scale mismatch penalty and Karlin–Altschul-like calibration.",
+    limit: "The active triplet fragment score and CalcKMaxP/GCCalcPValP path are ported; indel-run modes, overlapping-fragment suppression and empirical permutations remain validation work.",
     citation: "https://doi.org/10.1006/viro.1999.0058",
   },
   BootScan: {
     family: "Phylogenetic / windowed",
     detail: "Windowed support for changes in the recombinant’s closest relative.",
-    limit: "Uses seeded p-distance triplet resampling, not full multi-taxon neighbor-joining bootstrap parity.",
+    limit: "Stores an independent longest minor-topology window run and seeded p-distance triplet resampling; full multi-taxon neighbor-joining bootstrap parity remains.",
     citation: "https://doi.org/10.1089/aid.2005.21.98",
   },
   MaxChi: {
     family: "Substitution distribution",
     detail: "Maximum chi-square contrasts across variable sites around candidate breakpoints.",
-    limit: "Evaluates shared candidate boundaries; it is not yet an independent MaxChi candidate scan.",
+    limit: "Uses independent compressed-variable-site χ² windows and the source peak correction; exact FastRecCheckMC peak growth/smoothing-table edge behavior remains validation work.",
     citation: "https://doi.org/10.1007/BF00182389",
   },
   Chimaera: {
     family: "Substitution distribution",
     detail: "Two-state refinement of MaxChi-style breakpoint evidence in sequence triplets.",
-    limit: "Evaluates shared candidate boundaries; full Chimaera scan and calibration parity remain validation work.",
+    limit: "Uses independent source-style binary compression, variable-site χ² windows and peak correction; exact FastRecCheckChim peak growth edge behavior remains validation work.",
     citation: "https://doi.org/10.1073/pnas.241370698",
   },
   SiScan: {
     family: "Site-category / permutation",
-    detail: "Fast oriented category-Z evidence; outgroup permutations remain on the parity track.",
-    limit: "This is a category-Z surrogate without the complete SiScan permutation and outgroup procedure.",
+    detail: "RDP5 Sister-Scanning with the original 15 site categories, tree/direct outgroup selection, vertical randomization, topology runs, shrinkage, and whole-region Z calibration.",
+    limit: "The source GetSSOL/Get3Score/DoPerms3P/MakeZValue2/FindMaxZ path is active. Cohorts above 128 taxa use GetSSOL's direct-distance fallback instead of constructing the cubic whole-alignment NJ path; desktop golden-corpus validation remains.",
     citation: "https://doi.org/10.1093/bioinformatics/16.7.573",
   },
   "3Seq": {
     family: "Non-parametric triplet",
     detail: "Maximum-descent hypergeometric random walk with exact bounded dynamic-program calibration.",
-    limit: "Exact DP is operation-bounded and falls back to a conservative bound; candidates still come from the shared screen.",
+    limit: "The maximum-descent interval is localized independently; exact DP is operation-bounded and falls back to a conservative bound for very large state spaces.",
     citation: "https://doi.org/10.1093/molbev/msx263",
   },
 };
@@ -591,7 +616,22 @@ function EventTable({ alignment, events, selectedId, onSelect }: {
 }
 
 function MethodSpecificPlot({ alignment, event, method, window }: { alignment: AlignmentData; event: RdpEvent; method: MethodName; window: number }) {
+  const selectedSignal = event.methodSignals?.find((signal) => signal.method === method);
+  const selectedProfile = selectedSignal?.profile;
+  const selectedTopology = selectedSignal?.inferredTopology;
   const points = useMemo(() => {
+    if (method === "SiScan" && selectedProfile?.length) {
+      return {
+        values: selectedProfile.map((point) => ({
+          position: point.position,
+          value: point.topology === point.baselineTopology
+            ? 0
+            : point.topology === selectedTopology ? point.z : -point.z,
+        })),
+        label: "RDP5 source topology-run Z · selected alternative above zero, competing alternative below",
+        baseline: 0,
+      };
+    }
     const recombinant = alignment.sequences[event.recombinant].sequence;
     const major = alignment.sequences[event.majorParent].sequence;
     const minor = alignment.sequences[event.minorParent].sequence;
@@ -673,14 +713,14 @@ function MethodSpecificPlot({ alignment, event, method, window }: { alignment: A
     }
     const labels: Record<Exclude<MethodName, "3Seq">, string> = {
       RDP: "Minor-minus-major match fraction at parent-discriminating sites",
-      GENECONV: "Longest local minor-parent concordant run",
+      GENECONV: "Highest-scoring local recombinant:parent fragment",
       BootScan: "Minor-minus-major window identity",
       MaxChi: "Local 2×2 boundary χ² profile",
       Chimaera: "Binary parent-state contrast across boundary",
-      SiScan: "Oriented parent-category Z profile",
+      SiScan: "Fast oriented locator profile (saved evidence uses the source 15-category permutation scan)",
     };
     return { values: output, label: labels[method], baseline: method === "RDP" || method === "BootScan" || method === "SiScan" ? 0 : undefined };
-  }, [alignment, event, method, window]);
+  }, [alignment, event, method, selectedProfile, selectedTopology, window]);
   const width = 900;
   const height = 150;
   const left = 42;
@@ -696,34 +736,35 @@ function MethodSpecificPlot({ alignment, event, method, window }: { alignment: A
   const y = (value: number) => top + (high - value) / Math.max(0.001, high - low) * (height - top - bottom);
   const path = points.values.map((point, index) => `${index ? "L" : "M"}${x(point.position).toFixed(1)},${y(point.value).toFixed(1)}`).join(" ");
   return <div className="method-profile">
-    <div><b>{method}-specific exploratory profile</b><span>{points.label}</span></div>
+    <div><b>{method}-specific exploratory profile</b><span>{points.label}{selectedSignal ? ` · independent call ${selectedSignal.start + 1}–${selectedSignal.end}` : " · evaluated at consensus event"}</span></div>
     <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${method} profile across the alignment`}>
-      {eventSegments(event, alignment.length).map(([start, end], index) => <rect key={index} x={x(start)} y={top} width={Math.max(1, x(end) - x(start))} height={height - top - bottom} className="method-profile-tract"/>)}
+      {eventSegments(selectedSignal ?? event, alignment.length).map(([start, end], index) => <rect key={index} x={x(start)} y={top} width={Math.max(1, x(end) - x(start))} height={height - top - bottom} className="method-profile-tract"/>)}
       {points.baseline !== undefined && <line x1={left} x2={width - right} y1={y(points.baseline)} y2={y(points.baseline)} className="method-profile-zero"/>}
       <path d={path} className="method-profile-line"/>
-      <line x1={x(event.start)} x2={x(event.start)} y1={top} y2={height - bottom} className="breakpoint-line"/>
-      <line x1={x(event.end)} x2={x(event.end)} y1={top} y2={height - bottom} className="breakpoint-line"/>
+      <line x1={x(selectedSignal?.start ?? event.start)} x2={x(selectedSignal?.start ?? event.start)} y1={top} y2={height - bottom} className="breakpoint-line"/>
+      <line x1={x(selectedSignal?.end ?? event.end)} x2={x(selectedSignal?.end ?? event.end)} y1={top} y2={height - bottom} className="breakpoint-line"/>
       <text x={4} y={top + 5} className="axis-label">{maximum.toPrecision(3)}</text>
       <text x={4} y={height - bottom} className="axis-label">{minimum.toPrecision(3)}</text>
       <text x={left} y={height - 7} className="axis-label">1</text>
       <text x={width - right} y={height - 7} textAnchor="end" className="axis-label">{alignment.length.toLocaleString("en-US")}</text>
     </svg>
-    <p>This bounded profile is calculated only for the selected triplet and is intended for visual review. The saved p-value above comes from the worker statistic and its documented calibration.</p>
+    <p>{method === "SiScan" && selectedSignal?.profile?.length ? "The line is the saved source permutation scan, decimated only for project/UI size; zero is the whole-alignment topology, the selected alternative is positive, and the competing alternative is negative. " : ""}{selectedSignal ? `${selectedSignal.locator} supplied the shaded method interval; the dashed lines are its breakpoints.` : "No independent locator is stored for this method yet, so the shaded interval is the consensus event."} The saved p-value above comes from the worker statistic and its documented calibration.</p>
   </div>;
 }
 
-function MethodEvidencePanel({ alignment, event, window, selectedMethod, onSelectMethod }: {
+function MethodEvidencePanel({ alignment, event, window, selectedMethod, onSelectMethod, mode = "all" }: {
   alignment: AlignmentData;
   event: RdpEvent;
   window: number;
   selectedMethod: MethodName;
   onSelectMethod: (method: MethodName) => void;
+  mode?: "all" | "best";
 }) {
   const evidence = event.evidence.find((item) => item.method === selectedMethod);
   const supported = event.evidence.filter((item) => item.supported).length;
   return <div className="method-result-explorer">
     <div className="method-result-tabs" role="tablist" aria-label="Method results">
-      {PRIMARY_METHODS.map((method) => {
+      {(mode === "best" ? [selectedMethod] : PRIMARY_METHODS).map((method) => {
         const item = event.evidence.find((candidate) => candidate.method === method);
         return <button type="button" role="tab" aria-selected={selectedMethod === method} key={method} className={`${selectedMethod === method ? "active" : ""} ${item?.supported ? "supported" : item ? "not-supported" : "not-run"}`} onClick={() => onSelectMethod(method)}><span>{item?.supported ? "✓" : item ? "·" : "—"}</span><b>{method}</b><small>{item ? formatP(item.correctedP) : "not run"}</small></button>;
       })}
@@ -746,6 +787,115 @@ function MethodEvidencePanel({ alignment, event, window, selectedMethod, onSelec
       <div className="method-limit"><strong>Interpretation limit</strong><span>{METHOD_META[selectedMethod].limit}</span><a href={METHOD_META[selectedMethod].citation} target="_blank" rel="noreferrer">Primary paper ↗</a></div>
     </div>
     <MethodSpecificPlot alignment={alignment} event={event} method={selectedMethod} window={window}/>
+  </div>;
+}
+
+function ReviewWorkspace({
+  alignment,
+  events,
+  selectedId,
+  window,
+  circular,
+  selectedMethod,
+  onSelectMethod,
+  onSelect,
+  onUpdate,
+  onRescan,
+  onRun,
+  onOpenTrees,
+  onCreateManual,
+  onExportCsv,
+  rescanning,
+}: {
+  alignment: AlignmentData;
+  events: RdpEvent[];
+  selectedId: string | null;
+  window: number;
+  circular: boolean;
+  selectedMethod: MethodName;
+  onSelectMethod: (method: MethodName) => void;
+  onSelect: (id: string) => void;
+  onUpdate: (patch: Partial<RdpEvent>, action?: string) => void;
+  onRescan: () => void;
+  onRun: () => void;
+  onOpenTrees: () => void;
+  onCreateManual: () => void;
+  onExportCsv: () => void;
+  rescanning: boolean;
+}) {
+  const [filters, setFilters] = useState<ReviewQueueFilters>(() => ({ ...DEFAULT_REVIEW_FILTERS }));
+  const [evidenceMode, setEvidenceMode] = useState<"best" | "all">("all");
+  const selectedIndex = events.findIndex((event) => event.id === selectedId);
+  const event = selectedIndex >= 0 ? events[selectedIndex] : null;
+  const queueIndexes = useMemo(() => filteredReviewIndexes(events, filters), [events, filters]);
+  const checklist = useMemo(() => event ? buildReviewChecklist(event, alignment.length) : [], [alignment.length, event]);
+  const bestMethod = useMemo(() => {
+    if (!event?.evidence.length) return selectedMethod;
+    return [...event.evidence].sort((left, right) => left.correctedP - right.correctedP)[0].method;
+  }, [event, selectedMethod]);
+  const displayMethod = evidenceMode === "best" ? bestMethod : selectedMethod;
+  const unresolved = events.filter((candidate) => candidate.decision === "unreviewed").length;
+  const stale = events.filter((candidate) => candidate.evidenceStale).length;
+  const currentQueuePosition = queueIndexes.findIndex((index) => index === selectedIndex);
+  const navigate = (direction: -1 | 1) => {
+    const nextId = navigateReviewEvent(events, selectedId, direction, filters);
+    if (nextId) onSelect(nextId);
+  };
+  const goBest = () => {
+    const nextId = bestUnresolvedEventId(events, filters);
+    if (nextId) onSelect(nextId);
+  };
+  const patchFilter = <K extends keyof ReviewQueueFilters>(key: K, value: ReviewQueueFilters[K]) => setFilters((current) => ({ ...current, [key]: value }));
+  const groupSize = event ? eventGroupIndexes(events, event).length : 0;
+  const workflowStages = event ? [
+    { label: "Signal", detail: `${supportingMethodCount(event)} supporting methods`, state: event.evidence.length ? "done" : "active" },
+    { label: "Breakpoints", detail: formatEventRegion(event, alignment.length), state: event.evidenceStale ? "warning" : "done" },
+    { label: "Roles", detail: "Recombinant + parent proxies", state: checklist.find((item) => item.key === "roles")?.state === "pass" ? "done" : "active" },
+    { label: "Trees", detail: "Tract vs background", state: "active" },
+    { label: "Grouping", detail: event.groupId ? `${event.groupId} · ${groupSize} member${groupSize === 1 ? "" : "s"}` : "No ancestor group", state: event.groupId ? "done" : "active" },
+    { label: "Decision", detail: event.decision, state: event.decision === "unreviewed" ? "active" : "done" },
+  ] : [];
+
+  return <div className="review-workspace">
+    <section className="review-hero">
+      <div><span className="eyebrow">RDP5-style hypothesis refinement</span><h1>Review early events first; every edit can change what comes next.</h1><p>The queue follows characterization order. Confirm the signal, refine breakpoints, challenge sequence roles in local trees, group co-recombinants, decide, then rescan only when an upstream change makes later evidence stale.</p></div>
+      <div className="review-hero-metrics"><span><b>{unresolved}</b>unresolved</span><span className={stale ? "warning" : ""}><b>{stale}</b>need rescan</span><span><b>{events.length - unresolved}</b>reviewed</span></div>
+    </section>
+
+    {event && <div className="review-stage-strip" aria-label="Selected event review stages">{workflowStages.map((stage, index) => <button type="button" key={stage.label} className={stage.state} onClick={() => { if (stage.label === "Trees") onOpenTrees(); }}><i>{index + 1}</i><span><b>{stage.label}</b><small>{stage.detail}</small></span></button>)}</div>}
+
+    <Panel title="Ordered reconstruction queue" className="review-queue-panel" action={<div className="review-queue-actions"><span>{queueIndexes.length ? `${Math.max(1, currentQueuePosition + 1)} / ${queueIndexes.length}` : "0 matching"}</span><button type="button" className="small-button" disabled={!queueIndexes.length} onClick={() => navigate(-1)}>← Previous</button><button type="button" className="small-button" disabled={!queueIndexes.length} onClick={() => navigate(1)}>Next →</button><button type="button" className="small-button best" disabled={!queueIndexes.length} onClick={goBest}>Best unresolved</button></div>}>
+      <div className="review-queue-shell">
+        <div className="review-queue-filters">
+          <label><span>Minimum support</span><select value={filters.minimumMethods} onChange={(change) => patchFilter("minimumMethods", Number(change.target.value))}>{Array.from({ length: PRIMARY_METHODS.length + 1 }, (_, count) => <option value={count} key={count}>{count === 0 ? "Any method count" : `${count}+ methods`}</option>)}</select></label>
+          <label className="review-filter-check"><input type="checkbox" checked={filters.skipAccepted} onChange={(change) => patchFilter("skipAccepted", change.target.checked)}/><i/><span>Skip accepted</span></label>
+          <label className="review-filter-check"><input type="checkbox" checked={filters.skipRejected} onChange={(change) => patchFilter("skipRejected", change.target.checked)}/><i/><span>Skip rejected</span></label>
+          <label className="review-filter-check"><input type="checkbox" checked={filters.warningsOnly} onChange={(change) => patchFilter("warningsOnly", change.target.checked)}/><i/><span>Warnings only</span></label>
+          <label className="review-filter-check"><input type="checkbox" checked={filters.staleOnly} onChange={(change) => patchFilter("staleOnly", change.target.checked)}/><i/><span>Needs rescan</span></label>
+          <button type="button" onClick={() => setFilters({ ...DEFAULT_REVIEW_FILTERS })}>Reset filters</button>
+        </div>
+        <div className="review-queue-list" role="listbox" aria-label="Recombination-event review queue">
+          {queueIndexes.length ? queueIndexes.map((index) => {
+            const candidate = events[index];
+            const supported = supportingMethodCount(candidate);
+            return <button type="button" role="option" aria-selected={candidate.id === selectedId} className={`${candidate.id === selectedId ? "selected" : ""} ${candidate.decision}`} key={candidate.id} onClick={() => onSelect(candidate.id)}><span className="review-event-number">E{index + 1}</span><div><b>{alignment.sequences[candidate.recombinant]?.name ?? "Unknown recombinant"}</b><small>{formatEventRegion(candidate, alignment.length)} · {alignment.sequences[candidate.majorParent]?.name ?? "?"} → {alignment.sequences[candidate.minorParent]?.name ?? "?"}</small></div><span className="review-method-count">{supported}/{candidate.evidence.length || PRIMARY_METHODS.length}<small>methods</small></span><code>{formatP(bestCorrectedP(candidate))}</code><span className={`decision-label ${candidate.decision}`}>{candidate.decision}</span>{candidate.warnings.length > 0 && <i title={`${candidate.warnings.length} review warning${candidate.warnings.length === 1 ? "" : "s"}`}>!</i>}{candidate.evidenceStale && <em>rescan</em>}</button>;
+          }) : <div className="empty-state compact">No events match the review filters. Reset the filters or run a scan.</div>}
+        </div>
+      </div>
+    </Panel>
+
+    {event ? <>
+      <div className="review-dossier">
+        <section><span className="eyebrow">Selected dossier · E{selectedIndex + 1}</span><h2>{alignment.sequences[event.recombinant]?.name}</h2><div><span><i className="parent-role major"/>Major proxy <b>{alignment.sequences[event.majorParent]?.name}</b></span><span><i className="parent-role minor"/>Minor proxy <b>{alignment.sequences[event.minorParent]?.name}</b></span><span>Region <b className="mono">{formatEventRegion(event, alignment.length)}</b></span></div></section>
+        <div className="review-checklist">{checklist.map((item) => <article className={item.state} key={item.key}><i>{item.state === "pass" ? "✓" : item.state === "fail" ? "!" : "·"}</i><div><b>{item.label}</b><small>{item.detail}</small></div></article>)}</div>
+        <div className="review-dossier-actions"><button type="button" onClick={onOpenTrees}>⑂ Compare local trees</button>{stale > 0 && <button type="button" className="rescan" disabled={rescanning} onClick={onRescan}>{rescanning ? "Rescanning…" : `↻ Rescan ${stale} stale event${stale === 1 ? "" : "s"}`}</button>}</div>
+      </div>
+      <Panel title="Recombination map" action={<div className="map-summary"><span className="status-chip">{events.filter((candidate) => candidate.decision !== "rejected").length} visible events</span><span>{events.length - unresolved}/{events.length} reviewed</span></div>}><Overview alignment={alignment} events={events} selectedId={selectedId} onSelect={onSelect}/></Panel>
+      <Panel title="Method-by-method confirmation" action={<div className="review-evidence-mode"><Segmented value={evidenceMode} options={[{ value: "all", label: "All methods" }, { value: "best", label: "Best evidence" }]} onChange={setEvidenceMode}/><span className={`decision-label ${event.evidenceStale ? "unreviewed" : event.decision}`}>{event.evidenceStale ? "evidence stale" : event.decision}</span></div>}><MethodEvidencePanel alignment={alignment} event={event} window={window} selectedMethod={displayMethod} onSelectMethod={onSelectMethod} mode={evidenceMode}/></Panel>
+      <Panel title="Breakpoint placement" action={<div className="region-chip"><span>Identity context · drag either boundary</span><b>{formatEventRegion(event, alignment.length)}</b></div>}><EvidencePlot alignment={alignment} event={event} window={window} circular={circular} onUpdate={onUpdate}/></Panel>
+    </> : <div className="empty-state"><span className="empty-mark">∿</span><h2>No hypothesis selected</h2><p>Run the enabled methods, create a manual hypothesis, or load a truth-annotated example.</p><div className="empty-actions"><button type="button" className="run-inline" onClick={onRun}><Icon name="run"/> Run local scan</button><button type="button" className="small-button" onClick={onCreateManual}>＋ Manual event</button></div></div>}
+
+    <Panel title="All event hypotheses" action={<div className="table-actions"><button className="small-button" type="button" onClick={onCreateManual}>＋ Manual event</button><button className="small-button" type="button" onClick={onExportCsv}><Icon name="download" size={14}/> CSV</button></div>}><EventTable alignment={alignment} events={events} selectedId={selectedId} onSelect={onSelect}/></Panel>
   </div>;
 }
 
@@ -1143,11 +1293,16 @@ function TopologyCards({ alignment, event }: { alignment: AlignmentData; event: 
 }
 
 function ChallengeDiagnostics({ diagnostics, event }: { diagnostics?: AlignmentDiagnostics; event: RdpEvent | null }) {
-  if (!diagnostics) return <div className="empty-state compact">Run a scan to calculate bounded four-gamete and rate-variation diagnostics.</div>;
+  if (!diagnostics) return <div className="empty-state compact">Run a scan to calculate source PHI, four-gamete, and rate-variation diagnostics.</div>;
+  const phiSites = diagnostics.phiInformativeSites ?? 0;
+  const phiTotal = diagnostics.phiTotalInformativeSites ?? phiSites;
   const values = [
+    ["RDP5 PHI analytic p", formatP(diagnostics.phiPValue ?? 1), diagnostics.phiValidNormalApproximation
+      ? `${diagnostics.phiSubsampled ? `${phiSites.toLocaleString("en-US")} position-balanced of ${phiTotal.toLocaleString("en-US")}` : `${phiSites.toLocaleString("en-US")} all`} parsimony-informative sites · k ${diagnostics.phiK ?? 0} · source PHITest2 moments`
+      : `${phiSites.toLocaleString("en-US")} informative sites · normal approximation unavailable`],
     ["Four-gamete incompatible", `${(diagnostics.fourGameteFraction * 100).toFixed(1)}%`, `${diagnostics.incompatibleSitePairs.toLocaleString("en-US")} / ${diagnostics.testedSitePairs.toLocaleString("en-US")} sampled site pairs`],
     ["Proximity permutation", formatP(diagnostics.proximityPermutationP), `One-sided four-gamete distance-clustering test · Δ ${(diagnostics.proximityStatistic * 100).toFixed(2)} points · ${diagnostics.proximityPermutationReplicates} seeded permutations`],
-    ["Near / far contrast", diagnostics.proximityRatio.toFixed(2), "Incompatibility ratio; related to PHI’s question but not a PHI implementation"],
+    ["Near / far contrast", diagnostics.proximityRatio.toFixed(2), "Bounded four-gamete incompatibility ratio; an independent visual challenge alongside PHI"],
     ["Canonical coverage", `${((1 - diagnostics.ambiguityFraction) * 100).toFixed(2)}%`, `${diagnostics.sampledSequences} sequences × ${diagnostics.sampledBiallelicSites} biallelic sites sampled`],
     ["Tract rate ratio", event ? event.diagnostics.rateRatio.toFixed(2) : "—", event ? `${(event.diagnostics.tractVariableDensity * 100).toFixed(1)}% tract vs ${(event.diagnostics.backgroundVariableDensity * 100).toFixed(1)}% background variable sites` : "Select an event"],
     ["Parent-conflict rate", event ? `${(event.diagnostics.parentConflictRate * 100).toFixed(1)}%` : "—", event ? `${event.diagnostics.parentDiscriminatingSites.toLocaleString("en-US")} parent-discriminating tract sites` : "Select an event"],
@@ -1170,6 +1325,7 @@ function TreeSvg({ root, roles = {}, markedNames = [], onToggleMark }: { root: N
 function LocalTrees({ alignment, events, event, onSelectEvent }: { alignment: AlignmentData; events: RdpEvent[]; event: RdpEvent | null; onSelectEvent: (id: string) => void }) {
   const [cohortSize, setCohortSize] = useState(14);
   const [cohortMode, setCohortMode] = useState<"nearest" | "first">("nearest");
+  const [partitionMode, setPartitionMode] = useState<"tract-background" | "three-way">("tract-background");
   const [markedNames, setMarkedNames] = useState<string[]>([]);
   const trees = useMemo(() => {
     if (!event) return null;
@@ -1186,7 +1342,13 @@ function LocalTrees({ alignment, events, event, onSelectEvent }: { alignment: Al
           { label: "Origin-spanning tract", slug: "tract", segments: eventSegments(event, alignment.length), highlight: true },
           { label: "Complementary background", slug: "background", segments: [[event.end, event.start] as [number, number]], highlight: false },
         ]
-      : [
+      : partitionMode === "tract-background" ? [
+          { label: "Recombinant tract", slug: "tract", segments: [[event.start, event.end] as [number, number]], highlight: true },
+          { label: "Complementary background", slug: "background", segments: [
+            ...(event.start > 0 ? [[0, event.start] as [number, number]] : []),
+            ...(event.end < alignment.length ? [[event.end, alignment.length] as [number, number]] : []),
+          ], highlight: false },
+        ] : [
           ...(event.start > 1 ? [{ label: "Left flank", slug: "left-flank", segments: [[0, event.start] as [number, number]], highlight: false }] : []),
           { label: "Recombinant tract", slug: "tract", segments: [[event.start, event.end] as [number, number]], highlight: true },
           ...(event.end < alignment.length - 1 ? [{ label: "Right flank", slug: "right-flank", segments: [[event.end, alignment.length] as [number, number]], highlight: false }] : []),
@@ -1195,7 +1357,7 @@ function LocalTrees({ alignment, events, event, onSelectEvent }: { alignment: Al
       selected,
       regions: regions.map((region) => ({ ...region, tree: buildLocalTree(alignment, selected, region.segments) })),
     };
-  }, [alignment, cohortMode, cohortSize, event]);
+  }, [alignment, cohortMode, cohortSize, event, partitionMode]);
   if (!event || !trees) return <div className="empty-state tree-empty"><span className="empty-mark">⑂</span><h2>Select an event to compare local trees</h2><p>Tree views are hypothesis-centered: choose an event in Events, or use the selector above after a scan.</p></div>;
   const recombinant = alignment.sequences[event.recombinant].name;
   const major = alignment.sequences[event.majorParent].name;
@@ -1216,13 +1378,14 @@ function LocalTrees({ alignment, events, event, onSelectEvent }: { alignment: Al
       <label><span>Event hypothesis</span><select value={event.id} onChange={(value) => onSelectEvent(value.target.value)}>{events.map((candidate, index) => <option value={candidate.id} key={candidate.id}>E{index + 1} · {alignment.sequences[candidate.recombinant].name} · {formatEventRegion(candidate, alignment.length)}</option>)}</select></label>
       <label><span>Context sequences</span><select value={cohortSize} onChange={(value) => setCohortSize(Number(value.target.value))}>{[8, 14, 20, 24].filter((count) => count <= Math.max(8, alignment.sequences.length)).map((count) => <option value={count} key={count}>Up to {count}</option>)}</select></label>
       <label><span>Cohort strategy</span><select value={cohortMode} onChange={(value) => setCohortMode(value.target.value as "nearest" | "first")}><option value="nearest">Nearest to event triad</option><option value="first">First sequences in alignment</option></select></label>
+      <label><span>Partition comparison</span><select value={partitionMode} onChange={(value) => setPartitionMode(value.target.value as "tract-background" | "three-way")}><option value="tract-background">Tract vs combined background</option><option value="three-way">Left / tract / right</option></select></label>
       <div className="tree-toolbar-actions"><button type="button" className="small-button" onClick={() => download(`rdp-event-${event.id}-local-trees.nwk`, allNewick)}>All Newick ↓</button><button type="button" className="small-button" disabled={!markedNames.length} onClick={() => setMarkedNames([])}>Clear marks</button></div>
     </div>
     <div className="tree-mark-help"><b>Linked marking</b><span>Click any leaf name—or a cohort chip below—to mark that sequence in every regional tree. This makes topology switches much easier to track.</span><div>{markedNames.map((name) => <button type="button" key={name} onClick={() => toggleMark(name)}>{name} ×</button>)}</div></div>
     <TopologyCards alignment={alignment} event={event}/>
     <div className={`tree-comparison regions-${trees.regions.length}`}>{trees.regions.map((item) => <article key={item.label} className={item.highlight ? "tract-tree" : ""}><div><div><b>{item.label}</b><span>{item.segments.map(([start, end]) => `${start + 1}–${end}`).join(" + ")}</span></div><button type="button" onClick={() => download(`rdp-${item.slug}.nwk`, item.tree.newick)}>Newick ↓</button></div><TreeSvg root={item.tree.root} roles={roles} markedNames={markedNames} onToggleMark={toggleMark}/><code title={item.tree.newick}>{item.tree.newick}</code></article>)}</div>
     <div className="tree-cohort"><strong>Tree cohort · {trees.selected.length} sequences</strong><div>{trees.selected.map((index) => { const name = alignment.sequences[index].name; return <button type="button" aria-pressed={markedNames.includes(name)} onClick={() => toggleMark(name)} className={`${index === event.recombinant ? "recombinant" : index === event.majorParent ? "major" : index === event.minorParent ? "minor" : ""} ${markedNames.includes(name) ? "marked" : ""}`} key={index}>{name}</button>; })}</div></div>
-    <div className="tree-caveat"><strong>Exploratory local phylogenies</strong><span>Neighbor-joining on uncorrected canonical-site p-distances, with at most 8,192 sampled sites per comparison. These trees are interactive verification aids—not ML trees, topology tests, or independent proof of recombination.</span></div>
+    <div className="tree-caveat"><strong>Exploratory unrooted phylogenies</strong><span>Neighbor-joining on uncorrected canonical-site p-distances, with at most 8,192 sampled sites per comparison. The rectangular drawing is midpoint-oriented for readability but has no inferred root. Compare membership and movement, not left-to-right ancestry; these trees are verification aids—not ML trees, topology tests, or independent proof of recombination.</span></div>
   </div>;
 }
 
@@ -1307,6 +1470,7 @@ function AutoResolvePanel({ alignment, events, status, rescanning, onRun }: {
             <AutoRange label="Breakpoint uncertainty" value={settings.maximumBreakpointUncertainty} minimum={0.05} maximum={1} step={0.05} display={(value) => `${Math.round(value * 100)}% tract`} onChange={(value) => setValue("maximumBreakpointUncertainty", value)}/>
             <AutoRange label="Parent-conflict ceiling" value={settings.maximumParentConflict} minimum={0.02} maximum={0.8} step={0.02} display={(value) => `${Math.round(value * 100)}%`} onChange={(value) => setValue("maximumParentConflict", value)}/>
             <AutoRange label="Rate-density fold ceiling" value={settings.maximumRateFold} minimum={1.2} maximum={10} step={0.2} display={(value) => `${value.toFixed(1)}×`} onChange={(value) => setValue("maximumRateFold", value)}/>
+            <AutoRange label="Role-consensus confidence" value={settings.minimumRoleConfidence} minimum={0.34} maximum={0.95} step={0.01} display={(value) => `${Math.round(value * 100)}%`} onChange={(value) => setValue("minimumRoleConfidence", value)}/>
             <AutoSwitch label="Block high-risk warnings" detail="Misalignment, homoplasy, diffuse incompatibility, rate-shift and incomplete-scan flags prevent acceptance." checked={settings.blockSevereWarnings} onChange={(value) => setValue("blockSevereWarnings", value)}/>
             <AutoSwitch label="Revisit analyst decisions" detail="Off by default: accepted and rejected events remain locked unless their evidence is stale." checked={settings.revisitReviewed} onChange={(value) => setValue("revisitReviewed", value)}/>
           </section>
@@ -1316,9 +1480,10 @@ function AutoResolvePanel({ alignment, events, status, rescanning, onRun }: {
             <AutoRange label="Informative-site depth" value={settings.informationWeight} minimum={0} maximum={50} onChange={(value) => setValue("informationWeight", value)}/>
             <AutoRange label="Breakpoint precision" value={settings.breakpointWeight} minimum={0} maximum={50} onChange={(value) => setValue("breakpointWeight", value)}/>
             <AutoRange label="False-positive diagnostics" value={settings.diagnosticsWeight} minimum={0} maximum={50} onChange={(value) => setValue("diagnosticsWeight", value)}/>
+            <AutoRange label="Source role consensus" value={settings.roleWeight} minimum={0} maximum={50} onChange={(value) => setValue("roleWeight", value)}/>
             <div className="auto-score-note"><b>Safety invariant</b><span>Stale or uncalibrated evidence is never auto-accepted. The review band is intentionally preserved between the accept and reject thresholds.</span></div>
           </section>
-          <section><h3>Dependency-aware rescanning</h3><p>The planner accumulates risk and pauses at the first barrier, withholds accepted mosaic sequences from parent search, rescans, then rebuilds the remaining plan from new signals.</p>
+          <section><h3>Dependency-aware rescanning</h3><p>The planner accumulates risk and pauses at the first barrier, disassembles accepted co-recombinant mosaics into erased remainders plus tract-only components, rescans the informative components, then rebuilds the remaining plan from new signals.</p>
             <label className="auto-select"><span>Rescan strategy</span><select value={settings.rescanStrategy} onChange={(event) => setValue("rescanStrategy", event.target.value as AutoResolveSettings["rescanStrategy"])}><option value="off">Off · decisions only</option><option value="targeted">Impacted recombinant targets only</option><option value="adaptive">Targeted unless impact is broad</option><option value="full">All unresolved targets</option></select></label>
             <AutoRange label="Trigger risk" value={settings.rescanRiskThreshold} minimum={0} maximum={100} onChange={(value) => setValue("rescanRiskThreshold", value)}/>
             <AutoRange label="Same-sequence overlap trigger" value={settings.overlapTriggerFraction} minimum={0} maximum={1} step={0.05} display={(value) => `${Math.round(value * 100)}%`} onChange={(value) => setValue("overlapTriggerFraction", value)}/>
@@ -1442,11 +1607,13 @@ function ExampleLibrary({ onClose, onLoad }: { onClose: () => void; onLoad: (exa
   </section></div>;
 }
 
-function Inspector({ alignment, event, onDecision, onUpdate, onNavigate, onDuplicate, onDelete, onRecalculate, onOpenTrees, onOpenMethod, recalculating, canPrevious, canNext, groupIds }: {
+function Inspector({ alignment, event, onDecision, onDecisionGroup, onUpdate, onUpdateGroup, onNavigate, onDuplicate, onDelete, onRecalculate, onOpenTrees, onOpenMethod, recalculating, canPrevious, canNext, groupIds, groupSize }: {
   alignment: AlignmentData;
   event: RdpEvent | null;
   onDecision: (decision: EventDecision) => void;
+  onDecisionGroup: (decision: EventDecision) => void;
   onUpdate: (patch: Partial<RdpEvent>, action?: string) => void;
+  onUpdateGroup: (patch: Partial<RdpEvent>, action?: string) => void;
   onNavigate: (direction: -1 | 1) => void;
   onDuplicate: () => void;
   onDelete: () => void;
@@ -1457,9 +1624,15 @@ function Inspector({ alignment, event, onDecision, onUpdate, onNavigate, onDupli
   canPrevious: boolean;
   canNext: boolean;
   groupIds: string[];
+  groupSize: number;
 }) {
   if (!event) return <aside className="inspector"><div className="empty-inspector"><span>↗</span><h2>No event selected</h2><p>Run a scan or choose an event in the overview.</p></div></aside>;
   const recombinant = alignment.sequences[event.recombinant]?.name;
+  const activeCoRecombinantSet = event.coRecombinantSets?.find((set) => set.presumedRecombinant === event.recombinant);
+  const activeTreeBootstrap = activeCoRecombinantSet?.evidence.find((entry) => entry.treeBootstrap)?.treeBootstrap;
+  const roleTrials = roleAssignmentTrials(alignment, event);
+  const roleSource = event.recombinantIdentification;
+  const bestRoleScore = Math.max(...roleTrials.map((trial) => trial.score));
   let newGroupId = `group-${groupIds.length + 1}`;
   let groupSuffix = groupIds.length + 1;
   while (groupIds.includes(newGroupId)) {
@@ -1472,7 +1645,7 @@ function Inspector({ alignment, event, onDecision, onUpdate, onNavigate, onDupli
         <div><span className="eyebrow">Selected hypothesis</span><h2>{recombinant}</h2></div>
         <div className="event-nav"><button type="button" title="Duplicate event" onClick={onDuplicate}>⧉</button><button type="button" title="Delete event (undoable)" onClick={onDelete}>⌫</button><button type="button" disabled={!canPrevious} onClick={() => onNavigate(-1)}>←</button><button type="button" disabled={!canNext} onClick={() => onNavigate(1)}>→</button></div>
       </div>
-      <button type="button" className="inspect-trees-button" onClick={onOpenTrees}><span>⑂</span><div><b>Compare local trees</b><small>Flanks vs recombinant tract</small></div><i>→</i></button>
+      <button type="button" className="inspect-trees-button" onClick={onOpenTrees}><span>⑂</span><div><b>Compare local trees</b><small>Recombinant tract vs background</small></div><i>→</i></button>
       <div className="parent-map assignment-map">
         <label><span>Recombinant</span><select value={event.recombinant} onChange={(value) => onUpdate({ recombinant: Number(value.target.value) }, "Reassigned recombinant")}>
           {alignment.sequences.map((record, index) => <option key={`${record.name}-${index}`} value={index} disabled={index === event.majorParent || index === event.minorParent}>{record.name}</option>)}
@@ -1484,6 +1657,27 @@ function Inspector({ alignment, event, onDecision, onUpdate, onNavigate, onDupli
           {alignment.sequences.map((record, index) => <option key={`${record.name}-${index}`} value={index} disabled={index === event.recombinant || index === event.majorParent}>{record.name}</option>)}
         </select></label>
       </div>
+      <details className="role-workbench">
+        <summary><span>{roleSource ? "RDP5 recombinant identification" : "Role-assignment challenge"}</span><small>{roleSource ? `${Math.round(roleSource.confidence * 100)}% relative support · ${roleSource.ambiguous ? "ambiguous" : "decisive"}` : "Audition all three recombinant polarities"}</small></summary>
+        <div className="role-trials">{roleTrials.map((trial) => <article className={`${trial.key === "current" ? "current" : ""} ${trial.score === bestRoleScore ? "best" : ""}`} key={trial.key}>
+          <div><span>{trial.key === "current" ? "Current assignment" : trial.key === "swap-major" ? "Major as recombinant" : "Minor as recombinant"}{trial.sourceRecommended ? " · source pick" : ""}</span><b title={trial.sourcePoints === undefined ? "Fast identity-switch score" : `${trial.sourcePoints.toFixed(1)} weighted source points · ${((trial.sourceShare ?? 0) * 100).toFixed(1)}% of triplet total`}>{trial.score}<small>/100</small></b></div>
+          <strong>{alignment.sequences[trial.recombinant]?.name ?? "Unknown"}</strong>
+          <p><i className="parent-role major"/> {alignment.sequences[trial.majorParent]?.name ?? "?"}<span>background</span></p>
+          <p><i className="parent-role minor"/> {alignment.sequences[trial.minorParent]?.name ?? "?"}<span>tract</span></p>
+          <dl><div><dt>Tract → minor</dt><dd>{(trial.tractMinorIdentity * 100).toFixed(1)}%</dd></div><div><dt>Background → major</dt><dd>{(trial.backgroundMajorIdentity * 100).toFixed(1)}%</dd></div><div><dt>Switch signal</dt><dd>{trial.switchSignal >= 0 ? "+" : ""}{(trial.switchSignal * 100).toFixed(1)} pp</dd></div><div><dt>{trial.sourceShare === undefined ? "Informative" : "Consensus share"}</dt><dd>{trial.sourceShare === undefined ? trial.informativeSites : `${(trial.sourceShare * 100).toFixed(1)}%`}</dd></div></dl>
+          <button type="button" disabled={trial.key === "current"} onClick={() => onUpdate({ recombinant: trial.recombinant, majorParent: trial.majorParent, minorParent: trial.minorParent }, `Applied ${trial.key} role-assignment trial`)}>{trial.key === "current" ? "Current" : "Apply assignment"}</button>
+        </article>)}{roleSource && <div className="role-source-tests">
+          <header><div><b>Source test ledger</b><span>{roleSource.inference === "rdp5-source-profile-consensus" ? `JC profiles + ${roleSource.bootstrapReplicates}× bootstrap tree paths` : "JC distance profiles"}{roleSource.quartetCohortSize ? ` + ${roleSource.dmaxWasmAccelerated ? "packed-WASM" : "scalar"} VisRD` : ""}</span></div><small>{roleSource.cohortSize}/{roleSource.sourceSequenceCount} profile sequences{roleSource.sampled ? " · bounded cohort" : " · complete cohort"}{roleSource.quartetCohortSize ? ` · ${roleSource.quartetCohortSize} quartet taxa` : ""}</small></header>
+          <div className="role-test-head"><span>Component</span>{roleTrials.map((trial) => <b key={trial.key} title={alignment.sequences[trial.recombinant]?.name}>{alignment.sequences[trial.recombinant]?.name ?? "?"}</b>)}</div>
+          {roleSource.tests.map((test) => <div className={`role-test-row ${test.decisive ? "" : "neutral"}`} key={test.id} title={`${test.sourceRoutine} · ${test.direction} value supports recombinant`}><span>{test.label}<small>{test.direction === "lower" ? "lowest" : "highest"}</small></span>{roleTrials.map((trial) => {
+            const component = trial.sourceTests?.find((entry) => entry.id === test.id);
+            const value = component?.value;
+            const points = component?.points ?? 0;
+            return <b className={component?.winner && test.decisive ? "winner" : ""} key={trial.key}>{value === null || value === undefined ? "—" : Math.abs(value) >= 100 ? value.toFixed(1) : value.toFixed(3)}<small>{points >= 0 ? "+" : ""}{points}</small></b>;
+          })}</div>)}
+        </div>}</div>
+        <p>{roleSource ? <>Direct ports of <code>MakePhPrScore</code>, <code>MakeTrpScore</code>, <code>MakeOUCheck</code>, <code>SimpleDist</code>, <code>MakeSSDistB</code>, <code>GetBadDists</code>, <code>MakeEList</code>/<code>MakeListCorr</code>, <code>MakeLDist</code>/<code>MakeRCompat</code>, <code>CalcMaxD</code>/<code>CMaxD2P3</code>, and the corresponding <code>MakeConsensusC</code> rules supply {roleSource.implementedComponents.join(", ")}. A source confidence below {Math.round(roleSource.sourceThreshold * 100)}% is flagged as ambiguous.{roleSource.sourceTieBreak ? <> Equal scores follow the desktop <code>{roleSource.sourceTieBreak}</code> tie-break.</> : null}{roleSource.pendingComponents.length ? <> Optional desktop classifier work still pending: {roleSource.pendingComponents.join(", ")}.</> : null}</> : <>No saved source-role ledger is available for this imported/manual event. The displayed identity-switch score is only a diagnostic; recalculate or rescan to generate the source profile consensus.</>}</p>
+      </details>
       {(event.alternativeParents?.length ?? 0) > 0 && <div className="alternative-parents"><span>Alternative minor parents retained by deduplication</span><div>{event.alternativeParents?.map((index) => <button type="button" key={index} onClick={() => onUpdate({ minorParent: index }, `Selected alternative minor parent ${alignment.sequences[index]?.name}`)}>{alignment.sequences[index]?.name ?? `Sequence ${index + 1}`}</button>)}</div></div>}
       {event.evidenceStale && <div className="stale-box"><strong>Evidence needs recalculation</strong><span>Assignments or breakpoints changed after the scan. The saved method statistics remain visible for comparison but no longer describe this edited hypothesis.</span><button type="button" onClick={onRecalculate} disabled={recalculating}>{recalculating ? "Recalculating…" : "Recalculate this exact hypothesis"}</button></div>}
       <div className="inspector-section">
@@ -1495,16 +1689,29 @@ function Inspector({ alignment, event, onDecision, onUpdate, onNavigate, onDupli
               ? Math.max(event.end + 1, Math.min(alignment.length - 1, requested))
               : Math.max(0, Math.min(event.end - 1, requested));
             onUpdate({ start, confidenceStart: [start, start], breakpointModel: { method: "manual", informativeSites: event.informativeSites } }, "Edited left breakpoint");
-          }}/><small>{event.confidenceStart[0] + 1}–{event.confidenceStart[1]}</small></label>
+          }}/><small title="Start-breakpoint confidence interval">{event.confidenceStart[0] + 1}–{event.confidenceStart[1] + 1}</small></label>
           <label>End<input type="number" min={1} max={event.wraps ? Math.max(1, event.start - 1) : alignment.length} value={event.end} onChange={(value) => {
             const requested = Number(value.target.value);
             const end = event.wraps
               ? Math.max(1, Math.min(Math.max(1, event.start - 1), requested))
               : Math.max(event.start + 1, Math.min(alignment.length, requested));
             onUpdate({ end, confidenceEnd: [end, end], breakpointModel: { method: "manual", informativeSites: event.informativeSites } }, "Edited right breakpoint");
-          }}/><small>{event.confidenceEnd[0] + 1}–{event.confidenceEnd[1]}</small></label>
+          }}/><small title="End-breakpoint confidence interval">{event.confidenceEnd[0]}–{event.confidenceEnd[1]}</small></label>
         </div>
-        {event.breakpointModel && <div className="breakpoint-model"><b>{event.breakpointModel.method === "two-state-hmm" ? "Windowless two-state HMM" : event.breakpointModel.method === "manual" ? "Manually edited" : "Local χ² refinement"}</b><span>{event.breakpointModel.informativeSites.toLocaleString("en-US")} informative sites{event.breakpointModel.stateSwitches !== undefined ? ` · ${event.breakpointModel.stateSwitches} state switches` : ""}</span></div>}
+        {event.structuralUncertainty && <div className="structural-uncertainty"><strong>Erased-signal piece {event.structuralUncertainty.piece}/{event.structuralUncertainty.pieces}</strong><span>{event.structuralUncertainty.uncertainStart ? "Start" : ""}{event.structuralUncertainty.uncertainStart && event.structuralUncertainty.uncertainEnd ? " and " : ""}{event.structuralUncertainty.uncertainEnd ? "end" : ""} breakpoint{event.structuralUncertainty.uncertainStart && event.structuralUncertainty.uncertainEnd ? "s are" : " is"} adjacent to a previously deleted tract and therefore uncertain under the RDP5 §4.1.6 rule.</span><small>Unsplit signal: {event.structuralUncertainty.originalStart + 1}–{event.structuralUncertainty.originalEnd}{event.structuralUncertainty.originalWraps ? " · wraps origin" : ""}{event.structuralUncertainty.adjacentEventIds.length ? ` · prior events ${event.structuralUncertainty.adjacentEventIds.join(", ")}` : ""}</small></div>}
+        {event.breakpointModel && <div className={`breakpoint-model ${event.breakpointModel.method === "burt-hmm" ? "burt" : ""}`}>
+          <div><b>{event.breakpointModel.method === "burt-hmm" ? "BURT hidden-state refinement" : event.breakpointModel.method === "two-state-hmm" ? "Legacy two-state HMM" : event.breakpointModel.method === "manual" ? "Manually edited" : "Local χ² refinement"}</b><span>{event.breakpointModel.informativeSites.toLocaleString("en-US")} informative sites{event.breakpointModel.states ? ` · ${event.breakpointModel.states} states` : ""}{event.breakpointModel.stateSwitches !== undefined ? ` · ${event.breakpointModel.stateSwitches} switches` : ""}</span></div>
+          {event.breakpointModel.method === "burt-hmm" && <details className="burt-model-details"><summary>Model, posterior intervals and switches</summary><div className="burt-model-summary">
+            <span><b>{event.breakpointModel.sourceParity ? "RDP5 source mode" : "Manual 2–20-state mode"}</b><small>{event.breakpointModel.randomStarts ?? "?"} random starts · up to {event.breakpointModel.iterations ?? "?"} training iterations</small></span>
+            <span><b>{event.breakpointModel.criterion ?? "HMM selection"}</b><small>log L {event.breakpointModel.logLikelihood?.toFixed(2) ?? "—"}{event.breakpointModel.bic !== undefined ? ` · BIC ${event.breakpointModel.bic.toFixed(1)}` : ""}</small></span>
+            <span><b>{((event.breakpointModel.posteriorThreshold ?? 0.95) * 100).toFixed(1)}% posterior boundary</b><small>Start CI {event.confidenceStart[0] + 1}–{event.confidenceStart[1] + 1} · end CI {event.confidenceEnd[0]}–{event.confidenceEnd[1]}</small></span>
+          </div>
+          {(event.breakpointModel.switches?.length ?? 0) > 0 && <div className="burt-switches">{event.breakpointModel.switches?.map((entry, index) => <span key={`${entry.position}-${index}`}><b>{entry.position + 1}</b><small>S{entry.fromState + 1}→S{entry.toState + 1} · 95% {entry.confidence95[0] + 1}–{entry.confidence95[1] + 1}{entry.confidence99 ? ` · 99% ${entry.confidence99[0] + 1}–${entry.confidence99[1] + 1}` : ""}</small></span>)}</div>}
+          {(event.breakpointModel.emissions?.length ?? 0) > 0 && <div className="burt-emissions"><span>State emission probabilities</span><table><thead><tr><th>State</th><th>A</th><th>B</th><th>C</th></tr></thead><tbody>{event.breakpointModel.emissions?.map((row, state) => <tr key={state}><th>S{state + 1}</th>{row.map((value, category) => <td key={category}>{value.toFixed(3)}</td>)}</tr>)}</tbody></table></div>}
+          {(event.breakpointModel.modelSelection?.length ?? 0) > 1 && <div className="burt-selection"><span>Step-up ledger</span>{event.breakpointModel.modelSelection?.map((entry) => <i className={entry.states === event.breakpointModel?.states ? "selected" : ""} key={entry.states}>{entry.states} states <b>BIC {entry.bic.toFixed(1)}</b></i>)}</div>}
+          </details>}
+        </div>}
+        {(event.methodSignals?.filter((signal) => signal.method !== "shared-screen").length ?? 0) > 0 && <details className="method-signal-list" open><summary>Method-specific interval calls</summary><div>{event.methodSignals?.filter((signal) => signal.method !== "shared-screen").map((signal, index) => <button type="button" key={`${signal.method}-${signal.start}-${signal.end}-${index}`} onClick={() => onOpenMethod(signal.method as MethodName)}><b>{signal.method}</b><span>{signal.start + 1}–{signal.end}{signal.wraps ? " · wraps origin" : ""}</span><small>{signal.locator} · {signal.statistic.toPrecision(4)}{signal.method === "SiScan" ? ` · ${signal.outgroup === null ? "randomized fourth sequence" : signal.outgroup === undefined ? signal.outgroupMode ?? "source outgroup" : `outgroup ${alignment.sequences[signal.outgroup]?.name ?? signal.outgroup + 1}`} · ${signal.permutations ?? "?"} permutations` : ""}</small></button>)}</div></details>}
         <button className="text-button" type="button" onClick={() => {
           const nextStart = event.end === alignment.length ? 0 : event.end;
           const nextEnd = event.start;
@@ -1524,6 +1731,30 @@ function Inspector({ alignment, event, onDecision, onUpdate, onNavigate, onDupli
           <label><span>Event group</span><select value={event.groupId ?? ""} onChange={(value) => onUpdate({ groupId: value.target.value || null }, value.target.value ? `Assigned ${value.target.value}` : "Ungrouped event")}><option value="">Ungrouped</option>{groupIds.map((groupId) => <option value={groupId} key={groupId}>{groupId}</option>)}</select></label>
           <button type="button" onClick={() => onUpdate({ groupId: newGroupId }, `Created ${newGroupId}`)}>New group</button>
         </div>
+        {event.componentProvenance && <details className="ancestral-cluster-card component-provenance" open><summary><span>Signal-disassembly lineage</span><b>{event.componentProvenance.appliedEventIds.length} prior event{event.componentProvenance.appliedEventIds.length === 1 ? "" : "s"}</b></summary><div>
+          <p>This hypothesis was detected on RDP5-style internal components. User-facing sequence names still refer to the original alignment; the role ledger below records which erased remainder or tract-only component supplied each role.</p>
+          <div className="component-role-ledger">{([
+            ["Recombinant", event.componentProvenance.recombinant],
+            ["Major proxy", event.componentProvenance.majorParent],
+            ["Minor proxy", event.componentProvenance.minorParent],
+          ] as const).map(([role, component]) => <span key={role}><b>{role}</b><strong>{alignment.sequences[component.originIndex]?.name ?? `Sequence ${component.originIndex + 1}`}</strong><small>{component.kind === "extracted-tract" ? "tract-only component" : "erased remainder"}{component.lineage.length ? ` · lineage ${component.lineage.join(" → ")}` : " · intact lineage"}</small></span>)}</div>
+          <small>Disassembled accepted events: {event.componentProvenance.appliedEventIds.join(", ")}</small>
+        </div></details>}
+        {activeCoRecombinantSet && <details className="ancestral-cluster-card co-recombinant-screen" open><summary><span>RDP5 co-recombinant screen</span><b>{activeCoRecombinantSet.sequenceMembers.length} sequence{activeCoRecombinantSet.sequenceMembers.length === 1 ? "" : "s"}</b></summary><div>
+          <p>Every non-triplet sequence was tested against the phylogenetic-movement, six-distance correlation, and detectable-signal sets. Membership requires {activeCoRecombinantSet.requiredEvidenceSets} of 3 evidence sets.</p>
+          <small>Presumed recombinant: {recombinant} · parents: {activeCoRecombinantSet.parents.map((index) => alignment.sequences[index]?.name ?? `Sequence ${index + 1}`).join(" + ")} · {activeCoRecombinantSet.testedSequences.toLocaleString("en-US")} sequences tested</small>
+          {activeTreeBootstrap && <small>{activeTreeBootstrap.replicates} seeded NJ bootstrap replicates · branches below {Math.round(activeTreeBootstrap.cutoff * 100)}% collapsed · {activeTreeBootstrap.cohortTaxa}/{activeTreeBootstrap.sourceSequenceCount} taxa in the tree cohort{activeTreeBootstrap.exactSiteBootstrap ? " · exact site bootstrap" : " · balanced site-block bootstrap"}</small>}
+          {activeCoRecombinantSet.evidence.length > 0 ? <div className="co-recombinant-members">{activeCoRecombinantSet.evidence.slice(0, 80).map((entry) => <span key={entry.sequence}><b>{alignment.sequences[entry.sequence]?.name ?? `Sequence ${entry.sequence + 1}`}</b><i>{entry.phylogenetic ? "Tree" : "—"}</i><i>{entry.distance ? "r" : "—"}</i><i>{entry.detectableSignal ? "Signal" : "—"}</i><strong>{entry.sets}/3</strong></span>)}</div> : <div className="empty-state compact">No additional sequence passed the selected evidence-set rule.</div>}
+          {activeCoRecombinantSet.evidence.length > 80 && <small>Showing the first 80 of {activeCoRecombinantSet.evidence.length} supported descendants; the project and CSV exports retain the complete set.</small>}
+          {(event.coRecombinantSets?.length ?? 0) === 3 && <details className="orientation-set-summary"><summary>All three presumed-recombinant orientations</summary><div>{event.coRecombinantSets?.map((set) => <span key={set.presumedRecombinant}><b>{alignment.sequences[set.presumedRecombinant]?.name ?? `Sequence ${set.presumedRecombinant + 1}`}</b><small>{set.sequenceMembers.length} member{set.sequenceMembers.length === 1 ? "" : "s"}</small></span>)}</div></details>}
+        </div></details>}
+        {event.ancestralCluster && <details className="ancestral-cluster-card" open><summary><span>Inferred ancestral event</span><b>{event.groupId} · {(event.ancestralCluster.confidence * 100).toFixed(0)}%</b></summary><div>
+          <p>{event.ancestralCluster.sequenceMembers.length} descendant sequences are linked by the source-guided co-recombinant procedure.{event.ancestralCluster.partialOverprint ? " At least one member carries partially overprinted evidence." : " Their breakpoint-bounded tracts are concordant."}</p>
+          <dl><div><dt>Tree movement</dt><dd>{event.ancestralCluster.evidenceCounts.phylogenetic}</dd></div><div><dt>Distance correlation</dt><dd>{event.ancestralCluster.evidenceCounts.distance}</dd></div><div><dt>Signal overlap</dt><dd>{event.ancestralCluster.evidenceCounts.detectableSignal}</dd></div><div><dt>RDP5 similarity</dt><dd>{event.ancestralCluster.evidenceCounts.sourceSimilarity ?? 0}</dd></div></dl>
+          <small>Members: {event.ancestralCluster.sequenceMembers.map((index) => alignment.sequences[index]?.name ?? `Sequence ${index + 1}`).join(", ")}</small>
+          <button type="button" onClick={onOpenTrees}>Verify group in local trees →</button>
+        </div></details>}
+        {groupSize > 1 && <button className="group-apply-button" type="button" onClick={() => onUpdateGroup({ start: event.start, end: event.end, wraps: event.wraps, confidenceStart: event.confidenceStart, confidenceEnd: event.confidenceEnd, breakpointModel: event.breakpointModel }, `Applied ancestral breakpoints to ${groupSize} co-recombinants`)}>Apply these breakpoints to all {groupSize} group members</button>}
       </div>
       <div className="inspector-section">
         <div className="section-heading"><h3>Method concordance</h3><span>{event.evidence.filter((item) => item.supported).length}/{event.evidence.length}</span></div>
@@ -1542,6 +1773,7 @@ function Inspector({ alignment, event, onDecision, onUpdate, onNavigate, onDupli
         <button type="button" className={event.decision === "rejected" ? "reject active" : "reject"} onClick={() => onDecision(event.decision === "rejected" ? "unreviewed" : "rejected")}><Icon name="close" size={16}/> Reject <kbd>X</kbd></button>
         <button type="button" className={event.decision === "accepted" ? "accept active" : "accept"} onClick={() => onDecision(event.decision === "accepted" ? "unreviewed" : "accepted")}><Icon name="check" size={16}/> Accept <kbd>A</kbd></button>
       </div>
+      {groupSize > 1 && <div className="group-decision-actions"><span>Common-ancestor group · {groupSize} sequences</span><div><button type="button" className="reject" onClick={() => onDecisionGroup("rejected")}>Reject group</button><button type="button" className="accept" onClick={() => onDecisionGroup("accepted")}>Accept group</button></div></div>}
       <p className="alpha-note">Scientific alpha. Treat inferred events as hypotheses until method-parity validation and independent review are complete.</p>
     </aside>
   );
@@ -1594,6 +1826,7 @@ export default function Home() {
   const stats = useMemo(() => alignmentStats(alignment), [alignment]);
   const selectedIndex = events.findIndex((event) => event.id === selectedId);
   const selectedEvent = selectedIndex >= 0 ? events[selectedIndex] : null;
+  const selectedGroupSize = selectedEvent ? eventGroupIndexes(events, selectedEvent).length : 0;
   const reviewed = events.filter((event) => event.decision !== "unreviewed").length;
   const groupIds = useMemo(() => [...new Set(events.map((event) => event.groupId).filter((value): value is string => Boolean(value)))].sort(), [events]);
   const hotspot = useMemo(() => breakpointHotspotTest(events, alignment.length, 48, 499, options.randomSeed), [alignment.length, events, options.randomSeed]);
@@ -1735,6 +1968,7 @@ export default function Home() {
   const launchAnalysis = useCallback((config: AnalysisLaunchConfig = {}) => {
     const excludedTargets = config.excludedTargets ?? [];
     const excludedParents = config.excludedParents ?? [];
+    const disassemblyEvents = config.disassemblyEvents ?? [];
     const retainedEvents = config.retainedEvents ?? [];
     const filterResults = (candidateEvents: RdpEvent[]) => config.filterResolvedAgainst?.length
       ? filterResolvedEventDuplicates(candidateEvents, config.filterResolvedAgainst, alignment.length)
@@ -1782,11 +2016,13 @@ export default function Home() {
           parentSamples: payload.parentSamples,
           timing: payload.timing,
           diagnostics: payload.diagnostics,
+          disassembly: payload.disassembly,
+          rdpSignalTruncations: payload.rdpSignalTruncations,
         });
         setProgress(1);
         setPhase(`Complete · ${nextEvents.length} event${nextEvents.length === 1 ? "" : "s"}`);
         setRunState("complete");
-        appendAudit(config.auditAction ?? (retainedEvents.length ? "Completed unresolved-sequence rescan" : "Completed full scan"), `${config.auditContext ? `${config.auditContext} ` : ""}${payload.comparisons.toLocaleString("en-US")} triplets tested; ${resultEvents.length} new consensus hypotheses retained${payload.events.length !== resultEvents.length ? ` after suppressing ${payload.events.length - resultEvents.length} duplicate of an accepted event` : ""}${retainedEvents.length ? ` alongside ${retainedEvents.length} preserved hypotheses` : ""}.`);
+        appendAudit(config.auditAction ?? (retainedEvents.length ? "Completed unresolved-sequence rescan" : "Completed full scan"), `${config.auditContext ? `${config.auditContext} ` : ""}${payload.comparisons.toLocaleString("en-US")} triplets tested; ${resultEvents.length} new consensus hypotheses retained${payload.events.length !== resultEvents.length ? ` after suppressing ${payload.events.length - resultEvents.length} duplicate of an accepted event` : ""}${retainedEvents.length ? ` alongside ${retainedEvents.length} preserved hypotheses` : ""}${payload.disassembly?.components ? `; ${payload.disassembly.components} tract-only analysis components generated from ${payload.disassembly.appliedEvents} accepted events` : ""}${payload.rdpSignalTruncations ? `; ${payload.rdpSignalTruncations} lower-ranked RDP excursions exceeded the per-triplet retention cap` : ""}.`);
         worker.terminate();
         showToast(resultEvents.length ? `Scan complete: ${resultEvents.length} new consensus event${resultEvents.length === 1 ? "" : "s"}` : retainedEvents.length ? "Rescan complete: no additional events passed the filters" : "Scan complete: no events passed the current filters");
         if (config.onComplete) window.setTimeout(() => config.onComplete?.(nextEvents), 0);
@@ -1812,7 +2048,7 @@ export default function Home() {
       }
       showToast("The local analysis worker stopped unexpectedly.");
     };
-    worker.postMessage({ type: "analyze", jobId, alignment, options, excludedTargets, excludedParents });
+    worker.postMessage({ type: "analyze", jobId, alignment, options, excludedTargets, excludedParents, disassemblyEvents });
   }, [alignment, appendAudit, options, showToast]);
 
   const runAnalysis = useCallback(() => {
@@ -1829,7 +2065,14 @@ export default function Home() {
       showToast("Accept and recalculate at least one event before rescanning unresolved sequences");
       return;
     }
-    launchAnalysis({ excludedTargets: [...new Set(retained.map((event) => event.recombinant))], retainedEvents: retained });
+    const mosaicOrigins = acceptedMosaicOrigins(retained);
+    launchAnalysis({
+      excludedTargets: mosaicOrigins,
+      excludedParents: mosaicOrigins,
+      disassemblyEvents: retained,
+      retainedEvents: retained,
+      auditContext: `RDP5 signal disassembly applied to ${retained.length} accepted event${retained.length === 1 ? "" : "s"}; accepted mosaic remainders were withheld while extracted tract components stayed eligible.`,
+    });
   }, [events, launchAnalysis, showToast]);
 
   const continueAutoResolve = useCallback((inputEvents: RdpEvent[], session: AutoResolveSession) => {
@@ -1875,7 +2118,7 @@ export default function Home() {
 
     const targetPlan = rescanTargetsForBarrier(barrier, alignment.sequences.length, session.settings);
     const acceptedEvents = applied.events.filter((event) => event.decision === "accepted" && !event.evidenceStale);
-    const acceptedTargets = new Set(acceptedEvents.map((event) => event.recombinant));
+    const acceptedTargets = new Set(acceptedMosaicOrigins(acceptedEvents));
     const targetIndexes = targetPlan.targetIndexes;
     if (targetIndexes.length === 0) {
       autoResolveSessionRef.current = null;
@@ -1896,11 +2139,12 @@ export default function Home() {
     launchAnalysis({
       excludedTargets,
       excludedParents: [...acceptedTargets],
+      disassemblyEvents: acceptedEvents,
       retainedEvents: preservedEvents,
       filterResolvedAgainst: acceptedEvents,
       resetEditHistory: false,
       auditAction: "Completed auto-resolve dependency rescan",
-      auditContext: `${targetPlan.scope === "full" ? "Full unresolved-target" : "Impacted-target"} rescan after E${barrier.afterEventIndex + 1}; ${targetIndexes.length} targets selected by ${barrier.risk}/100 accumulated dependency risk, with ${acceptedTargets.size} accepted mosaic parent prox${acceptedTargets.size === 1 ? "y" : "ies"} excluded from parent search.`,
+      auditContext: `${targetPlan.scope === "full" ? "Full unresolved-target" : "Impacted-target"} rescan after E${barrier.afterEventIndex + 1}; ${targetIndexes.length} targets selected by ${barrier.risk}/100 accumulated dependency risk. ${acceptedEvents.length} accepted events were disassembled; ${acceptedTargets.size} mosaic remainders were excluded from parent search while extracted tract components remained eligible.`,
       onComplete: (rescannedEvents) => {
         const activeSession = autoResolveSessionRef.current;
         if (!activeSession) return;
@@ -1962,10 +2206,16 @@ export default function Home() {
     if (unchanged) return;
     const scientificFields = new Set(["recombinant", "majorParent", "minorParent", "start", "end", "wraps", "groupId"]);
     const makesEvidenceStale = Object.keys(patch).some((key) => scientificFields.has(key));
+    const roleChanged = ["recombinant", "majorParent", "minorParent"].some((key) => Object.hasOwn(patch, key));
     const normalizedPatch: Partial<RdpEvent> = makesEvidenceStale ? {
       ...patch,
       confidenceStart: patch.confidenceStart ?? [patch.start ?? currentEvent.start, patch.start ?? currentEvent.start],
       confidenceEnd: patch.confidenceEnd ?? [patch.end ?? currentEvent.end, patch.end ?? currentEvent.end],
+      breakpointModel: patch.breakpointModel ?? (roleChanged ? undefined : currentEvent.breakpointModel),
+      ancestralCluster: patch.ancestralCluster,
+      coRecombinantSets: patch.coRecombinantSets,
+      componentProvenance: patch.componentProvenance,
+      structuralUncertainty: patch.structuralUncertainty,
     } : patch;
     const changedFields = Object.keys(patch).filter((key) => key !== "breakpointModel").join(", ");
     const selectedOrder = events.findIndex((event) => event.id === selectedId);
@@ -2002,17 +2252,104 @@ export default function Home() {
     }
     const currentEvent = events.find((event) => event.id === eventId);
     if (!currentEvent || currentEvent.decision === decision) return;
+    const eventIndex = events.findIndex((event) => event.id === eventId);
     const action = decision === "accepted" ? "Accepted event" : decision === "rejected" ? "Rejected event" : "Reset review decision";
+    const downstreamWarning = `Review-order dependency: the decision for earlier E${eventIndex + 1} changed; rescan unresolved signals before relying on this characterization.`;
     setUndoStack((current) => [...current.slice(-99), { label: action, events, selectedId }]);
     setRedoStack([]);
-    setEvents((current) => current.map((event) => event.id === eventId ? {
-      ...event,
-      decision,
-      history: [...event.history, { id: `audit-${Date.now()}-${event.history.length}`, timestamp: new Date().toISOString(), action, summary: `Decision changed to ${decision}.` }],
-    } : event));
+    setEvents((current) => current.map((event, index) => {
+      if (event.id === eventId) return {
+        ...event,
+        decision,
+        history: [...event.history, { id: `audit-${Date.now()}-${event.history.length}`, timestamp: new Date().toISOString(), action, summary: `Decision changed to ${decision}.` }],
+      };
+      if (index > eventIndex && event.decision !== "rejected") return {
+        ...event,
+        evidenceStale: true,
+        warnings: event.warnings.includes(downstreamWarning) ? event.warnings : [...event.warnings, downstreamWarning],
+      };
+      return event;
+    }));
     setSelectedId(eventId);
-    appendAudit(action, `Decision changed to ${decision}.`, eventId);
+    appendAudit(action, `Decision changed to ${decision}; later characterization-order hypotheses now require rescan.`, eventId);
   }, [appendAudit, events, selectedId, showToast]);
+
+  const setSelectedGroupDecision = useCallback((decision: EventDecision) => {
+    if (!selectedEvent) return;
+    if (autoResolveSessionRef.current) {
+      showToast("Stop auto-resolve before changing a group decision");
+      return;
+    }
+    const indexes = eventGroupIndexes(events, selectedEvent);
+    if (indexes.length < 2) {
+      setEventDecision(selectedEvent.id, decision);
+      return;
+    }
+    const targets = new Set(indexes);
+    const action = decision === "accepted" ? "Accepted event group" : decision === "rejected" ? "Rejected event group" : "Reset event-group review";
+    const timestamp = new Date().toISOString();
+    setUndoStack((current) => [...current.slice(-99), { label: action, events, selectedId }]);
+    setRedoStack([]);
+    const earliestIndex = Math.min(...indexes);
+    const warning = `Review-order dependency: the decision for ancestral event group ${selectedEvent.groupId} changed; rescan before relying on this later characterization.`;
+    setEvents(events.map((candidate, index) => {
+      if (targets.has(index)) return {
+        ...candidate,
+        decision,
+        history: [...candidate.history, { id: `audit-${Date.now()}-${candidate.history.length}-${index}`, timestamp, action, summary: `Decision changed to ${decision} for all ${indexes.length} members of ${selectedEvent.groupId}.` }],
+      };
+      if (index > earliestIndex && candidate.decision !== "rejected") return {
+        ...candidate,
+        evidenceStale: true,
+        warnings: candidate.warnings.includes(warning) ? candidate.warnings : [...candidate.warnings, warning],
+      };
+      return candidate;
+    }));
+    appendAudit(action, `Decision changed to ${decision} for all ${indexes.length} members of ${selectedEvent.groupId}; later hypotheses now require rescan.`, selectedEvent.id);
+    showToast(`${indexes.length} grouped event hypotheses marked ${decision}`);
+  }, [appendAudit, events, selectedEvent, selectedId, setEventDecision, showToast]);
+
+  const updateSelectedGroup = useCallback((patch: Partial<RdpEvent>, action = "Edited event group") => {
+    if (!selectedEvent) return;
+    if (autoResolveSessionRef.current) {
+      showToast("Stop auto-resolve before editing an event group");
+      return;
+    }
+    const indexes = eventGroupIndexes(events, selectedEvent);
+    if (indexes.length < 2) {
+      updateSelected(patch, action);
+      return;
+    }
+    const targets = new Set(indexes);
+    const earliestIndex = Math.min(...indexes);
+    const scientificFields = new Set(["recombinant", "majorParent", "minorParent", "start", "end", "wraps", "groupId"]);
+    const makesEvidenceStale = Object.keys(patch).some((key) => scientificFields.has(key));
+    const warning = `Review-order dependency: ancestral event group ${selectedEvent.groupId} changed; rescan before relying on this later characterization.`;
+    const timestamp = new Date().toISOString();
+    const nextEvents = events.map((candidate, index) => {
+      if (targets.has(index)) return {
+        ...candidate,
+        ...patch,
+        ancestralCluster: makesEvidenceStale ? undefined : (patch.ancestralCluster ?? candidate.ancestralCluster),
+        coRecombinantSets: makesEvidenceStale ? undefined : (patch.coRecombinantSets ?? candidate.coRecombinantSets),
+        componentProvenance: makesEvidenceStale ? undefined : (patch.componentProvenance ?? candidate.componentProvenance),
+        structuralUncertainty: makesEvidenceStale ? undefined : (patch.structuralUncertainty ?? candidate.structuralUncertainty),
+        evidenceStale: candidate.evidenceStale || makesEvidenceStale,
+        history: [...candidate.history, { id: `audit-${Date.now()}-${candidate.history.length}-${index}`, timestamp, action, summary: `Applied a shared edit across ${indexes.length} members of ${selectedEvent.groupId}.` }],
+      };
+      if (makesEvidenceStale && index > earliestIndex && candidate.decision !== "rejected") return {
+        ...candidate,
+        evidenceStale: true,
+        warnings: candidate.warnings.includes(warning) ? candidate.warnings : [...candidate.warnings, warning],
+      };
+      return candidate;
+    });
+    setUndoStack((current) => [...current.slice(-99), { label: action, events, selectedId }]);
+    setRedoStack([]);
+    setEvents(nextEvents);
+    appendAudit(action, `Applied a shared edit across ${indexes.length} members of ${selectedEvent.groupId}; affected downstream evidence is stale.`, selectedEvent.id);
+    showToast(`Updated ${indexes.length} grouped hypotheses; rescan is now required`);
+  }, [appendAudit, events, selectedEvent, selectedId, showToast, updateSelected]);
 
   const recalculateSelected = useCallback(() => {
     if (!selectedEvent) return;
@@ -2053,8 +2390,10 @@ export default function Home() {
       setPhase("Event recalculation failed");
       showToast("The local recalculation worker stopped unexpectedly.");
     };
-    worker.postMessage({ type: "recalculate", jobId, alignment, options, event: selectedEvent, comparisons: metrics?.comparisons ?? selectedEvent.hypothesisTests ?? 1 });
-  }, [alignment, metrics?.comparisons, options, selectedEvent, showToast, updateSelected]);
+    const predecessorIds = new Set(selectedEvent.componentProvenance?.appliedEventIds ?? []);
+    const disassemblyEvents = events.filter((event) => predecessorIds.has(event.id) && event.decision === "accepted" && !event.evidenceStale);
+    worker.postMessage({ type: "recalculate", jobId, alignment, options, event: selectedEvent, disassemblyEvents, comparisons: metrics?.comparisons ?? selectedEvent.hypothesisTests ?? 1 });
+  }, [alignment, events, metrics?.comparisons, options, selectedEvent, showToast, updateSelected]);
 
   const undo = useCallback(() => {
     if (autoResolveSessionRef.current) {
@@ -2172,8 +2511,8 @@ export default function Home() {
       if (target?.matches("input, textarea, select")) return;
       if (keyEvent.key.toLowerCase() === "j") navigateEvent(1);
       if (keyEvent.key.toLowerCase() === "k") navigateEvent(-1);
-      if (keyEvent.key.toLowerCase() === "a" && selectedEvent) updateSelected({ decision: selectedEvent.decision === "accepted" ? "unreviewed" : "accepted" });
-      if (keyEvent.key.toLowerCase() === "x" && selectedEvent) updateSelected({ decision: selectedEvent.decision === "rejected" ? "unreviewed" : "rejected" });
+      if (keyEvent.key.toLowerCase() === "a" && selectedEvent) setEventDecision(selectedEvent.id, selectedEvent.decision === "accepted" ? "unreviewed" : "accepted");
+      if (keyEvent.key.toLowerCase() === "x" && selectedEvent) setEventDecision(selectedEvent.id, selectedEvent.decision === "rejected" ? "unreviewed" : "rejected");
       if ((keyEvent.metaKey || keyEvent.ctrlKey) && keyEvent.key.toLowerCase() === "z") {
         keyEvent.preventDefault();
         if (keyEvent.shiftKey) redo(); else undo();
@@ -2182,7 +2521,7 @@ export default function Home() {
     };
     window.addEventListener("keydown", listener);
     return () => window.removeEventListener("keydown", listener);
-  }, [navigateEvent, redo, runAnalysis, selectedEvent, undo, updateSelected]);
+  }, [navigateEvent, redo, runAnalysis, selectedEvent, setEventDecision, undo]);
 
   useEffect(() => () => workerRef.current?.terminate(), []);
 
@@ -2219,12 +2558,16 @@ export default function Home() {
   };
 
   const toggleMethod = (method: MethodName) => {
-    setOptions((current) => ({
-      ...current,
-      methods: current.methods.includes(method)
+    setOptions((current) => {
+      const methods = current.methods.includes(method)
         ? current.methods.filter((item) => item !== method)
-        : [...current.methods, method],
-    }));
+        : [...current.methods, method];
+      return {
+        ...current,
+        methods,
+        minMethods: Math.min(current.minMethods, Math.max(1, methods.length)),
+      };
+    });
   };
 
   const autoGroupReferences = () => {
@@ -2252,24 +2595,45 @@ export default function Home() {
       download("rdp-web-project.rdpweb", serializeProject({ alignment, options, events, metrics, distance: distanceMatrix, auditLog }), "application/json");
       return;
     }
-    const rows = [["event", "group", "recombinant", "major_parent", "minor_parent", "start", "end", "wraps_origin", "breakpoint_model", "evidence_stale", "methods", "best_corrected_p", "decision", "warnings", "audit_entries"]];
-    events.forEach((event, index) => rows.push([
+    const rows = [["event", "ancestral_event", "ancestral_confidence", "ancestral_member_events", "ancestral_member_sequences", "cluster_tree_evidence", "cluster_distance_evidence", "cluster_signal_evidence", "cluster_source_similarity", "co_recombinant_members", "co_recombinant_evidence", "recombinant", "major_parent", "minor_parent", "start", "end", "start_ci", "end_ci", "wraps_origin", "breakpoint_model", "burt_states", "burt_switches", "burt_log_likelihood", "burt_selection", "burt_random_starts", "burt_posterior_threshold", "evidence_stale", "methods", "method_specific_intervals", "best_corrected_p", "decision", "warnings", "audit_entries"]];
+    events.forEach((event, index) => {
+      const coRecombinantSet = event.coRecombinantSets?.find((set) => set.presumedRecombinant === event.recombinant);
+      rows.push([
       String(index + 1),
       event.groupId ?? "",
+      event.ancestralCluster ? String(event.ancestralCluster.confidence) : "",
+      event.ancestralCluster?.memberEventIds.join(";") ?? "",
+      event.ancestralCluster?.sequenceMembers.map((member) => alignment.sequences[member]?.name ?? String(member + 1)).join(";") ?? "",
+      event.ancestralCluster ? String(event.ancestralCluster.evidenceCounts.phylogenetic) : "",
+      event.ancestralCluster ? String(event.ancestralCluster.evidenceCounts.distance) : "",
+      event.ancestralCluster ? String(event.ancestralCluster.evidenceCounts.detectableSignal) : "",
+      event.ancestralCluster ? String(event.ancestralCluster.evidenceCounts.sourceSimilarity ?? 0) : "",
+      coRecombinantSet?.sequenceMembers.map((member) => alignment.sequences[member]?.name ?? String(member + 1)).join(";") ?? "",
+      coRecombinantSet?.evidence.map((entry) => `${alignment.sequences[entry.sequence]?.name ?? entry.sequence + 1}:${entry.sets}/3[${entry.phylogenetic ? "tree" : ""}${entry.distance ? "+distance" : ""}${entry.detectableSignal ? "+signal" : ""}]`).join(";") ?? "",
       alignment.sequences[event.recombinant].name,
       alignment.sequences[event.majorParent].name,
       alignment.sequences[event.minorParent].name,
       String(event.start + 1),
       String(event.end),
+      `${event.confidenceStart[0] + 1}-${event.confidenceStart[1] + 1}`,
+      `${event.confidenceEnd[0]}-${event.confidenceEnd[1]}`,
       String(event.wraps),
       event.breakpointModel?.method ?? "raw",
+      event.breakpointModel?.states ? String(event.breakpointModel.states) : "",
+      event.breakpointModel?.switches?.map((entry) => `${entry.position + 1}:S${entry.fromState + 1}>S${entry.toState + 1}[${entry.confidence95[0] + 1}-${entry.confidence95[1] + 1}]`).join(";") ?? "",
+      event.breakpointModel?.logLikelihood !== undefined ? String(event.breakpointModel.logLikelihood) : "",
+      event.breakpointModel?.criterion ?? "",
+      event.breakpointModel?.randomStarts ? String(event.breakpointModel.randomStarts) : "",
+      event.breakpointModel?.posteriorThreshold !== undefined ? String(event.breakpointModel.posteriorThreshold) : "",
       String(event.evidenceStale),
       event.evidence.filter((item) => item.supported).map((item) => item.method).join(";"),
+      event.methodSignals?.filter((signal) => signal.method !== "shared-screen").map((signal) => `${signal.method}:${signal.start + 1}-${signal.end}${signal.wraps ? "(wrap)" : ""}:${signal.locator}${signal.method === "SiScan" ? `:outgroup=${signal.outgroup === null ? "randomized" : signal.outgroup === undefined ? signal.outgroupMode ?? "unspecified" : alignment.sequences[signal.outgroup]?.name ?? signal.outgroup + 1}:permutations=${signal.scanPermutations ?? "?"}/${signal.permutations ?? "?"}:score=${signal.scoreFamily ?? "?"}-${signal.pattern ?? "?"}:topology=${signal.baselineTopology ?? "?"}->${signal.inferredTopology ?? "?"}` : ""}`).join(";") ?? "",
       event.evidence.length ? String(Math.min(...event.evidence.map((item) => item.correctedP))) : "",
       event.decision,
       event.warnings.join(";"),
       String(event.history.length),
-    ]));
+      ]);
+    });
     download("rdp-web-events.csv", rows.map((row) => row.map((cell) => `"${cell.replaceAll('"', '""')}"`).join(",")).join("\n"), "text/csv");
   };
 
@@ -2339,19 +2703,60 @@ export default function Home() {
 
             <section className="settings-section controls">
               <div className="sidebar-title"><h3>Detection</h3><button type="button" onClick={() => setOptions(DEFAULT_OPTIONS)}>Defaults</button></div>
-              <label><span>Window size <b>{options.window} nt</b></span><input type="range" min={30} max={600} step={10} value={options.window} onChange={(event) => setOption("window", Number(event.target.value))}/></label>
+              <label><span>Window <small>nt / VNP by method</small> <b>{options.window}</b></span><input type="range" min={30} max={600} step={10} value={options.window} onChange={(event) => setOption("window", Number(event.target.value))}/></label>
               <label><span>Candidate parents <b>{options.exhaustive ? "All" : options.candidateParents}</b></span><input type="range" min={3} max={20} step={1} disabled={options.exhaustive} value={options.candidateParents} onChange={(event) => setOption("candidateParents", Number(event.target.value))}/></label>
               <label className="select-label"><span>Multiple testing</span><select value={options.correction} onChange={(event) => setOption("correction", event.target.value as AnalysisOptions["correction"])}><option value="bonferroni">Bonferroni</option><option value="holm">Holm step-down</option><option value="none">None (local p)</option></select></label>
               <label><span>Minimum support <b>{options.minMethods} methods</b></span><input type="range" min={1} max={Math.max(1, options.methods.length)} value={Math.min(options.minMethods, Math.max(1, options.methods.length))} onChange={(event) => setOption("minMethods", Number(event.target.value))}/></label>
               <details><summary>Advanced controls</summary><div className="advanced-controls">
                 <label className="switch"><input type="checkbox" checked={options.circular} onChange={(event) => setOption("circular", event.target.checked)}/><i/><span>Circular genome</span></label>
-                <label className="switch"><input type="checkbox" checked={options.polishBreakpoints} onChange={(event) => setOption("polishBreakpoints", event.target.checked)}/><i/><span>HMM-polish breakpoints</span></label>
+                <label className="switch"><input type="checkbox" checked={options.polishBreakpoints} onChange={(event) => setOption("polishBreakpoints", event.target.checked)}/><i/><span>BURT-polish breakpoints</span></label>
+                <label className="switch"><input type="checkbox" checked={options.ancestralClustering} onChange={(event) => setOption("ancestralClustering", event.target.checked)}/><i/><span>Infer ancestral event clusters</span></label>
                 <label className="switch"><input type="checkbox" checked={options.checkMisalignment} onChange={(event) => setOption("checkMisalignment", event.target.checked)}/><i/><span>Flag alignment artefacts</span></label>
                 <label className="switch"><input type="checkbox" checked={options.exhaustive} onChange={(event) => setOption("exhaustive", event.target.checked)}/><i/><span>Exhaustive parent search</span></label>
                 {options.mode === "query-reference" && <label className="switch"><input type="checkbox" checked={options.testReferences} onChange={(event) => setOption("testReferences", event.target.checked)}/><i/><span>Also test references as recombinants</span></label>}
+                <label><span>RDP VNP window <b>{options.rdpWindow}</b></span><input type="range" min={5} max={120} step={1} value={options.rdpWindow} onChange={(event) => setOption("rdpWindow", Number(event.target.value))}/></label>
+                <label><span>RDP signals retained/triplet <b>{options.rdpSignalsPerTriplet}</b></span><input type="range" min={8} max={256} step={8} value={options.rdpSignalsPerTriplet} onChange={(event) => setOption("rdpSignalsPerTriplet", Number(event.target.value))}/></label>
+                {options.methods.includes("GENECONV") && <label><span>GENECONV G-scale <b>{options.geneconvGScale.toFixed(1)}</b></span><input type="range" min={0} max={10} step={0.5} value={options.geneconvGScale} onChange={(event) => setOption("geneconvGScale", Number(event.target.value))}/></label>}
+                {options.methods.includes("SiScan") && <details className="parity-controls"><summary>SiScan source controls</summary><div>
+                  <label className="select-label"><span>Fourth-sequence strategy</span><select value={options.siskanOutgroupMode} onChange={(event) => setOption("siskanOutgroupMode", event.target.value as AnalysisOptions["siskanOutgroupMode"])}><option value="nearest">Nearest outlier · RDP5 default</option><option value="most-divergent">Most divergent sequence</option><option value="randomized">Horizontal randomization</option><option value="manual">One analyst-selected sequence</option></select></label>
+                  {options.siskanOutgroupMode === "manual" && <label className="select-label"><span>Selected fourth sequence</span><select value={options.siskanOutgroupSequence ?? ""} onChange={(event) => setOption("siskanOutgroupSequence", event.target.value === "" ? null : Number(event.target.value))}><option value="">Choose sequence…</option>{alignment.sequences.map((record, index) => <option key={`${record.name}-${index}`} value={index}>{index + 1}. {record.name}</option>)}</select></label>}
+                  <label className="select-label"><span>Informative positions</span><select value={options.siskanPositionMode} onChange={(event) => setOption("siskanPositionMode", event.target.value as AnalysisOptions["siskanPositionMode"])}><option value="triplet-variable">Variable in triplet · recommended</option><option value="quartet-variable">Variable in quartet</option><option value="all">All valid positions</option></select></label>
+                  <label className="select-label"><span>Gap treatment</span><select value={options.siskanGapMode} onChange={(event) => setOption("siskanGapMode", event.target.value as AnalysisOptions["siskanGapMode"])}><option value="strip">Strip gap-bearing positions</option><option value="fifth-state">Treat gaps as fifth state</option></select></label>
+                  <label><span>Window permutations <b>{options.siskanScanPermutations}</b></span><input type="range" min={20} max={500} step={20} value={options.siskanScanPermutations} onChange={(event) => { const value = Number(event.target.value); setOptions((current) => ({ ...current, siskanScanPermutations: value, siskanPValuePermutations: Math.max(value, current.siskanPValuePermutations) })); }}/></label>
+                  <label><span>Final-region permutations <b>{options.siskanPValuePermutations}</b></span><input type="range" min={100} max={5000} step={100} value={options.siskanPValuePermutations} onChange={(event) => setOption("siskanPValuePermutations", Math.max(options.siskanScanPermutations, Number(event.target.value)))}/></label>
+                  <p className="setting-help">The fast WASM category run only locates candidates. A result counts as SiScan support only after this source workflow confirms a co-located topology run.</p>
+                </div></details>}
                 <label><span>Bootstrap replicates <b>{options.bootstrapReplicates}</b></span><input type="range" min={0} max={500} step={25} value={options.bootstrapReplicates} onChange={(event) => setOption("bootstrapReplicates", Number(event.target.value))}/></label>
                 <label className="select-label"><span>Random seed</span><input type="number" min={0} max={4294967295} value={options.randomSeed} onChange={(event) => setOption("randomSeed", Number(event.target.value) >>> 0)}/></label>
                 <label className="select-label"><span>Global α</span><select value={options.alpha} onChange={(event) => setOption("alpha", Number(event.target.value))}><option value={0.1}>0.10</option><option value={0.05}>0.05</option><option value={0.01}>0.01</option><option value={0.001}>0.001</option></select></label>
+                <details className="parity-controls"><summary>BURT + event-clustering controls</summary><div>
+                  {options.polishBreakpoints && <>
+                    <label className="select-label"><span>BURT fitting mode</span><select value={options.burtMode} onChange={(event) => {
+                      const mode = event.target.value as AnalysisOptions["burtMode"];
+                      setOptions((current) => ({ ...current, burtMode: mode, burtRandomStarts: mode === "rdp5-source" ? 21 : 10, burtPosteriorThreshold: mode === "rdp5-source" ? 0.995 : 0.95 }));
+                    }}><option value="rdp5-source">RDP5 source · fixed 3-state</option><option value="manual-step-up">Manual spec · 2–20-state step-up</option></select></label>
+                    <label><span>Random starts <b>{options.burtRandomStarts}</b></span><input type="range" min={1} max={40} step={1} value={options.burtRandomStarts} onChange={(event) => setOption("burtRandomStarts", Number(event.target.value))}/></label>
+                    <label><span>Training iterations <b>{options.burtMaxIterations}</b></span><input type="range" min={10} max={200} step={10} value={options.burtMaxIterations} onChange={(event) => setOption("burtMaxIterations", Number(event.target.value))}/></label>
+                    {options.burtMode === "manual-step-up" && <><label><span>Maximum hidden states <b>{options.burtMaxStates}</b></span><input type="range" min={2} max={20} step={1} value={options.burtMaxStates} onChange={(event) => setOption("burtMaxStates", Number(event.target.value))}/></label><label className="switch"><input type="checkbox" checked={options.burtExhaustiveModels} onChange={(event) => setOption("burtExhaustiveModels", event.target.checked)}/><i/><span>Fit every state count through maximum</span></label></>}
+                    <label className="select-label"><span>Posterior interval threshold</span><select value={options.burtPosteriorThreshold} onChange={(event) => setOption("burtPosteriorThreshold", Number(event.target.value))}><option value={0.95}>95%</option><option value={0.975}>97.5%</option><option value={0.995}>99.5% · RDP5 source</option><option value={0.999}>99.9%</option></select></label>
+                  </>}
+                  {options.ancestralClustering && <>
+                    <label className="select-label"><span>Required evidence sets</span><select value={options.clusterMinimumSets} onChange={(event) => setOption("clusterMinimumSets", Number(event.target.value) as 1 | 2 | 3)}><option value={1}>1 · permissive</option><option value={2}>2 · RDP rule</option><option value={3}>3 · strict</option></select></label>
+                    <label><span>Breakpoint flank <b>{options.clusterFlankVnps} VNPs</b></span><input type="range" min={10} max={120} step={5} value={options.clusterFlankVnps} onChange={(event) => setOption("clusterFlankVnps", Number(event.target.value))}/></label>
+                    <label><span>Minimum distance r <b>{options.clusterCorrelationR.toFixed(2)}</b></span><input type="range" min={0.5} max={0.99} step={0.01} value={options.clusterCorrelationR} onChange={(event) => setOption("clusterCorrelationR", Number(event.target.value))}/></label>
+                    <label className="select-label"><span>Correlation P cutoff</span><select value={options.clusterCorrelationAlpha} onChange={(event) => setOption("clusterCorrelationAlpha", Number(event.target.value))}><option value={0.1}>0.10</option><option value={0.05}>0.05</option><option value={0.01}>0.01</option><option value={0.001}>0.001</option></select></label>
+                    <label><span>Signal overlap <b>{Math.round(options.clusterSignalOverlap * 100)}%</b></span><input type="range" min={0.1} max={0.8} step={0.05} value={options.clusterSignalOverlap} onChange={(event) => setOption("clusterSignalOverlap", Number(event.target.value))}/></label>
+                    <label><span>Topology margin <b>{options.clusterTopologyMargin.toFixed(3)}</b></span><input type="range" min={0} max={0.1} step={0.0025} value={options.clusterTopologyMargin} onChange={(event) => setOption("clusterTopologyMargin", Number(event.target.value))}/></label>
+                    <label><span>Tree bootstrap <b>{options.clusterBootstrapReplicates} replicates</b></span><input type="range" min={0} max={500} step={25} value={options.clusterBootstrapReplicates} onChange={(event) => setOption("clusterBootstrapReplicates", Number(event.target.value))}/></label>
+                    <label><span>Collapse branches below <b>{Math.round(options.clusterBootstrapCutoff * 100)}%</b></span><input type="range" min={0} max={0.95} step={0.05} value={options.clusterBootstrapCutoff} onChange={(event) => setOption("clusterBootstrapCutoff", Number(event.target.value))}/></label>
+                    <label><span>Bootstrap site blocks <b>{options.clusterBootstrapBlocks}</b></span><input type="range" min={16} max={512} step={16} value={options.clusterBootstrapBlocks} onChange={(event) => setOption("clusterBootstrapBlocks", Number(event.target.value))}/></label>
+                    <label><span>Tree cohort cap <b>{options.clusterTreeTaxaLimit} taxa</b></span><input type="range" min={4} max={100} step={4} value={options.clusterTreeTaxaLimit} onChange={(event) => setOption("clusterTreeTaxaLimit", Number(event.target.value))}/></label>
+                    <label><span>Cluster confidence <b>{Math.round(options.clusterMinimumConfidence * 100)}%</b></span><input type="range" min={0.2} max={0.95} step={0.05} value={options.clusterMinimumConfidence} onChange={(event) => setOption("clusterMinimumConfidence", Number(event.target.value))}/></label>
+                    <label><span>RDP5 event similarity <b>{options.clusterSourceSimilarity.toFixed(2)}</b></span><input type="range" min={0.02} max={0.3} step={0.01} value={options.clusterSourceSimilarity} onChange={(event) => setOption("clusterSourceSimilarity", Number(event.target.value))}/></label>
+                    <label className="switch"><input type="checkbox" checked={options.clusterReciprocal} onChange={(event) => setOption("clusterReciprocal", event.target.checked)}/><i/><span>Require reciprocal 2-of-3 support</span></label>
+                  </>}
+                  <p>Source defaults use 60 variable sites per flank, r &gt; 0.83, the 2-of-3 co-recombinant rule, 30% tract overlap, and the RDP5 &lt;0.1 event-similarity merge.</p>
+                </div></details>
               </div></details>
             </section>
           </div>
@@ -2361,21 +2766,27 @@ export default function Home() {
         <section className="workspace">
           {autosaveCandidate && <div className="autosave-banner"><div><strong>Unsaved local project found</strong><span>{autosaveCandidate.project.alignment.name} · {autosaveCandidate.project.events.length} hypotheses · saved {formatDateTime(autosaveCandidate.savedAt)}</span></div><button type="button" onClick={dismissAutosave}>Start fresh</button><button type="button" className="restore" onClick={restoreAutosave}>Restore autosave</button></div>}
           <nav className="tabs" aria-label="Analysis views">
-            {(["explore", "reconstruction", "trees", "alignment", "patterns", "export", "methods"] as Tab[]).map((item) => <button type="button" key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>{item === "explore" ? "Events & evidence" : item === "reconstruction" ? "Global reconstruction" : item === "trees" ? "⑂ Local trees" : item === "alignment" ? "Alignment" : item === "patterns" ? "Patterns & matrices" : item === "export" ? "Export" : "Methods & papers"}{item === "explore" && events.length > 0 && <span>{events.length}</span>}{item === "reconstruction" && events.some((event) => event.evidenceStale) && <span>!</span>}</button>)}
+            {(["explore", "reconstruction", "trees", "alignment", "patterns", "export", "methods"] as Tab[]).map((item) => <button type="button" key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>{item === "explore" ? "Review studio" : item === "reconstruction" ? "Global reconstruction" : item === "trees" ? "⑂ Local trees" : item === "alignment" ? "Alignment" : item === "patterns" ? "Patterns & matrices" : item === "export" ? "Export" : "Methods & papers"}{item === "explore" && events.length > 0 && <span>{events.length}</span>}{item === "reconstruction" && events.some((event) => event.evidenceStale) && <span>!</span>}</button>)}
           </nav>
 
           <div className="workspace-content">
-            {tab === "explore" && <>
-              {selectedEvent && <div className="selected-context"><div><span>Selected hypothesis · E{selectedIndex + 1}</span><b>{alignment.sequences[selectedEvent.recombinant].name}</b></div><div><span>Major parent</span><b>{alignment.sequences[selectedEvent.majorParent].name}</b></div><div><span>Minor parent</span><b>{alignment.sequences[selectedEvent.minorParent].name}</b></div><div><span>Region</span><b>{formatEventRegion(selectedEvent, alignment.length)}</b></div><button type="button" onClick={() => setTab("trees")}>Compare trees <span>→</span></button></div>}
-              <Panel title="Recombination map" action={<div className="map-summary"><span className="status-chip">{events.filter((event) => event.decision !== "rejected").length} visible events</span><span>{reviewed}/{events.length} reviewed</span>{events.some((event) => event.decision === "accepted" && !event.evidenceStale) && <button type="button" className="small-button" onClick={runIterativeAnalysis} title="Keep accepted hypotheses and exclude their recombinant sequences from the next target pass">↻ Rescan unresolved</button>}</div>}>
-                <Overview alignment={alignment} events={events} selectedId={selectedId} onSelect={setSelectedId}/>
-              </Panel>
-              {selectedEvent ? <>
-                <Panel title="Method-by-method result" action={<span className={`decision-label ${selectedEvent.evidenceStale ? "unreviewed" : selectedEvent.decision}`}>{selectedEvent.evidenceStale ? "evidence stale" : selectedEvent.decision}</span>}><MethodEvidencePanel alignment={alignment} event={selectedEvent} window={options.window} selectedMethod={selectedMethod} onSelectMethod={setSelectedMethod}/></Panel>
-                <Panel title="Identity context & breakpoint editor" action={<div className="region-chip"><span>Context plot—not a method-specific test</span><b>{formatEventRegion(selectedEvent, alignment.length)}</b></div>}><EvidencePlot alignment={alignment} event={selectedEvent} window={options.window} circular={options.circular} onUpdate={updateSelected}/></Panel>
-              </> : <div className="empty-state"><span className="empty-mark">∿</span><h2>No hypothesis selected</h2><p>Run the enabled methods, create a manual hypothesis, or load a truth-annotated example.</p><div className="empty-actions"><button type="button" className="run-inline" onClick={runAnalysis}><Icon name="run"/> Run local scan</button><button type="button" className="small-button" onClick={() => setExamplesOpen(true)}>Browse examples</button></div></div>}
-              <Panel title="Event hypotheses" action={<div className="table-actions"><button className="small-button" type="button" onClick={createManualEvent}>＋ Manual event</button><button className="small-button" type="button" onClick={() => exportResults("csv")}><Icon name="download" size={14}/> CSV</button></div>}><EventTable alignment={alignment} events={events} selectedId={selectedId} onSelect={setSelectedId}/></Panel>
-            </>}
+            {tab === "explore" && <ReviewWorkspace
+              alignment={alignment}
+              events={events}
+              selectedId={selectedId}
+              window={options.window}
+              circular={options.circular}
+              selectedMethod={selectedMethod}
+              onSelectMethod={setSelectedMethod}
+              onSelect={setSelectedId}
+              onUpdate={updateSelected}
+              onRescan={runIterativeAnalysis}
+              onRun={runAnalysis}
+              onOpenTrees={() => setTab("trees")}
+              onCreateManual={createManualEvent}
+              onExportCsv={() => exportResults("csv")}
+              rescanning={runState === "running"}
+            />}
 
             {tab === "reconstruction" && <ReconstructionWorkspace alignment={alignment} events={events} selectedId={selectedId} onSelect={(id, view = "explore") => { setSelectedId(id); setTab(view); }} onDecision={setEventDecision} onRescan={runIterativeAnalysis} rescanning={runState === "running"} autoResolveStatus={autoResolveStatus} onAutoResolve={runAutoResolve}/>}
 
@@ -2417,15 +2828,15 @@ export default function Home() {
                 <article><span className="export-icon">÷</span><h3>Split mosaic sequences</h3><p>Disassemble recombinants at in-scope breakpoints.</p><button disabled={!exportableEvents.length} type="button" onClick={() => exportClean("split")}><Icon name="download"/> FASTA</button></article>
                 <article><span className="export-icon">▤</span><h3>Breakpoint partitions</h3><p>Create non-overlapping sub-alignments bounded by in-scope breakpoints.</p><button disabled={!exportableEvents.length} type="button" onClick={() => exportClean("partition")}><Icon name="download"/> FASTA set</button></article>
               </div>
-              <Panel title="Results & provenance"><><div className="provenance-actions"><button type="button" onClick={() => exportResults("json")}><Icon name="download"/> Restorable project <small>.rdpweb schema 0.5 · all events + immutable project ledger</small></button><button type="button" onClick={() => exportResults("csv")}><Icon name="download"/> Event table CSV <small>all hypotheses, one event per row</small></button><button type="button" onClick={() => download("rdp-web-input.fasta", toFasta(alignment.sequences))}><Icon name="download"/> Input FASTA <small>normalized alignment</small></button></div><div className="run-provenance"><span><b>{auditLog.length}</b> project audit entries</span>{metrics && <><span><b>{metrics.comparisons.toLocaleString("en-US")}</b> triplets</span><span><b>{metrics.elapsedMs.toFixed(1)} ms</b> wall time</span><span><b>{metrics.matrixMode ?? "exact"}</b> parent screen</span>{metrics.timing && <span><b>{metrics.timing.distanceMs.toFixed(1)} / {metrics.timing.scanMs.toFixed(1)} / {metrics.timing.statisticsMs.toFixed(1)} / {(metrics.timing.diagnosticsMs ?? 0).toFixed(1)} ms</b> distance / scan / evidence / diagnostics</span>}</>}</div><details className="project-ledger"><summary>Project audit ledger · {auditLog.length} entries</summary><div>{[...auditLog].reverse().slice(0, 100).map((entry) => <article key={entry.id}><div><b>{entry.action}</b>{entry.eventSnapshot && <em>event tombstone saved</em>}</div><span>{entry.summary}</span><time dateTime={entry.timestamp}>{formatDateTime(entry.timestamp)}</time></article>)}</div></details></></Panel>
+              <Panel title="Results & provenance"><><div className="provenance-actions"><button type="button" onClick={() => exportResults("json")}><Icon name="download"/> Restorable project <small>.rdpweb schema 0.5 · all events + immutable project ledger</small></button><button type="button" onClick={() => exportResults("csv")}><Icon name="download"/> Event table CSV <small>all hypotheses, one event per row</small></button><button type="button" onClick={() => download("rdp-web-input.fasta", toFasta(alignment.sequences))}><Icon name="download"/> Input FASTA <small>normalized alignment</small></button></div><div className="run-provenance"><span><b>{auditLog.length}</b> project audit entries</span>{metrics && <><span><b>{metrics.comparisons.toLocaleString("en-US")}</b> triplets</span><span><b>{metrics.elapsedMs.toFixed(1)} ms</b> wall time</span><span><b>{metrics.matrixMode ?? "exact"}</b> parent screen</span>{Boolean(metrics.rdpSignalTruncations) && <span><b>{metrics.rdpSignalTruncations?.toLocaleString("en-US")}</b> lower-ranked RDP signals omitted at cap</span>}{metrics.timing && <span><b>{metrics.timing.distanceMs.toFixed(1)} / {metrics.timing.scanMs.toFixed(1)} / {metrics.timing.statisticsMs.toFixed(1)} / {(metrics.timing.diagnosticsMs ?? 0).toFixed(1)} ms</b> distance / scan / evidence / diagnostics</span>}</>}</div><details className="project-ledger"><summary>Project audit ledger · {auditLog.length} entries</summary><div>{[...auditLog].reverse().slice(0, 100).map((entry) => <article key={entry.id}><div><b>{entry.action}</b>{entry.eventSnapshot && <em>event tombstone saved</em>}</div><span>{entry.summary}</span><time dateTime={entry.timestamp}>{formatDateTime(entry.timestamp)}</time></article>)}</div></details></></Panel>
             </>}
 
             {tab === "methods" && <>
-              <div className="methods-heading"><div><span className="eyebrow">Scientific basis</span><h1>Methods, limits, and primary sources.</h1><p>This MIT-licensed implementation is clean-room: papers and public documentation define behavior; no GPL OpenRDP or proprietary RDP source is incorporated.</p></div><input aria-label="Filter methods and papers" placeholder="Filter methods or papers…" value={methodFilter} onChange={(event) => setMethodFilter(event.target.value)}/></div>
-              <div className="fidelity-banner"><strong>Validation state · scientific alpha</strong><p>Method-specific WebAssembly kernels, seeded triplet bootstraps, exact bounded 3SEQ dynamic programming, circular events, a windowless two-state HMM, review workflow, and restorable projects are operational. Full BURT fitting, method-specific permutation parity, and RDP5 numerical validation are not yet established; results must be independently verified.</p><a href="https://github.com/PoonLab/OpenRDP" target="_blank" rel="noreferrer">Why OpenRDP code is not bundled ↗</a></div>
+              <div className="methods-heading"><div><span className="eyebrow">Scientific basis</span><h1>Methods, limits, and primary sources.</h1><p>This MIT-licensed implementation combines papers and the RDP5 manual with source-compatible ports made from the original RDP code supplied by its authors.</p></div><input aria-label="Filter methods and papers" placeholder="Filter methods or papers…" value={methodFilter} onChange={(event) => setMethodFilter(event.target.value)}/></div>
+              <div className="fidelity-banner"><strong>Validation state · scientific alpha</strong><p>The active engine now includes multi-signal RDP5 VNP scanning, independent locators for all seven primary families, source BURT breakpoint refinement, recursive erase/extract signal disassembly, source-style event merging, all-sequence/all-three-orientation co-recombinant screening, seeded JC/NJ bootstrap tree evidence, the source SiScan 15-category/outgroup/permutation workflow, and the default RDP5 recombinant-identification consensus: 18 standalone source statistics, its final-trim penalty, and six joint rules. Remaining numerical-parity gates include GENECONV indel/overlap/permutation modes, full multi-taxon BootScan, exact MaxChi/Chimaera peak-growth edges, the optional logistic/neural role selectors, exact Clearcut/CheckBSTree behavior, and a broad RDP5 desktop regression corpus.</p><a href="https://github.com/PoonLab/OpenRDP" target="_blank" rel="noreferrer">OpenRDP algorithm reference ↗</a></div>
               <Panel title="Primary exploratory methods" action={<span className="panel-caption">Seven-method consensus</span>}><div className="method-catalog">{PRIMARY_METHODS.filter((method) => `${method} ${METHOD_META[method].family} ${METHOD_META[method].detail}`.toLowerCase().includes(methodFilter.toLowerCase())).map((method) => <article key={method}><div><span className={options.methods.includes(method) ? "support-dot" : "support-dot muted"}/><h3>{method}</h3><em>{METHOD_META[method].family}</em></div><p>{METHOD_META[method].detail}</p><a href={METHOD_META[method].citation} target="_blank" rel="noreferrer">Primary method paper ↗</a></article>)}</div></Panel>
               <Panel title="Secondary verification views"><div className="secondary-methods">{[
-                ["BURT precursor", "Operational windowless two-state Viterbi polishing; full 2–20-state fitting remains on the parity track", "RDP5 Manual §8.13", "operational precursor"],
+                ["BURT", "RDP5-source fixed-three-state random-start fitting plus manual-spec 2–20-state BIC/AIC step-up, posterior intervals, and switch ledger", "RDP5 source + Manual §8.13", "operational"],
                 ["LARD", "Likelihood-ratio breakpoint comparison", "Holmes et al. 1999"],
                 ["PhylPro", "Local phylogenetic profiles", "Weiller 1998"],
                 ["VisRD", "Quartet scanning", "Lemey et al. 2009"],
@@ -2438,7 +2849,7 @@ export default function Home() {
           </div>
         </section>
 
-        <Inspector alignment={alignment} event={selectedEvent} onDecision={(decision) => updateSelected({ decision }, decision === "accepted" ? "Accepted event" : decision === "rejected" ? "Rejected event" : "Reset review decision")} onUpdate={updateSelected} onNavigate={navigateEvent} onDuplicate={duplicateSelected} onDelete={deleteSelected} onRecalculate={recalculateSelected} onOpenTrees={() => setTab("trees")} onOpenMethod={(method) => { setSelectedMethod(method); setTab("explore"); }} recalculating={runState === "running"} canPrevious={selectedIndex > 0} canNext={selectedIndex >= 0 && selectedIndex < events.length - 1} groupIds={groupIds}/>
+        <Inspector alignment={alignment} event={selectedEvent} onDecision={(decision) => { if (selectedEvent) setEventDecision(selectedEvent.id, decision); }} onDecisionGroup={setSelectedGroupDecision} onUpdate={updateSelected} onUpdateGroup={updateSelectedGroup} onNavigate={navigateEvent} onDuplicate={duplicateSelected} onDelete={deleteSelected} onRecalculate={recalculateSelected} onOpenTrees={() => setTab("trees")} onOpenMethod={(method) => { setSelectedMethod(method); setTab("explore"); }} recalculating={runState === "running"} canPrevious={selectedIndex > 0} canNext={selectedIndex >= 0 && selectedIndex < events.length - 1} groupIds={groupIds} groupSize={selectedGroupSize}/>
       </div>
 
       {examplesOpen && <ExampleLibrary onClose={() => setExamplesOpen(false)} onLoad={loadExample}/>}

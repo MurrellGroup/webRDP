@@ -15,30 +15,40 @@ node bench/benchmark.mjs 100 10000
 The August 2026 development-container run for 100 sequences × 10,000 sites
 (one million aligned nucleotides), eight parent candidates per recombinant,
 2,800 O(L) triplet comparisons, method-family statistics on the 500 strongest
-raw signals, and windowless HMM refinement on those retained signals reported:
+raw signals, and windowless HMM refinement on those retained signals. The same
+command also runs an independent 4 × 80 kb source SiScan fixture with 100
+window and 1,000 final-region permutations. It reported:
 
 | Stage | Time |
 | --- | ---: |
-| Scalar distance reference | 141.72 ms |
-| Packed production distance | 8.80 ms |
-| Packed distance speed-up | 16.11× |
-| Triplet candidate scans | 191.47 ms |
-| Seven-family evidence + 100×3 bootstrap kernels | 180.36 ms |
-| Two-state HMM polishing | 40.86 ms |
-| Production-kernel total | 421.49 ms |
-| Triplet scan throughput | 146.2 million site-comparisons/s |
+| Scalar distance reference | 136.45 ms |
+| Packed production distance | 8.93 ms |
+| Packed distance speed-up | 15.28× |
+| Triplet candidate scans | 189.38 ms |
+| Seven-family evidence + 100×3 bootstrap kernels | 733.27 ms |
+| Legacy HMM compatibility kernel | 57.10 ms |
+| Packed 30-taxon VisRD/dMax role statistic | 81.50 ms |
+| Source PHI, 100 taxa × 256 retained / 9,928 informative sites | 41.07 ms |
+| Production-kernel total | 1,111.24 ms |
+| Triplet scan throughput | 147.9 million site-comparisons/s |
+| VisRD throughput | 1.209 billion site-quartets/s |
+| Source SiScan, 4 × 80 kb, 100/1,000 permutations | 287.30 ms |
 
 `npm run bench:gate` enforces deliberately hardware-tolerant CI ceilings for
-the same workload (150 ms packed distance, 1.5 s production total, and at
-least 30 million triplet site-comparisons/s) so large regressions cannot ship
+the same workload (150 ms packed distance, 500 ms for the production 30-taxon
+VisRD/dMax cohort, 500 ms for bounded source PHI, 2 s production total, and at least 30 million triplet
+site-comparisons/s), plus a 2 s ceiling and exact 30,000–45,000 tract-recovery
+gate for the 80 kb source SiScan workload, so large regressions cannot ship
 silently while ordinary runner variance remains harmless.
 
 This measures WebAssembly kernels in Node, not an RDP5-equivalent seven-program
-analysis, and must not be compared directly with RDP4/RDP5 wall-clock figures.
+analysis. It now includes the production VisRD/dMax path used by source-parity
+recombinant-role consensus, but must not be compared directly with RDP4/RDP5
+wall-clock figures.
 Browser, device, rendering, and file-parsing costs are not included. The
 synthetic 12 × 2,400 end-to-end module-worker fixture completes in roughly
-40–70 ms with bootstraps, challenge diagnostics and exact bounded probability
-work, and localizes both inserted mosaic tracts. A 600-site circular fixture
+0.9–1.2 s with source SiScan, bootstraps, challenge diagnostics and exact
+bounded probability work, and localizes both inserted mosaic tracts. A 600-site circular fixture
 recovers a known 520→100 origin-spanning event. A separate 513-sequence fixture
 forces the sampled/stratified large-data path and verifies a compact 24 × 24
 display matrix without allocating an N² matrix.
@@ -67,6 +77,16 @@ display matrix without allocating an N² matrix.
   inappropriate.
 - Seeded bootstrap resampling is compiled into WebAssembly and capped at 1,000
   replicates; the default 100-replicate, three-region pass adds bounded work.
+- Source SiScan keeps the desktop random stream but does not allocate the
+  historical `(permutations+1) × (alignment length+1)` byte table once it would
+  exceed 8 MB. It regenerates the exact MSVC values in the worker, rolls
+  fixed-outgroup category counts between windows, and caches permutation-class
+  prefix ranges shared by every triplet with the same window/replicate setup.
+- The source PHI incompatibility graph is O(S²N), so the worker retains up to
+  384 informative sites at ≤96 taxa, 256 at 97–256 taxa, and 160 above 256
+  taxa. Selection is deterministic and position-balanced; projects record
+  retained and total informative-site counts and never label a bounded result
+  as an all-site PHI test.
 - A method bitmask now prevents disabled GENECONV, BootScan, MaxChi, Chimaera,
   SiScan, 3SEQ, and local-polishing loops from running. In particular, disabled
   BootScan performs no resampling and disabled 3SEQ performs no exact DP.
@@ -95,6 +115,10 @@ display matrix without allocating an N² matrix.
   dry-run rendering keeps sliders responsive. A 5,000-event development check
   took about 64 ms for a sparse 520-sequence queue and 25 ms for a deliberately
   concentrated same-recombinant queue.
+- The Review studio filters and navigates the queue in O(E). Its three-polarity
+  role challenge samples at most 4,096 positions per tract/background segment
+  and advances directly by the sampling stride, so opening the inspector does
+  not add a full-length pass on long bacterial alignments.
 - Dense genome-position matrices render through one canvas per view rather than
   thousands of interactive DOM cells. Breakpoint pairs are O(E); the region
   matrix is O(ER²) with an adaptive cap of R=48 above 2,000 visible events and

@@ -28,6 +28,13 @@ touch "${project_root}/out/.nojekyll"
 [[ -f "${project_root}/out/index.html" ]]
 [[ -f "${project_root}/out/rdp-worker.js" ]]
 [[ -f "${project_root}/out/rdp-statistics.js" ]]
+[[ -f "${project_root}/out/rdp-siscan.js" ]]
+[[ -f "${project_root}/out/rdp-phi.js" ]]
+[[ -f "${project_root}/out/rdp-bootstrap-tree.js" ]]
+[[ -f "${project_root}/out/rdp-burt.js" ]]
+[[ -f "${project_root}/out/rdp-clustering.js" ]]
+[[ -f "${project_root}/out/rdp-disassembly.js" ]]
+[[ -f "${project_root}/out/rdp-recombinant-identification.js" ]]
 [[ -f "${project_root}/out/wasm/rdp.wasm" ]]
 
 if [[ -n "${pages_base}" ]]; then

@@ -1,12 +1,47 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { binomialUpper, methodEvidence, threeSeqExactP } from "../public/rdp-statistics.js";
+import { binomialUpper, chiSquareP, geneconvSourceG0Probability, geneconvSourceProbability, methodEvidence, rdp5SourceProbability, sourceChiWindowProbability, threeSeqExactP } from "../public/rdp-statistics.js";
 
 test("exact binomial upper tail matches closed-form small cases", () => {
   assert.ok(Math.abs(binomialUpper(5, 10, 0.5) - 0.623046875) < 1e-12);
   assert.ok(Math.abs(binomialUpper(10, 10, 0.5) - 0.0009765625) < 1e-12);
   assert.equal(binomialUpper(0, 10, 0.5), 1);
   assert.ok(binomialUpper(900, 1_000, 0.5) > 0);
+});
+
+test("RDP5 source calibration retains its y-1 scan multiplier", () => {
+  const source = {
+    tractSites: 10,
+    common: 8,
+    mediumSites: 20,
+    informativeSites: 100,
+    probabilitySites: 99,
+  };
+  const expected = binomialUpper(8, 10, 0.2) * 9.9;
+  assert.ok(Math.abs(rdp5SourceProbability(source) - expected) < 1e-14);
+  assert.notEqual(rdp5SourceProbability(source), binomialUpper(8, 10, 0.2) * 10);
+});
+
+test("GENECONV G=0 calibration is the RDP5 CalcKMax/GCCalc specialization", () => {
+  const run = 12;
+  const sites = 40;
+  const matches = 30;
+  const expected = 1 - Math.exp(-10 * Math.pow(0.75, run));
+  assert.ok(Math.abs(geneconvSourceG0Probability(run, sites, matches) - expected) < 1e-14);
+  assert.equal(geneconvSourceG0Probability(3, sites, matches), 1, "RDP5 requires a score above three");
+  assert.equal(geneconvSourceG0Probability(run, sites, sites), 1, "an identical pair is not a valid source fragment family");
+});
+
+test("GENECONV finite G-scale follows the RDP5 lambda/K root calculation", () => {
+  assert.ok(Math.abs(geneconvSourceProbability(30, 100, 70, 1) - 0.00853636746733932) < 1e-14);
+  assert.equal(geneconvSourceProbability(30, 100, 70, 0), geneconvSourceG0Probability(30, 100, 70));
+  assert.equal(geneconvSourceProbability(20, 100, 90, 0.1), 1, "a non-negative expected fragment score has no finite KA root");
+});
+
+test("MAXCHI/CHIMAERA calibration uses the RDP5 informative half-window multiplier", () => {
+  const statistic = 18.5;
+  const expected = chiSquareP(statistic) * (240 / 50) * 3;
+  assert.ok(Math.abs(sourceChiWindowProbability(statistic, 240, 100) - expected) < 1e-14);
 });
 
 test("method families retain independent statistics and calibrations", () => {
@@ -44,6 +79,42 @@ test("method families retain independent statistics and calibrations", () => {
   assert.equal(new Set(evidence.map((item) => item.statisticLabel)).size, 6);
   assert.equal(new Set(evidence.map((item) => item.calibration)).size, 7);
   assert.ok(new Set(evidence.map((item) => item.pValue.toPrecision(8))).size >= 5);
+});
+
+test("a method cannot confirm a distant candidate without a co-located signal", () => {
+  const evidence = methodEvidence({
+    insideMinor: 20,
+    insideMajor: 2,
+    outsideMinor: 2,
+    outsideMajor: 20,
+    methodSignals: [{ method: "RDP" }],
+  }, {
+    genconvRun: 20,
+    genconvEligible: 40,
+    genconvMatches: 30,
+    bootscanConsistent: 0,
+    bootscanWindows: 0,
+    bootscanBootstrapConsistent: 0,
+    bootscanBootstrapReplicates: 0,
+    maxChi: 0,
+    chimaera: 0,
+    siskanScore: 0,
+    siskanSites: 0,
+    threeSeqDescent: 0,
+    threeSeqSites: 0,
+    threeSeqMajorSites: 0,
+    threeSeqMinorSites: 0,
+  }, {
+    methods: ["RDP", "GENECONV"],
+    window: 20,
+    step: 1,
+    correction: "none",
+    alpha: 0.05,
+  }, 1, 100);
+  const geneconv = evidence.find((row) => row.method === "GENECONV");
+  assert.equal(geneconv?.supported, false);
+  assert.equal(geneconv?.pValue, 1);
+  assert.equal(geneconv?.calibration, "no co-located discovery signal");
 });
 
 function bruteForceThreeSeq(up, down, threshold) {

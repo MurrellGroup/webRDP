@@ -2,11 +2,23 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-const [page, styles, worker] = await Promise.all([
+const [page, styles, worker, recombinantIdentification, sisterScan, phi] = await Promise.all([
   readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
   readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
   readFile(new URL("../public/rdp-worker.js", import.meta.url), "utf8"),
+  readFile(new URL("../public/rdp-recombinant-identification.js", import.meta.url), "utf8"),
+  readFile(new URL("../public/rdp-siscan.js", import.meta.url), "utf8"),
+  readFile(new URL("../public/rdp-phi.js", import.meta.url), "utf8"),
 ]);
+
+test("the false-positive studio uses the source PHI statistic rather than a PHI-labelled surrogate", () => {
+  assert.match(page, /RDP5 PHI analytic p/);
+  assert.match(page, /source PHITest2 moments/);
+  assert.match(worker, /sourcePhiTest/);
+  assert.match(phi, /export function sourcePairIncompatibility/);
+  assert.match(phi, /export function sourcePhiAnalyticMeanVariance/);
+  assert.match(phi, /RDP5 PHITest2\/PHI\/pair_score/);
+});
 
 test("workspace owns vertical scrolling and generic panels expand without leaking paint", () => {
   assert.match(styles, /\.workspace-content\s*\{[^}]*overflow-y:\s*auto/s);
@@ -20,6 +32,21 @@ test("workspace owns vertical scrolling and generic panels expand without leakin
   const overviewRule = styles.match(/\.overview-scroll\s*\{([^}]*)\}/)?.[1] ?? "";
   assert.match(overviewRule, /overflow:\s*auto/);
   assert.match(overviewRule, /contain:\s*layout paint/);
+});
+
+test("source SiScan controls, provenance, and interactive trace are wired", () => {
+  assert.match(page, /SiScan source controls/);
+  assert.match(page, /Nearest outlier · RDP5 default/);
+  assert.match(page, /One analyst-selected sequence/);
+  assert.match(page, /Final-region permutations/);
+  assert.match(page, /RDP5 source topology-run Z/);
+  assert.match(page, /selectedSignal\?\.profile/);
+  assert.match(worker, /runSourceSiScan/);
+  assert.match(worker, /sourceSiScanProfile/);
+  assert.match(worker, /sourceResult\?\.regions/);
+  assert.match(sisterScan, /export function sourceSiScanPattern/);
+  assert.match(sisterScan, /buildPermutationPrefix/);
+  assert.match(sisterScan, /GetSSOL \+ Get3Score\/GetPScores2 \+ DoPerms3P/);
 });
 
 test("every Panel exposes an accessible full-screen control", () => {
@@ -37,6 +64,45 @@ test("alignment highlighter, reconstruction, and connected tree renderer are wir
   assert.match(page, /buildReconstructionModel/);
   assert.match(page, /className="tree-branches"/);
   assert.match(page, /layoutNeighborJoiningTree/);
+});
+
+test("source-guided review studio exposes the ordered RDP5 refinement workflow", () => {
+  assert.match(page, /RDP5-style hypothesis refinement/);
+  assert.match(page, /Ordered reconstruction queue/);
+  assert.match(page, /Best unresolved/);
+  assert.match(page, /Skip accepted/);
+  assert.match(page, /Method-by-method confirmation/);
+  assert.match(page, /Role-assignment challenge/);
+  assert.match(page, /RDP5 recombinant identification/);
+  assert.match(page, /Source test ledger/);
+  assert.match(page, /Role-consensus confidence/);
+  assert.match(page, /Apply these breakpoints to all/);
+  assert.match(page, /Accept group/);
+  assert.match(page, /Tract vs combined background/);
+  assert.match(page, /midpoint-oriented for readability but has no inferred root/);
+  assert.match(page, /navigateReviewEvent/);
+  assert.match(page, /roleAssignmentTrials/);
+  assert.match(page, /GENECONV G-scale/);
+  assert.match(page, /RDP signals retained\/triplet/);
+  assert.match(page, /Tree bootstrap/);
+  assert.match(page, /Collapse branches below/);
+  assert.match(page, /Bootstrap site blocks/);
+  assert.match(page, /Tree cohort cap/);
+  assert.match(page, /Signal-disassembly lineage/);
+  assert.match(styles, /\.review-queue-list\s*\{[^}]*overflow:\s*auto/s);
+  assert.match(styles, /\.review-workspace\s*\{[^}]*display:\s*grid/s);
+  assert.match(styles, /\.role-source-tests\s*\{[^}]*display:\s*grid/s);
+  assert.match(worker, /identifyRecombinantRoles/);
+  assert.match(recombinantIdentification, /export function sourcePhPrScores/);
+  assert.match(recombinantIdentification, /export function sourceTrpScores/);
+  assert.match(recombinantIdentification, /export function sourceOuCheckScores/);
+  assert.match(recombinantIdentification, /export function sourceHistoricalSetMembers/);
+  assert.match(recombinantIdentification, /export function sourceParsimonyScores/);
+  assert.match(recombinantIdentification, /export function sourceConflictScores/);
+  assert.match(recombinantIdentification, /export function sourceSetDistanceScores/);
+  assert.match(recombinantIdentification, /export function sourceDmaxScores/);
+  assert.match(recombinantIdentification, /MakeTrpGroups \+ MakeTrpScore/);
+  assert.match(recombinantIdentification, /FinalTrim \+ RCompatC\/RCompatD \+ MakeConsensusC/);
 });
 
 test("global reconstruction exposes tunable ordered auto-resolution and dependency rescans", () => {
