@@ -5,6 +5,11 @@
 // small, stable ABI keeps the analysis worker independent of the legacy VB6 /
 // Win32 runtime while preserving the numerical and event-delineation rules.
 
+export {
+  scan_source_bootscan_batch,
+  scan_source_bootscan_batch_packed,
+} from "./bootscan";
+
 @inline
 function valid(base: u8): bool {
   return base < 4;
@@ -1303,6 +1308,674 @@ export function scan_source_chi_all_packed(
     smoothPtr,
     peakPtr,
     peakCapacity,
+    outPtr,
+    outCapacity,
+  );
+}
+
+// RDP5 GENECONV is a six-track fragment scan over one concrete triplet.  It
+// is not a pairwise longest-run test: FindSubSeqGCAP6 first removes sites that
+// are invariant or incomplete in this triplet, GetFragsP then constructs the
+// three pair-identity tracks and the three complementary "outer" tracks, and
+// GCXoverD drains a single calibrated fragment queue shared by all six tracks.
+//
+// The implementation below preserves those rules while replacing the native
+// routine's quadratic extension of every positive run.  A right-to-left
+// monotone excursion index finds the first negative crossing and latest
+// maximum endpoint for every run in exact O(L) time.  A max heap drains the
+// source p-value order without rescanning every remaining fragment.
+
+const SOURCE_GENECONV_ROW_INTS: i32 = 16;
+const SOURCE_GENECONV_CALIBRATION_BYTES: i32 = 40;
+const SOURCE_GENECONV_CANDIDATE_BYTES: i32 = 24;
+
+@inline
+function sourceGeneconvPositive(category: i32, track: i32): bool {
+  if (track == 0) return category == 0;
+  if (track == 1) return category == 1;
+  if (track == 2) return category == 2;
+  if (track == 3) return category == 2 || category == 6;
+  if (track == 4) return category == 1 || category == 6;
+  return category == 0 || category == 6;
+}
+
+function sourceGeneconvBuildTriplet(
+  seqPtr: i32,
+  nSites: i32,
+  sequence0: i32,
+  sequence1: i32,
+  sequence2: i32,
+  positionsPtr: i32,
+  categoriesPtr: i32,
+): i32 {
+  let informative: i32 = 0;
+  for (let site: i32 = 0; site < nSites; site += 1) {
+    const a = seqBase(seqPtr, nSites, sequence0, site);
+    const b = seqBase(seqPtr, nSites, sequence1, site);
+    const c = seqBase(seqPtr, nSites, sequence2, site);
+    if (!valid(a) || !valid(b) || !valid(c) || (a == b && a == c)) continue;
+    const category = a == b ? 0 : a == c ? 1 : b == c ? 2 : 6;
+    store<i32>(usize(positionsPtr + informative * 4), site);
+    store<u8>(usize(categoriesPtr + informative), u8(category));
+    informative += 1;
+  }
+  return informative;
+}
+
+function sourceGeneconvBuildTripletPacked(
+  packedPtr: i32,
+  validityPtr: i32,
+  wordsPerSequence: i32,
+  nSites: i32,
+  sequence0: i32,
+  sequence1: i32,
+  sequence2: i32,
+  positionsPtr: i32,
+  categoriesPtr: i32,
+): i32 {
+  const offset0 = sequence0 * wordsPerSequence;
+  const offset1 = sequence1 * wordsPerSequence;
+  const offset2 = sequence2 * wordsPerSequence;
+  let informative: i32 = 0;
+  for (let word: i32 = 0; word < wordsPerSequence; word += 1) {
+    const a = load<u32>(usize(packedPtr + (offset0 + word) * 4));
+    const b = load<u32>(usize(packedPtr + (offset1 + word) * 4));
+    const c = load<u32>(usize(packedPtr + (offset2 + word) * 4));
+    let rawLaneMask: u32 = 0x55555555;
+    const remaining = nSites - word * 16;
+    if (remaining < 16) {
+      rawLaneMask = 0;
+      for (let lane: i32 = 0; lane < remaining; lane += 1) {
+        rawLaneMask |= u32(1) << u32(lane * 2);
+      }
+    }
+    const allValid = load<u32>(usize(validityPtr + (offset0 + word) * 4))
+      & load<u32>(usize(validityPtr + (offset1 + word) * 4))
+      & load<u32>(usize(validityPtr + (offset2 + word) * 4))
+      & rawLaneMask;
+    const ab = packedEquality(a, b, allValid);
+    const ac = packedEquality(a, c, allValid);
+    const bc = packedEquality(b, c, allValid);
+    let variable = allValid & ~(ab & ac);
+    while (variable != 0) {
+      const bit = i32(ctz<u32>(variable));
+      const lane = u32(1) << u32(bit);
+      const category = (ab & lane) != 0 ? 0 : (ac & lane) != 0 ? 1 : (bc & lane) != 0 ? 2 : 6;
+      store<i32>(usize(positionsPtr + informative * 4), word * 16 + bit / 2);
+      store<u8>(usize(categoriesPtr + informative), u8(category));
+      informative += 1;
+      variable &= variable - 1;
+    }
+  }
+  return informative;
+}
+
+function sourceGeneconvBuildRuns(
+  categoriesPtr: i32,
+  informative: i32,
+  track: i32,
+  runStartPtr: i32,
+  runEndPtr: i32,
+  runScorePtr: i32,
+): i32 {
+  if (informative <= 0) return 0;
+  let runCount: i32 = 0;
+  let start: i32 = 0;
+  let positive = sourceGeneconvPositive(i32(load<u8>(usize(categoriesPtr))), track);
+  for (let rank: i32 = 1; rank <= informative; rank += 1) {
+    const nextPositive = rank < informative
+      ? sourceGeneconvPositive(i32(load<u8>(usize(categoriesPtr + rank))), track)
+      : !positive;
+    if (rank < informative && nextPositive == positive) continue;
+    const length = rank - start;
+    store<i32>(usize(runStartPtr + runCount * 4), start);
+    store<i32>(usize(runEndPtr + runCount * 4), rank - 1);
+    store<i32>(usize(runScorePtr + runCount * 4), positive ? length : -length);
+    runCount += 1;
+    start = rank;
+    positive = nextPositive;
+  }
+  return runCount;
+}
+
+function sourceGeneconvBuildTree(
+  runScorePtr: i32,
+  runCount: i32,
+  mismatchPenalty: i32,
+  prefixPtr: i32,
+  treePtr: i32,
+): i32 {
+  let prefix: f64 = 0.0;
+  store<f64>(usize(prefixPtr), prefix);
+  for (let run: i32 = 0; run < runCount; run += 1) {
+    const raw = load<i32>(usize(runScorePtr + run * 4));
+    prefix += raw > 0 ? f64(raw) : f64(raw * mismatchPenalty);
+    store<f64>(usize(prefixPtr + (run + 1) * 8), prefix);
+  }
+  // For prefix i, the native loop may advance until the first later prefix
+  // below prefix[i], retaining the latest maximum before that point.  A
+  // right-to-left monotone stack partitions exactly those excursions into
+  // contiguous blocks.  Merging each popped block's cached maximum computes
+  // every source endpoint in linear time (and preserves the native >= tie).
+  const prefixCount = runCount + 1;
+  const stackPtr = treePtr;
+  const maximaPtr = treePtr + ((prefixCount * 4 + 7) & ~7);
+  const maximaIndexPtr = maximaPtr + prefixCount * 8;
+  let stackSize: i32 = 0;
+  for (let index: i32 = runCount; index >= 0; index -= 1) {
+    const value = load<f64>(usize(prefixPtr + index * 8));
+    let maximum = value;
+    let maximumIndex = index;
+    while (stackSize > 0) {
+      const top = load<i32>(usize(stackPtr + (stackSize - 1) * 4));
+      if (load<f64>(usize(prefixPtr + top * 8)) < value) break;
+      const blockMaximum = load<f64>(usize(maximaPtr + top * 8));
+      const blockMaximumIndex = load<i32>(usize(maximaIndexPtr + top * 4));
+      if (blockMaximum > maximum || (blockMaximum == maximum && blockMaximumIndex > maximumIndex)) {
+        maximum = blockMaximum;
+        maximumIndex = blockMaximumIndex;
+      }
+      stackSize -= 1;
+    }
+    store<f64>(usize(maximaPtr + index * 8), maximum);
+    store<i32>(usize(maximaIndexPtr + index * 4), maximumIndex);
+    store<i32>(usize(stackPtr + stackSize * 4), index);
+    stackSize += 1;
+  }
+  return prefixCount;
+}
+
+function sourceGeneconvFragmentScore(
+  gScale: i32,
+  runIndex: i32,
+  runCount: i32,
+  runEndPtr: i32,
+  runScorePtr: i32,
+  prefixPtr: i32,
+  treePtr: i32,
+  treeBase: i32,
+  resultPtr: i32,
+): i32 {
+  if (gScale <= 0) {
+    store<i32>(usize(resultPtr), load<i32>(usize(runEndPtr + runIndex * 4)));
+    return load<i32>(usize(runScorePtr + runIndex * 4));
+  }
+  const threshold = load<f64>(usize(prefixPtr + runIndex * 8));
+  const prefixCount = treeBase;
+  const maximaPtr = treePtr + ((prefixCount * 4 + 7) & ~7);
+  const maximaIndexPtr = maximaPtr + prefixCount * 8;
+  const maximum = load<f64>(usize(maximaPtr + runIndex * 8));
+  const maximumPrefix = load<i32>(usize(maximaIndexPtr + runIndex * 4));
+  const endRun = maximumPrefix > runIndex ? maximumPrefix - 1 : runIndex;
+  store<i32>(usize(resultPtr), load<i32>(usize(runEndPtr + endRun * 4)));
+  return i32(maximum - threshold);
+}
+
+function sourceGeneconvCalibrate(
+  informative: i32,
+  mismatchSites: i32,
+  gScale: i32,
+  highScore: i32,
+  pCutoff: f64,
+  calibrationPtr: i32,
+): bool {
+  if (mismatchSites <= 0 || mismatchSites >= informative || highScore <= 3) return false;
+  const mismatchProbability = f64(mismatchSites) / f64(informative);
+  const matchProbability = 1.0 - mismatchProbability;
+  const mismatchPenalty = gScale > 0
+    ? i32(f64(informative * gScale) / f64(mismatchSites)) + 1
+    : 1;
+  let lambda: f64 = 0.0;
+  let kMaximum: f64 = 0.0;
+  if (gScale <= 0) {
+    lambda = -Math.log(matchProbability);
+    kMaximum = mismatchProbability;
+  } else {
+    const weightedMismatch = f64(mismatchPenalty) * mismatchProbability;
+    if (!(weightedMismatch > 0.0) || !(matchProbability > 0.0)) return false;
+    const initial = Math.log(weightedMismatch / matchProbability) / f64(mismatchPenalty + 1);
+    let z = Math.exp(2.0 * initial);
+    let delta: f64 = 1.0;
+    let residual: f64 = 1.0;
+    for (let iteration: i32 = 0; iteration < 512; iteration += 1) {
+      if (Math.abs(delta) <= 0.000001 && Math.abs(residual) <= 0.000001) break;
+      const inverse = Math.pow(z, -f64(mismatchPenalty));
+      residual = matchProbability * z + mismatchProbability * inverse - 1.0;
+      const derivative = matchProbability - weightedMismatch * inverse / z;
+      if (!(Math.abs(derivative) > 1e-15)) return false;
+      delta = residual / derivative;
+      z -= delta;
+      if (!(z > 1.0) || !isFinite(z)) return false;
+    }
+    lambda = Math.log(z);
+    kMaximum = (z - 1.0) * (
+      matchProbability
+      - weightedMismatch * Math.exp(-f64(mismatchPenalty + 1) * lambda)
+    );
+  }
+  if (!(lambda > 0.0) || !(kMaximum > 0.0) || !isFinite(lambda) || !isFinite(kMaximum)) return false;
+  let critical: f64 = 4.0;
+  if (pCutoff < 1.0) {
+    const first = -Math.log(1.0 - pCutoff);
+    if (first > 0.0) critical = (Math.log(kMaximum * f64(informative)) - Math.log(first)) / lambda;
+    if (critical < 4.0) critical = 4.0;
+  }
+  store<i32>(usize(calibrationPtr + 4), mismatchPenalty);
+  store<f64>(usize(calibrationPtr + 8), lambda);
+  store<f64>(usize(calibrationPtr + 16), kMaximum);
+  store<f64>(usize(calibrationPtr + 24), critical);
+  return f64(highScore) > critical;
+}
+
+@inline
+function sourceGeneconvProbability(kaScore: f64): f64 {
+  if (!(kaScore > 0.0)) return 1.0;
+  const poissonMean = Math.exp(-kaScore);
+  return kaScore < 32.0 ? 1.0 - Math.exp(-poissonMean) : poissonMean;
+}
+
+@inline
+function sourceGeneconvCandidateKa(candidatePtr: i32, index: i32): f64 {
+  return load<f64>(usize(candidatePtr + index * SOURCE_GENECONV_CANDIDATE_BYTES + 16));
+}
+
+function sourceGeneconvCandidateHigher(candidatePtr: i32, left: i32, right: i32): bool {
+  const leftKa = sourceGeneconvCandidateKa(candidatePtr, left);
+  const rightKa = sourceGeneconvCandidateKa(candidatePtr, right);
+  if (leftKa != rightKa) return leftKa > rightKa;
+  const leftPtr = candidatePtr + left * SOURCE_GENECONV_CANDIDATE_BYTES;
+  const rightPtr = candidatePtr + right * SOURCE_GENECONV_CANDIDATE_BYTES;
+  const leftTrack = load<i32>(usize(leftPtr));
+  const rightTrack = load<i32>(usize(rightPtr));
+  if (leftTrack != rightTrack) return leftTrack < rightTrack;
+  return load<i32>(usize(leftPtr + 4)) < load<i32>(usize(rightPtr + 4));
+}
+
+function sourceGeneconvSwapCandidates(candidatePtr: i32, left: i32, right: i32): void {
+  if (left == right) return;
+  const leftPtr = candidatePtr + left * SOURCE_GENECONV_CANDIDATE_BYTES;
+  const rightPtr = candidatePtr + right * SOURCE_GENECONV_CANDIDATE_BYTES;
+  const i0 = load<i32>(usize(leftPtr));
+  const i1 = load<i32>(usize(leftPtr + 4));
+  const i2 = load<i32>(usize(leftPtr + 8));
+  const i3 = load<i32>(usize(leftPtr + 12));
+  const f0 = load<f64>(usize(leftPtr + 16));
+  store<i32>(usize(leftPtr), load<i32>(usize(rightPtr)));
+  store<i32>(usize(leftPtr + 4), load<i32>(usize(rightPtr + 4)));
+  store<i32>(usize(leftPtr + 8), load<i32>(usize(rightPtr + 8)));
+  store<i32>(usize(leftPtr + 12), load<i32>(usize(rightPtr + 12)));
+  store<f64>(usize(leftPtr + 16), load<f64>(usize(rightPtr + 16)));
+  store<i32>(usize(rightPtr), i0);
+  store<i32>(usize(rightPtr + 4), i1);
+  store<i32>(usize(rightPtr + 8), i2);
+  store<i32>(usize(rightPtr + 12), i3);
+  store<f64>(usize(rightPtr + 16), f0);
+}
+
+function sourceGeneconvSiftDown(candidatePtr: i32, heapSize: i32, root: i32): void {
+  let parent = root;
+  while (true) {
+    const left = parent * 2 + 1;
+    if (left >= heapSize) return;
+    const right = left + 1;
+    let higher = left;
+    if (right < heapSize && sourceGeneconvCandidateHigher(candidatePtr, right, left)) higher = right;
+    if (!sourceGeneconvCandidateHigher(candidatePtr, higher, parent)) return;
+    sourceGeneconvSwapCandidates(candidatePtr, parent, higher);
+    parent = higher;
+  }
+}
+
+function sourceGeneconvWriteRow(
+  outPtr: i32,
+  outputIndex: i32,
+  track: i32,
+  start: i32,
+  end: i32,
+  score: i32,
+  informative: i32,
+  matchingSites: i32,
+  mismatchSites: i32,
+  mismatchPenalty: i32,
+  kaScore: f64,
+  startRank: i32,
+  endRank: i32,
+): void {
+  const row = outPtr + outputIndex * SOURCE_GENECONV_ROW_INTS * 4;
+  let targetSlot: i32 = 0;
+  let minorSlot: i32 = 1;
+  let majorSlot: i32 = 2;
+  if (track == 1) {
+    minorSlot = 2;
+    majorSlot = 1;
+  } else if (track == 2) {
+    targetSlot = 1;
+    minorSlot = 2;
+    majorSlot = 0;
+  } else if (track == 4) {
+    targetSlot = 1;
+    minorSlot = 0;
+    majorSlot = 2;
+  } else if (track == 5) {
+    targetSlot = 2;
+    minorSlot = 1;
+    majorSlot = 0;
+  }
+  const probability = sourceGeneconvProbability(kaScore);
+  const negativeLog = probability > 0.0 ? -Math.log(probability) : 2000.0;
+  const scaledNegativeLog = negativeLog > 2000.0 ? 2_000_000_000 : i32(negativeLog * 1_000_000.0);
+  store<i32>(usize(row), track);
+  store<i32>(usize(row + 4), targetSlot);
+  store<i32>(usize(row + 8), minorSlot);
+  store<i32>(usize(row + 12), majorSlot);
+  store<i32>(usize(row + 16), start);
+  store<i32>(usize(row + 20), end);
+  store<i32>(usize(row + 24), 0);
+  store<i32>(usize(row + 28), score);
+  store<i32>(usize(row + 32), informative);
+  store<i32>(usize(row + 36), matchingSites);
+  store<i32>(usize(row + 40), mismatchSites);
+  store<i32>(usize(row + 44), mismatchPenalty);
+  store<i32>(usize(row + 48), scaledNegativeLog);
+  store<i32>(usize(row + 52), startRank);
+  store<i32>(usize(row + 56), endRank);
+  store<i32>(usize(row + 60), 1);
+}
+
+function sourceGeneconvScanBuiltTriplet(
+  nSites: i32,
+  informative: i32,
+  gScale: i32,
+  pCutoffInput: f64,
+  positionsPtr: i32,
+  categoriesPtr: i32,
+  runStartPtr: i32,
+  runEndPtr: i32,
+  runScorePtr: i32,
+  prefixPtr: i32,
+  treePtr: i32,
+  calibrationPtr: i32,
+  candidatePtr: i32,
+  candidateCapacity: i32,
+  deletePtr: i32,
+  outPtr: i32,
+  outCapacity: i32,
+): i32 {
+  if (informative <= 4) return 0;
+  let equal0: i32 = 0;
+  let equal1: i32 = 0;
+  let equal2: i32 = 0;
+  for (let rank: i32 = 0; rank < informative; rank += 1) {
+    const category = i32(load<u8>(usize(categoriesPtr + rank)));
+    if (category == 0) equal0 += 1;
+    else if (category == 1) equal1 += 1;
+    else if (category == 2) equal2 += 1;
+    store<i32>(usize(deletePtr + rank * 4), 0);
+  }
+  if (equal0 == informative || equal1 == informative || equal2 == informative) return 0;
+  let minDifference: i32 = informative;
+  let maxDifference: i32 = 0;
+  for (let track: i32 = 0; track < 6; track += 1) {
+    const mismatchSites = track == 0 ? informative - equal0
+      : track == 1 ? informative - equal1
+      : track == 2 ? informative - equal2
+      : track == 3 ? equal0 + equal1
+      : track == 4 ? equal0 + equal2
+      : equal1 + equal2;
+    const calibration = calibrationPtr + track * SOURCE_GENECONV_CALIBRATION_BYTES;
+    store<i32>(usize(calibration), mismatchSites);
+    store<i32>(usize(calibration + 32), informative - mismatchSites);
+    if (mismatchSites < minDifference) minDifference = mismatchSites;
+    if (mismatchSites > maxDifference) maxDifference = mismatchSites;
+  }
+  if (minDifference < 3 && maxDifference > minDifference * 10) return 0;
+  const pCutoff = pCutoffInput <= 0.0 ? 1e-300 : pCutoffInput > 1.0 ? 1.0 : pCutoffInput;
+  let candidateCount: i32 = 0;
+  for (let track: i32 = 0; track < 6; track += 1) {
+    const calibration = calibrationPtr + track * SOURCE_GENECONV_CALIBRATION_BYTES;
+    let mismatchSites = load<i32>(usize(calibration));
+    if (track >= 3 && mismatchSites == 0) mismatchSites = 1;
+    store<i32>(usize(calibration), mismatchSites);
+    const mismatchPenalty = gScale > 0
+      ? i32(f64(informative * gScale) / f64(mismatchSites)) + 1
+      : 1;
+    store<i32>(usize(calibration + 4), mismatchPenalty);
+    const runCount = sourceGeneconvBuildRuns(
+      categoriesPtr,
+      informative,
+      track,
+      runStartPtr,
+      runEndPtr,
+      runScorePtr,
+    );
+    const treeBase = sourceGeneconvBuildTree(
+      runScorePtr,
+      runCount,
+      mismatchPenalty,
+      prefixPtr,
+      treePtr,
+    );
+    let highScore: i32 = 0;
+    for (let run: i32 = 0; run < runCount; run += 1) {
+      if (load<i32>(usize(runScorePtr + run * 4)) <= 0) continue;
+      const score = sourceGeneconvFragmentScore(
+        gScale,
+        run,
+        runCount,
+        runEndPtr,
+        runScorePtr,
+        prefixPtr,
+        treePtr,
+        treeBase,
+        calibration + 36,
+      );
+      if (score > highScore) highScore = score;
+    }
+    if (!sourceGeneconvCalibrate(
+      informative,
+      mismatchSites,
+      gScale,
+      highScore,
+      pCutoff,
+      calibration,
+    )) continue;
+    const lambda = load<f64>(usize(calibration + 8));
+    const kMaximum = load<f64>(usize(calibration + 16));
+    const critical = load<f64>(usize(calibration + 24));
+    const logLength = f64(f32(Math.log(kMaximum * f64(informative))));
+    for (let run: i32 = 0; run < runCount; run += 1) {
+      if (load<i32>(usize(runScorePtr + run * 4)) <= 0) continue;
+      const score = sourceGeneconvFragmentScore(
+        gScale,
+        run,
+        runCount,
+        runEndPtr,
+        runScorePtr,
+        prefixPtr,
+        treePtr,
+        treeBase,
+        calibration + 36,
+      );
+      if (!(f64(score) > critical)) continue;
+      const kaScore = f64(f32(lambda * f64(score) - logLength));
+      const probability = sourceGeneconvProbability(kaScore);
+      if (!(probability < pCutoff) || candidateCount >= candidateCapacity) continue;
+      const record = candidatePtr + candidateCount * SOURCE_GENECONV_CANDIDATE_BYTES;
+      store<i32>(usize(record), track);
+      store<i32>(usize(record + 4), load<i32>(usize(runStartPtr + run * 4)));
+      store<i32>(usize(record + 8), load<i32>(usize(calibration + 36)));
+      store<i32>(usize(record + 12), score);
+      store<f64>(usize(record + 16), kaScore);
+      candidateCount += 1;
+    }
+  }
+  if (candidateCount <= 0) return 0;
+  for (let root: i32 = candidateCount / 2 - 1; root >= 0; root -= 1) {
+    sourceGeneconvSiftDown(candidatePtr, candidateCount, root);
+    if (root == 0) break;
+  }
+  let heapSize = candidateCount;
+  let outputCount: i32 = 0;
+  while (heapSize > 0) {
+    const record = candidatePtr;
+    const track = load<i32>(usize(record));
+    const startRank = load<i32>(usize(record + 4));
+    const endRank = load<i32>(usize(record + 8));
+    const score = load<i32>(usize(record + 12));
+    const kaScore = load<f64>(usize(record + 16));
+    heapSize -= 1;
+    if (heapSize > 0) {
+      sourceGeneconvSwapCandidates(candidatePtr, 0, heapSize);
+      sourceGeneconvSiftDown(candidatePtr, heapSize, 0);
+    }
+    let overlaps = false;
+    for (let rank = startRank; rank <= endRank; rank += 1) {
+      if (load<i32>(usize(deletePtr + rank * 4)) >= 1) {
+        overlaps = true;
+        break;
+      }
+    }
+    if (overlaps) continue;
+    for (let rank = startRank; rank <= endRank; rank += 1) {
+      const address = deletePtr + rank * 4;
+      store<i32>(usize(address), load<i32>(usize(address)) + 1);
+    }
+    const start = startRank > 0
+      ? load<i32>(usize(positionsPtr + (startRank - 1) * 4)) + 1
+      : 0;
+    const end = endRank + 1 < informative
+      ? load<i32>(usize(positionsPtr + (endRank + 1) * 4))
+      : nSites;
+    if (outputCount < outCapacity) {
+      const calibration = calibrationPtr + track * SOURCE_GENECONV_CALIBRATION_BYTES;
+      sourceGeneconvWriteRow(
+        outPtr,
+        outputCount,
+        track,
+        start,
+        end,
+        score,
+        informative,
+        load<i32>(usize(calibration + 32)),
+        load<i32>(usize(calibration)),
+        load<i32>(usize(calibration + 4)),
+        kaScore,
+        startRank,
+        endRank,
+      );
+    }
+    outputCount += 1;
+  }
+  return outputCount;
+}
+
+// Output rows (16 i32 each): source track, target/minor/major triplet slots,
+// expanded raw start/end, wrap flag, fragment score, compressed length,
+// matching/mismatch counts, mismatch penalty, -ln(raw p) x 1e6, compressed
+// start/end ranks, and a source-queue compatibility marker.
+export function scan_source_geneconv_all(
+  seqPtr: i32,
+  nSites: i32,
+  sequence0: i32,
+  sequence1: i32,
+  sequence2: i32,
+  gScale: i32,
+  pCutoff: f64,
+  positionsPtr: i32,
+  categoriesPtr: i32,
+  runStartPtr: i32,
+  runEndPtr: i32,
+  runScorePtr: i32,
+  prefixPtr: i32,
+  treePtr: i32,
+  calibrationPtr: i32,
+  candidatePtr: i32,
+  candidateCapacity: i32,
+  deletePtr: i32,
+  outPtr: i32,
+  outCapacity: i32,
+): i32 {
+  const informative = sourceGeneconvBuildTriplet(
+    seqPtr,
+    nSites,
+    sequence0,
+    sequence1,
+    sequence2,
+    positionsPtr,
+    categoriesPtr,
+  );
+  return sourceGeneconvScanBuiltTriplet(
+    nSites,
+    informative,
+    gScale,
+    pCutoff,
+    positionsPtr,
+    categoriesPtr,
+    runStartPtr,
+    runEndPtr,
+    runScorePtr,
+    prefixPtr,
+    treePtr,
+    calibrationPtr,
+    candidatePtr,
+    candidateCapacity,
+    deletePtr,
+    outPtr,
+    outCapacity,
+  );
+}
+
+export function scan_source_geneconv_all_packed(
+  packedPtr: i32,
+  validityPtr: i32,
+  wordsPerSequence: i32,
+  nSites: i32,
+  sequence0: i32,
+  sequence1: i32,
+  sequence2: i32,
+  gScale: i32,
+  pCutoff: f64,
+  positionsPtr: i32,
+  categoriesPtr: i32,
+  runStartPtr: i32,
+  runEndPtr: i32,
+  runScorePtr: i32,
+  prefixPtr: i32,
+  treePtr: i32,
+  calibrationPtr: i32,
+  candidatePtr: i32,
+  candidateCapacity: i32,
+  deletePtr: i32,
+  outPtr: i32,
+  outCapacity: i32,
+): i32 {
+  const informative = sourceGeneconvBuildTripletPacked(
+    packedPtr,
+    validityPtr,
+    wordsPerSequence,
+    nSites,
+    sequence0,
+    sequence1,
+    sequence2,
+    positionsPtr,
+    categoriesPtr,
+  );
+  return sourceGeneconvScanBuiltTriplet(
+    nSites,
+    informative,
+    gScale,
+    pCutoff,
+    positionsPtr,
+    categoriesPtr,
+    runStartPtr,
+    runEndPtr,
+    runScorePtr,
+    prefixPtr,
+    treePtr,
+    calibrationPtr,
+    candidatePtr,
+    candidateCapacity,
+    deletePtr,
     outPtr,
     outCapacity,
   );

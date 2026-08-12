@@ -14,30 +14,31 @@ node bench/benchmark.mjs 100 10000
 
 The August 2026 development-container run for 100 sequences × 10,000 sites
 (one million aligned nucleotides), eight parent candidates per recombinant,
-2,632 unique concrete-triplet comparisons, source RDP plus combined
-MAXCHI/CHIMAERA detection, and statistic extraction on the 500 strongest raw
-signals. The same
+2,632 unique concrete-triplet comparisons, source RDP, six-track GENECONV and
+combined MAXCHI/CHIMAERA detection. The same
 command also runs an independent 4 × 80 kb source SiScan fixture with 100
 window and 1,000 final-region permutations. It reported:
 
 | Stage | Time |
 | --- | ---: |
-| Scalar distance reference | 148.37 ms |
-| Packed production distance | 8.69 ms |
-| Packed distance speed-up | 17.07× |
-| Source triplet candidate scans | 953.97 ms |
-| Retained-candidate statistic extraction | 175.22 ms |
-| Packed 30-taxon VisRD/dMax role statistic | 83.57 ms |
-| Source PHI, 100 taxa × 256 retained / 9,928 informative sites | 42.56 ms |
-| Production-kernel total | 1,264.02 ms |
-| Source triplet scan throughput | 27.6 million site-triplets/s |
-| VisRD throughput | 1.179 billion site-quartets/s |
-| Source SiScan, 4 × 80 kb, 100/1,000 permutations | 252.51 ms |
+| Scalar distance reference | 135.61 ms |
+| Packed production distance | 8.60 ms |
+| Packed distance speed-up | 15.77× |
+| All source triplet candidate scans | 1,274.16 ms |
+| Six-track GENECONV portion | 355.73 ms |
+| GENECONV throughput | 74.0 million full triplet-sites/s |
+| Packed 30-taxon VisRD/dMax role statistic | 87.33 ms |
+| Source PHI, 100 taxa × 256 retained / 9,928 informative sites | 25.49 ms |
+| Production-kernel total | 1,395.58 ms |
+| Aggregate triplet scan throughput | 20.7 million site-triplets/s |
+| VisRD throughput | 1.129 billion site-quartets/s |
+| Source SiScan, 4 × 80 kb, 100/1,000 permutations | 251.28 ms |
 
 `npm run bench:gate` enforces deliberately hardware-tolerant CI ceilings for
-the same workload (150 ms packed distance, 500 ms for the production 30-taxon
-VisRD/dMax cohort, 500 ms for bounded source PHI, 2 s production total, and at least 25 million source triplet
-site-comparisons/s), plus a 2 s ceiling and exact 30,000–45,000 tract-recovery
+the same workload (150 ms packed distance, 500 ms each for the production
+30-taxon VisRD/dMax cohort, bounded source PHI, and the complete six-track
+GENECONV batch; 2 s production total; and at least 50 million complete
+GENECONV triplet-sites/s), plus a 2 s ceiling and exact 30,000–45,000 tract-recovery
 gate for the 80 kb source SiScan workload, so large regressions cannot ship
 silently while ordinary runner variance remains harmless.
 
@@ -53,6 +54,19 @@ recovers a known 520→100 origin-spanning event. A separate 513-sequence fixtur
 forces the sampled/stratified large-data path and verifies a compact 24 × 24
 display matrix without allocating an N² matrix.
 
+The source BootScan batch has its own reproducible all-triplet benchmark:
+
+```sh
+npm run bench:bootscan
+```
+
+The August 2026 development-container run for 24 sequences × 2,000 sites,
+all 2,024 concrete triplets, 276 unique pairs, 102 windows and 100 replicates
+took 307.01 ms after warm-up. It evaluated 67.2 million triplet-window-
+replicate relationships/s in 0.71 MiB of kernel workspace. Sharing each pair
+row across its 22 containing triplets avoids the 6,072 pair rows per window a
+triplet-at-a-time implementation would compute.
+
 ## Scaling choices
 
 - Canonical bases are represented both as scan bytes and as 2-bit lanes; the
@@ -64,8 +78,18 @@ display matrix without allocating an N² matrix.
   references so dense clone groups do not consume every candidate slot.
 - Full parity mode defaults to all C(N,3) concrete triplets. Parent pruning is
   an explicit non-parity preview that changes O(N³L) toward O(NK²L).
-- The source-only scheduler materializes only `a < b < c`; RDP and the combined
-  MAXCHI/CHIMAERA kernel are each invoked once per unordered triplet.
+- The source-only scheduler materializes only `a < b < c`; RDP, GENECONV and
+  the combined MAXCHI/CHIMAERA kernel are each invoked once per unordered
+  triplet.
+- The BootScan/RecScan scheduler also materializes each unordered triplet once,
+  but sends the whole request set to one source-shaped batch. One `SEQBOOT2`
+  table is shared globally; each requested pair/window distance row is computed
+  once and reused by every containing triplet. Approximate/query batches compact
+  unused pairs out of the hot loop and bootstrap matrix, complete high-identity
+  windows touch weights only at mismatches, distances use packed 16-bit rows,
+  and the valid/difference lookup stores only its triangular half. Exact
+  whole-alignment identity fractions retain the source baseline topology even
+  when all three window-model JC distances would saturate.
 - Two-bit production extraction advances sixteen alignment columns per word,
   builds informative coordinates for the current triplet only, and is required
   to match the byte oracle exactly.
@@ -97,9 +121,10 @@ display matrix without allocating an N² matrix.
   taxa. Selection is deterministic and position-balanced; projects record
   retained and total informative-site counts and never label a bounded result
   as an all-site PHI test.
-- Production discovery currently enables only the direct-source RDP and
-  MAXCHI/CHIMAERA paths. GENECONV, BootScan and 3Seq stay disabled until their
-  full source batch ports land; source SiScan confirms retained candidates.
+- Production discovery currently enables direct-source RDP, six-track
+  GENECONV, distance-mode BootScan/RecScan and MAXCHI/CHIMAERA paths. 3Seq stays
+  disabled until its full source batch lands; source SiScan confirms retained
+  candidates.
 - Pre-scan dataset summaries, uncomputed matrix fallbacks and local NJ trees
   use explicit stratified work bounds; the overview and alignment viewer cap
   rendered rows while preserving every event-bearing sequence and searchable

@@ -1,4 +1,4 @@
-import { methodEvidence } from "./rdp-statistics.js";
+import { methodEvidence, rdp5SourceProbability } from "./rdp-statistics.js";
 import { fitBurtTriplet } from "./rdp-burt.js";
 import { inferAncestralEventClusters } from "./rdp-clustering.js";
 import { buildDisassembledAlignment, candidateComponentProvenance, findComponentIndex, splitCandidateAtStructuralGaps } from "./rdp-disassembly.js";
@@ -12,9 +12,9 @@ let wasmPromise;
 const BASES = { A: 0, C: 1, G: 2, T: 3, U: 3, "-": 5 };
 
 function enabledMethodMask(options) {
-  // Production discovery is source-only. GENECONV, BootScan and 3Seq remain
-  // disabled until their complete author-source batch routines are ported.
-  const bits = { MaxChi: 4, Chimaera: 8, SiScan: 16 };
+  // Production discovery is source-only. BootScan has its own whole-cohort
+  // batch below; 3Seq remains disabled until its author-source batch is ported.
+  const bits = { GENECONV: 2, MaxChi: 4, Chimaera: 8, SiScan: 16 };
   let mask = 0;
   for (const method of options.methods) mask |= bits[method] ?? 0;
   return mask;
@@ -194,6 +194,8 @@ function primaryMethodSignals(signals = []) {
 
 const SOURCE_CHI_ROW_INTS = 16;
 const SOURCE_CHI_PEAK_INTS = 6;
+const SOURCE_GENECONV_ROW_INTS = 16;
+const SOURCE_BOOTSCAN_ROW_INTS = 16;
 
 function sourceChiRoutine(method) {
   return method === "MaxChi"
@@ -222,6 +224,87 @@ function sourceChiSignal(row, rotation, length) {
       growthWidths: [row[13], row[14]],
       direction: row[15] < 0 ? -1 : 1,
     },
+  };
+}
+
+function sourceGeneconvProbability(row) {
+  const negativeLog = Math.max(0, row[12]) / 1_000_000;
+  const probability = Math.exp(-negativeLog);
+  return probability > 0 ? probability : Number.MIN_VALUE;
+}
+
+function sourceGeneconvSignal(row, rotation, length) {
+  const mapped = mapInterval(row[4], row[5], rotation, length);
+  return {
+    method: "GENECONV",
+    ...mapped,
+    statistic: row[7],
+    locator: `RDP5 six-track fragment queue · track ${row[0] + 1}`,
+    sourceRoutine: "FindSubSeqGCAP6/7 → GetFragsP → GetMaxFragScoreP → CalcKMaxP → GCCalcPValP → GCGetHiPValP/DelPValsP",
+    sourceGeneconv: {
+      track: row[0],
+      targetSlot: row[1],
+      minorSlot: row[2],
+      majorSlot: row[3],
+      fragmentScore: row[7],
+      informativeSites: row[8],
+      matchingSites: row[9],
+      mismatchSites: row[10],
+      mismatchPenalty: row[11],
+      rawP: sourceGeneconvProbability(row),
+      startRank: row[13],
+      endRank: row[14],
+    },
+  };
+}
+
+function sourceBootscanSignal(row, rotation, length) {
+  const mapped = mapInterval(row[4], row[5], rotation, length);
+  const rawP = rdp5SourceProbability({
+    common: row[9],
+    tractSites: row[11],
+    mediumSites: row[9] + row[10],
+    informativeSites: row[12],
+    probabilitySites: row[12],
+  }) ?? 1;
+  return {
+    method: "BootScan",
+    ...mapped,
+    statistic: row[6] / Math.max(1, row[7]),
+    locator: `RDP5 RecScan distance topology ${row[3] + 1} · ${row[8]} supported windows`,
+    sourceRoutine: "BSXoverR2 → SEQBOOT2 → FastBootDistIP → GetPltVal2 → FindBeginBS/FindEndBS → MakeScoresBS/ProbCalc",
+    sourceBootscan: {
+      topology: row[3],
+      baselineTopology: row[13],
+      bootstrapSupport: row[6] / Math.max(1, row[7]),
+      bootstrapReplicates: row[7],
+      runWindows: row[8],
+      tractPairMatches: row[9],
+      backgroundPairMatches: row[10],
+      tractInformativeSites: row[11],
+      informativeSites: row[12],
+      rawP,
+      window: row[14],
+      step: row[15],
+      relationshipMode: "distance",
+    },
+  };
+}
+
+function sourceBootscanRoles(row) {
+  const sequences = [row[0], row[1], row[2]];
+  const pairSlots = [[0, 1], [0, 2], [1, 2]];
+  const tractPair = pairSlots[row[3]];
+  const baselinePair = pairSlots[row[13]];
+  const recombinantSlot = tractPair.find((slot) => baselinePair.includes(slot));
+  if (recombinantSlot === undefined) return null;
+  const majorSlot = baselinePair.find((slot) => slot !== recombinantSlot);
+  const minorSlot = tractPair.find((slot) => slot !== recombinantSlot);
+  if (majorSlot === undefined || minorSlot === undefined) return null;
+  return {
+    recombinant: sequences[recombinantSlot],
+    majorParent: sequences[majorSlot],
+    minorParent: sequences[minorSlot],
   };
 }
 
@@ -277,7 +360,9 @@ function addWarnings(candidate, sequences, length, options) {
   if (!options.circular && (candidate.start < options.window / 2 || length - candidate.end < options.window / 2)) {
     warnings.push("Breakpoint near an alignment boundary");
   }
-  if (candidate.stats.bootscanWindows < 8) warnings.push("Too few decisive windows for stable topology support");
+  if (options.methods.includes("BootScan") && candidate.stats.bootscanWindows > 0 && candidate.stats.bootscanWindows < 8) {
+    warnings.push("BootScan topology run contains fewer than eight windows; inspect support stability");
+  }
   if (candidate.diagnostics.rateRatio >= 4 || candidate.diagnostics.rateRatio <= 0.25) {
     warnings.push("Strong local variable-site density shift; inspect rate variation or alignment quality");
   }
@@ -579,6 +664,7 @@ async function analyze(message, emit = postMessage) {
   const outPtr = align(prefixBPtr + (nSites + 1) * 4, 16);
   const rdpSignalCapacity = Math.max(1, Math.min(256, Math.trunc(options.rdpSignalsPerTriplet ?? 128)));
   const chiSignalCapacity = Math.max(1, Math.min(256, Math.trunc(options.chiSignalsPerTriplet ?? 24)));
+  const geneconvSignalCapacity = Math.max(1, Math.min(256, Math.trunc(options.geneconvSignalsPerTriplet ?? 64)));
   const chiTrackCount = 3 * (
     Number(options.methods.includes("MaxChi")) + Number(options.methods.includes("Chimaera"))
   );
@@ -593,7 +679,22 @@ async function analyze(message, emit = postMessage) {
   const chiSmoothPtr = chiProfilePtr + (nSites + 1) * 8;
   const chiPeakPtr = align(chiSmoothPtr + (nSites + 1) * 8, 4);
   const chiOutPtr = chiPeakPtr + chiPeakCapacity * SOURCE_CHI_PEAK_INTS * 4;
-  const poolPtr = align(chiOutPtr + chiSignalCapacity * SOURCE_CHI_ROW_INTS * 4, 16);
+  const geneconvPositionsPtr = align(chiOutPtr + chiSignalCapacity * SOURCE_CHI_ROW_INTS * 4, 16);
+  const geneconvCategoriesPtr = geneconvPositionsPtr + nSites * 4;
+  const geneconvRunStartPtr = align(geneconvCategoriesPtr + nSites, 4);
+  const geneconvRunEndPtr = geneconvRunStartPtr + nSites * 4;
+  const geneconvRunScorePtr = geneconvRunEndPtr + nSites * 4;
+  const geneconvPrefixPtr = align(geneconvRunScorePtr + nSites * 4, 8);
+  const geneconvTreePtr = geneconvPrefixPtr + (nSites + 1) * 8;
+  // Monotone excursion workspace: i32 stack + f64 maximum + i32 endpoint,
+  // with up to seven alignment bytes before the f64 block.
+  const geneconvWorkspaceBytes = (nSites + 1) * 16 + 8;
+  const geneconvCalibrationPtr = align(geneconvTreePtr + geneconvWorkspaceBytes, 8);
+  const geneconvCandidatePtr = align(geneconvCalibrationPtr + 6 * 40, 8);
+  const geneconvCandidateCapacity = 3 * (nSites + 1);
+  const geneconvDeletePtr = align(geneconvCandidatePtr + geneconvCandidateCapacity * 24, 4);
+  const geneconvOutPtr = align(geneconvDeletePtr + nSites * 4, 8);
+  const poolPtr = align(geneconvOutPtr + geneconvSignalCapacity * SOURCE_GENECONV_ROW_INTS * 4, 16);
   const nearestIndexesPtr = poolPtr + scanSequenceCount * 4;
   const nearestDistancesPtr = nearestIndexesPtr + scanSequenceCount * 4;
   const roleCohortCapacity = Math.max(4, Math.min(34, Math.trunc(options.roleQuartetTaxaLimit ?? 30)));
@@ -710,7 +811,9 @@ async function analyze(message, emit = postMessage) {
     methods: independentMethods,
     polishBreakpoints: false,
   });
+  const sourceGeneconvEnabled = (independentMethodMask & 2) !== 0;
   const sourceChiMethodMask = independentMethodMask & (4 | 8);
+  const sourceBootscanEnabled = options.methods.includes("BootScan");
   // SiScan is source-confirmed on candidates found by the source triplet
   // detectors. Its former oriented prelocator revisited each triplet under
   // three target assignments and is intentionally no longer a discovery path.
@@ -735,13 +838,25 @@ async function analyze(message, emit = postMessage) {
   const processedRdpTriplets = new Set();
   const countedTruncations = new Set();
   let truncatedRdpSignals = 0;
+  const sourceGeneconvTripletCache = new Map();
+  const sourceGeneconvTripletCacheLimit = 4_096;
+  const processedSourceGeneconvTriplets = new Set();
+  const countedGeneconvTruncations = new Set();
+  let truncatedGeneconvSignals = 0;
   const sourceChiTripletCache = new Map();
   const sourceChiTripletCacheLimit = 4_096;
   const processedSourceChiTriplets = new Set();
+  const processedSourceBootscanTriplets = new Set();
   const countedChiTruncations = new Set();
   let truncatedChiSignals = 0;
   let rdpTripletKernelCalls = 0;
+  let sourceGeneconvTripletKernelCalls = 0;
   let sourceChiTripletKernelCalls = 0;
+  let sourceBootscanBatchCalls = 0;
+  let truncatedBootscanSignals = 0;
+  let sourceBootscanWorkspaceBytes = 0;
+  let sourceBootscanTripletCount = 0;
+  let sourceBootscanUsedPairCount = 0;
   const sourceSiScanCache = new Map();
   const sourceSiScanCacheLimit = 512;
   let sourceSiScanRandomization = null;
@@ -764,6 +879,226 @@ async function analyze(message, emit = postMessage) {
   const scanViews = rotated
     ? [{ sequencePtr: seqPtr, rotation: 0 }, { sequencePtr: rotatedSeqPtr, rotation }]
     : [{ sequencePtr: seqPtr, rotation: 0 }];
+  const sourceBootscanRowsByRotation = new Map();
+  let sourceBootscanWindow = Math.max(5, Math.min(32_767, Math.min(Math.floor(nSites / 2), Math.trunc(options.bootscanWindow ?? 200))));
+  if (sourceBootscanWindow > nSites / 2) sourceBootscanWindow = Math.max(5, Math.floor(nSites / 2));
+  const sourceBootscanStep = Math.max(1, Math.min(Math.max(1, Math.floor(nSites / 4)), Math.trunc(options.bootscanStep ?? 20)));
+  const sourceBootscanReplicates = Math.max(0, Math.min(1000, Math.trunc(options.bootstrapReplicates ?? 100)));
+  const sourceBootscanTriplets = [];
+  const sourceBootscanTripletKeys = new Set();
+  const sourceBootscanPairKeys = new Set();
+  const sourceBootscanPairIndex = (left, right) => {
+    const first = Math.min(left, right);
+    const second = Math.max(left, right);
+    return first * (2 * scanSequenceCount - first - 1) / 2 + second - first - 1;
+  };
+  const addSourceBootscanTriplet = (target, firstParent, secondParent) => {
+    const ordered = [target, firstParent, secondParent].sort((left, right) => left - right);
+    if (ordered[0] === ordered[1] || ordered[1] === ordered[2]) return;
+    const origins = ordered.map((index) => scanMappings[index].originIndex);
+    if (origins[0] === origins[1] || origins[0] === origins[2] || origins[1] === origins[2]) return;
+    if (affectedOrigins.size > 0 && !origins.some((origin) => affectedOrigins.has(origin))) return;
+    const key = (ordered[0] * scanSequenceCount + ordered[1]) * scanSequenceCount + ordered[2];
+    if (sourceBootscanTripletKeys.has(key)) return;
+    sourceBootscanTripletKeys.add(key);
+    sourceBootscanTriplets.push(ordered);
+    sourceBootscanPairKeys.add(sourceBootscanPairIndex(ordered[0], ordered[1]));
+    sourceBootscanPairKeys.add(sourceBootscanPairIndex(ordered[0], ordered[2]));
+    sourceBootscanPairKeys.add(sourceBootscanPairIndex(ordered[1], ordered[2]));
+  };
+  if (sourceBootscanEnabled && sourceBootscanReplicates >= 2) {
+    if (sourceOnlyUnorderedPass) {
+      // The source primary scan consumes each unordered concrete triplet once.
+      // Enumerating it directly avoids generating the same triple under three
+      // temporary target orientations only to deduplicate it afterwards.
+      for (let first = 0; first < scanSequenceCount - 2; first += 1) {
+        for (let second = first + 1; second < scanSequenceCount - 1; second += 1) {
+          for (let third = second + 1; third < scanSequenceCount; third += 1) {
+            const triplet = [first, second, third];
+            const hasEligibleOrientation = triplet.some((candidateTarget) => (
+              targetSet.has(candidateTarget)
+              && triplet.every((member) => member === candidateTarget || referenceSet.has(member))
+            ));
+            if (hasEligibleOrientation) addSourceBootscanTriplet(first, second, third);
+          }
+        }
+      }
+    } else {
+      for (const target of targets) {
+        const parentLimit = options.exhaustive
+          ? referencePool.length
+          : Math.min(Math.max(2, options.candidateParents), referencePool.length);
+        let bootParents;
+        if (options.exhaustive) {
+          bootParents = referencePool.filter((index) => index !== target);
+        } else if (exactDistanceMatrix) {
+          bootParents = candidateParents(parentDistance, scanSequenceCount, target, referencePool, parentLimit);
+        } else {
+          bootParents = [];
+          for (let slot = 0; slot < parentLimit; slot += 1) {
+            const position = Math.min(referencePool.length - 1, Math.floor(((slot + 0.5) * referencePool.length) / Math.max(1, parentLimit)));
+            const candidate = referencePool[position];
+            if (candidate !== target && !bootParents.includes(candidate)) bootParents.push(candidate);
+          }
+        }
+        for (let left = 0; left < bootParents.length; left += 1) {
+          for (let right = left + 1; right < bootParents.length; right += 1) {
+            const firstParent = bootParents[left];
+            const secondParent = bootParents[right];
+            if (options.mode === "query-reference") {
+              const firstGroup = scanSequences[firstParent].referenceGroup?.trim();
+              const secondGroup = scanSequences[secondParent].referenceGroup?.trim();
+              if (firstGroup && secondGroup && firstGroup === secondGroup) continue;
+            }
+            addSourceBootscanTriplet(target, firstParent, secondParent);
+          }
+        }
+      }
+    }
+  }
+  sourceBootscanTripletCount = sourceBootscanTriplets.length;
+  sourceBootscanUsedPairCount = sourceBootscanPairKeys.size;
+  if (sourceBootscanEnabled && sourceBootscanReplicates < 2) {
+    throw new Error("BootScan requires at least two replicates. Increase Bootstrap replicates or disable BootScan.");
+  }
+  if (sourceBootscanTripletCount > 0) {
+    const pairCount = scanSequenceCount * (scanSequenceCount - 1) / 2;
+    const outputCapacity = Math.max(128, Math.min(50_000, Math.trunc(options.bootscanSignals ?? 20_000)));
+    const bootTripletPtr = align(roleDmaxOutPtr + 40, 16);
+    const bootPairMapPtr = bootTripletPtr + sourceBootscanTripletCount * 12;
+    const bootPairListPtr = bootPairMapPtr + pairCount * 4;
+    const bootWeightPtr = align(bootPairListPtr + sourceBootscanUsedPairCount * 8, 2);
+    const bootPairDistancePtr = bootWeightPtr + sourceBootscanWindow * sourceBootscanReplicates * 2;
+    const bootGlobalPairPtr = bootPairDistancePtr + sourceBootscanUsedPairCount * sourceBootscanReplicates * 2;
+    const bootStatePtr = align(bootGlobalPairPtr + sourceBootscanUsedPairCount * 8, 4);
+    const bootDifferencePtr = bootStatePtr + sourceBootscanTripletCount * 24;
+    const bootValidPtr = bootDifferencePtr + sourceBootscanReplicates * 4;
+    const bootLookupPtr = align(bootValidPtr + sourceBootscanReplicates * 4, 2);
+    const bootLookupEntries = (sourceBootscanWindow + 1) * (sourceBootscanWindow + 2) / 2;
+    const bootOutPtr = align(bootLookupPtr + bootLookupEntries * 2, 4);
+    const bootRequiredBytes = bootOutPtr + outputCapacity * SOURCE_BOOTSCAN_ROW_INTS * 4;
+    sourceBootscanWorkspaceBytes = bootRequiredBytes - bootTripletPtr;
+    if (sourceBootscanWorkspaceBytes > 512 * 1024 * 1024) {
+      throw new Error(`BootScan batch needs ${(sourceBootscanWorkspaceBytes / (1024 * 1024)).toFixed(0)} MiB for ${sourceBootscanTripletCount.toLocaleString()} concrete triplets. Use the approximate parent shortlist or reduce the active sequence set.`);
+    }
+    const bootRequiredPages = Math.ceil(bootRequiredBytes / 65536);
+    const bootCurrentPages = memory.buffer.byteLength / 65536;
+    if (bootRequiredPages > bootCurrentPages) memory.grow(bootRequiredPages - bootCurrentPages);
+    new Int32Array(memory.buffer, bootTripletPtr, sourceBootscanTripletCount * 3).set(sourceBootscanTriplets.flat());
+    for (const view of scanViews) {
+      sourceBootscanBatchCalls += 1;
+      const sharedArguments = [
+        scanSequenceCount,
+        nSites,
+        bootTripletPtr,
+        sourceBootscanTripletCount,
+        sourceBootscanWindow,
+        sourceBootscanStep,
+        sourceBootscanReplicates,
+        Math.round(Math.max(0.5, Math.min(0.999, options.bootscanCutoff ?? 0.7)) * 1000),
+        (options.randomSeed ?? 0x5a17c0de) >>> 0,
+        bootPairMapPtr,
+        bootPairListPtr,
+        bootWeightPtr,
+        bootPairDistancePtr,
+        bootGlobalPairPtr,
+        bootStatePtr,
+        bootDifferencePtr,
+        bootValidPtr,
+        bootLookupPtr,
+        bootOutPtr,
+        outputCapacity,
+      ];
+      const total = view.rotation === 0
+        ? instance.exports.scan_source_bootscan_batch_packed(
+            packedPtr,
+            validityPtr,
+            wordsPerSequence,
+            ...sharedArguments,
+          )
+        : instance.exports.scan_source_bootscan_batch(view.sequencePtr, ...sharedArguments);
+      const retained = Math.min(outputCapacity, Math.max(0, total));
+      if (total > outputCapacity) truncatedBootscanSignals += total - outputCapacity;
+      const rowsByTriplet = new Map();
+      for (let rowIndex = 0; rowIndex < retained; rowIndex += 1) {
+        const row = Array.from(new Int32Array(
+          memory.buffer,
+          bootOutPtr + rowIndex * SOURCE_BOOTSCAN_ROW_INTS * 4,
+          SOURCE_BOOTSCAN_ROW_INTS,
+        ));
+        const key = `${row[0]}:${row[1]}:${row[2]}`;
+        rowsByTriplet.set(key, [...(rowsByTriplet.get(key) ?? []), row]);
+      }
+      sourceBootscanRowsByRotation.set(view.rotation, rowsByTriplet);
+    }
+  }
+  const getSourceBootscanRows = (triplet, view) => {
+    if (!sourceBootscanEnabled) return [];
+    const key = [...triplet].sort((left, right) => left - right).join(":");
+    return sourceBootscanRowsByRotation.get(view.rotation)?.get(key) ?? [];
+  };
+  const getSourceGeneconvRows = (triplet, view) => {
+    if (!sourceGeneconvEnabled) return [];
+    const ordered = [...triplet].sort((left, right) => left - right);
+    const cacheKey = `${ordered.join(":")}@${view.rotation}`;
+    let cached = sourceGeneconvTripletCache.get(cacheKey);
+    if (!cached) {
+      sourceGeneconvTripletKernelCalls += 1;
+      const sharedArguments = [
+        nSites,
+        ordered[0],
+        ordered[1],
+        ordered[2],
+        Math.max(0, Math.round(options.geneconvGScale ?? 1)),
+        Math.max(Number.MIN_VALUE, Math.min(1, options.alpha ?? 0.05)),
+        geneconvPositionsPtr,
+        geneconvCategoriesPtr,
+        geneconvRunStartPtr,
+        geneconvRunEndPtr,
+        geneconvRunScorePtr,
+        geneconvPrefixPtr,
+        geneconvTreePtr,
+        geneconvCalibrationPtr,
+        geneconvCandidatePtr,
+        geneconvCandidateCapacity,
+        geneconvDeletePtr,
+        geneconvOutPtr,
+        geneconvSignalCapacity,
+      ];
+      const total = view.rotation === 0 && typeof instance.exports.scan_source_geneconv_all_packed === "function"
+        ? instance.exports.scan_source_geneconv_all_packed(
+            packedPtr,
+            validityPtr,
+            wordsPerSequence,
+            ...sharedArguments,
+          )
+        : instance.exports.scan_source_geneconv_all(
+            view.sequencePtr,
+            ...sharedArguments,
+          );
+      const retained = Math.min(geneconvSignalCapacity, Math.max(0, total));
+      cached = {
+        ordered,
+        total,
+        rows: Array.from({ length: retained }, (_, signalIndex) => (
+          Array.from(new Int32Array(
+            memory.buffer,
+            geneconvOutPtr + signalIndex * SOURCE_GENECONV_ROW_INTS * 4,
+            SOURCE_GENECONV_ROW_INTS,
+          ))
+        )),
+      };
+      sourceGeneconvTripletCache.set(cacheKey, cached);
+      if (sourceGeneconvTripletCache.size > sourceGeneconvTripletCacheLimit) {
+        sourceGeneconvTripletCache.delete(sourceGeneconvTripletCache.keys().next().value);
+      }
+    }
+    if (cached.total > geneconvSignalCapacity && !countedGeneconvTruncations.has(cacheKey)) {
+      truncatedGeneconvSignals += cached.total - geneconvSignalCapacity;
+      countedGeneconvTruncations.add(cacheKey);
+    }
+    return cached.rows;
+  };
   const getSourceChiRows = (triplet, view) => {
     if (sourceChiMethodMask === 0) return [];
     const ordered = [...triplet].sort((left, right) => left - right);
@@ -1026,6 +1361,148 @@ async function analyze(message, emit = postMessage) {
             }
           }
 
+          if (sourceGeneconvEnabled) {
+            const triplet = [analysisRecombinant, inputMajorParent, inputMinorParent];
+            const orderedTriplet = [...triplet].sort((left, right) => left - right);
+            const globalConcretePass = options.mode === "exploratory" && options.exhaustive;
+            const processedKey = `${orderedTriplet.join(":")}@${view.rotation}`;
+            if (!globalConcretePass || !processedSourceGeneconvTriplets.has(processedKey)) {
+              if (globalConcretePass) processedSourceGeneconvTriplets.add(processedKey);
+              for (const row of getSourceGeneconvRows(triplet, view)) {
+                const sourceTarget = orderedTriplet[row[1]];
+                const sourceMinor = orderedTriplet[row[2]];
+                const sourceMajor = orderedTriplet[row[3]];
+                const targetEligible = globalConcretePass
+                  ? targetSet.has(sourceTarget) && referenceSet.has(sourceMinor) && referenceSet.has(sourceMajor)
+                  : sourceTarget === analysisRecombinant;
+                if (!targetEligible) continue;
+                const rawStart = row[4];
+                const rawEnd = row[5];
+                if (!(rawEnd - rawStart >= 4 && rawStart >= 0 && rawEnd <= nSites)) continue;
+                instance.exports.triplet_counts(
+                  view.sequencePtr,
+                  nSites,
+                  sourceTarget,
+                  sourceMajor,
+                  sourceMinor,
+                  rawStart,
+                  rawEnd,
+                  rdpBestPtr,
+                );
+                const counts = Array.from(new Int32Array(memory.buffer, rdpBestPtr, 6));
+                if (counts[0] < 4) continue;
+                const mapped = mapInterval(rawStart, rawEnd, view.rotation, nSites);
+                const insideTotal = counts[1] + counts[2];
+                const outsideTotal = counts[3] + counts[4];
+                const effect = counts[1] / Math.max(1, insideTotal)
+                  - counts[4] / Math.max(1, outsideTotal);
+                retainCandidate({
+                  recombinant: scanMappings[sourceTarget].originIndex,
+                  ...mapped,
+                  rawStart,
+                  rawEnd,
+                  sequencePtr: view.sequencePtr,
+                  rotation: view.rotation,
+                  majorParent: scanMappings[sourceMajor].originIndex,
+                  minorParent: scanMappings[sourceMinor].originIndex,
+                  analysisRecombinant: sourceTarget,
+                  analysisMajorParent: sourceMajor,
+                  analysisMinorParent: sourceMinor,
+                  siskanCandidatePool: exactDistanceMatrix ? undefined : [...referencePool],
+                  componentProvenance: candidateComponentProvenance(
+                    disassembly,
+                    sourceTarget,
+                    sourceMajor,
+                    sourceMinor,
+                  ),
+                  chiSquare: counts[5] / 1000,
+                  informative: counts[0],
+                  insideMinor: counts[1],
+                  insideMajor: counts[2],
+                  outsideMajor: counts[3],
+                  outsideMinor: counts[4],
+                  effect,
+                  alternatives: [],
+                  methodSignals: [sourceGeneconvSignal(row, view.rotation, nSites)],
+                });
+              }
+            }
+          }
+
+          if (sourceBootscanEnabled) {
+            const triplet = [analysisRecombinant, inputMajorParent, inputMinorParent];
+            const orderedTriplet = [...triplet].sort((left, right) => left - right);
+            const globalConcretePass = options.mode === "exploratory" && options.exhaustive;
+            const processedKey = `${orderedTriplet.join(":")}@${view.rotation}`;
+            if (!globalConcretePass || !processedSourceBootscanTriplets.has(processedKey)) {
+              if (globalConcretePass) processedSourceBootscanTriplets.add(processedKey);
+              const sourceTargets = globalConcretePass
+                ? orderedTriplet.filter((target) => (
+                    targetSet.has(target)
+                    && orderedTriplet.every((member) => member === target || referenceSet.has(member))
+                  ))
+                : [analysisRecombinant];
+              for (const row of getSourceBootscanRows(triplet, view)) {
+                const rawStart = row[4];
+                const rawEnd = row[5];
+                if (!(rawEnd - rawStart >= 4 && rawStart >= 0 && rawEnd <= nSites)) continue;
+                const sourceSignal = sourceBootscanSignal(row, view.rotation, nSites);
+                if (sourceSignal.sourceBootscan.rawP > Math.max(Number.MIN_VALUE, options.alpha ?? 0.05)) continue;
+                const sourceRoles = sourceBootscanRoles(row);
+                if (!sourceRoles
+                  || !sourceTargets.includes(sourceRoles.recombinant)
+                  || !referenceSet.has(sourceRoles.majorParent)
+                  || !referenceSet.has(sourceRoles.minorParent)) continue;
+                instance.exports.triplet_counts(
+                  view.sequencePtr,
+                  nSites,
+                  sourceRoles.recombinant,
+                  sourceRoles.majorParent,
+                  sourceRoles.minorParent,
+                  rawStart,
+                  rawEnd,
+                  rdpBestPtr,
+                );
+                const sourceCounts = Array.from(new Int32Array(memory.buffer, rdpBestPtr, 6));
+                const insideTotal = sourceCounts[1] + sourceCounts[2];
+                const outsideTotal = sourceCounts[3] + sourceCounts[4];
+                const effect = sourceCounts[1] / Math.max(1, insideTotal)
+                  - sourceCounts[4] / Math.max(1, outsideTotal);
+                if (sourceCounts[0] < 4 || !(effect > 0)) continue;
+                const mapped = mapInterval(rawStart, rawEnd, view.rotation, nSites);
+                retainCandidate({
+                  recombinant: scanMappings[sourceRoles.recombinant].originIndex,
+                  ...mapped,
+                  rawStart,
+                  rawEnd,
+                  sequencePtr: view.sequencePtr,
+                  rotation: view.rotation,
+                  majorParent: scanMappings[sourceRoles.majorParent].originIndex,
+                  minorParent: scanMappings[sourceRoles.minorParent].originIndex,
+                  analysisRecombinant: sourceRoles.recombinant,
+                  analysisMajorParent: sourceRoles.majorParent,
+                  analysisMinorParent: sourceRoles.minorParent,
+                  siskanCandidatePool: exactDistanceMatrix ? undefined : [...referencePool],
+                  componentProvenance: candidateComponentProvenance(
+                    disassembly,
+                    sourceRoles.recombinant,
+                    sourceRoles.majorParent,
+                    sourceRoles.minorParent,
+                  ),
+                  chiSquare: sourceCounts[5] / 1000,
+                  informative: sourceCounts[0],
+                  insideMinor: sourceCounts[1],
+                  insideMajor: sourceCounts[2],
+                  outsideMajor: sourceCounts[3],
+                  outsideMinor: sourceCounts[4],
+                  effect,
+                  alternatives: [],
+                  methodSignals: [sourceSignal],
+                });
+              }
+            }
+          }
+
           if (sourceChiMethodMask !== 0) {
             const triplet = [analysisRecombinant, inputMajorParent, inputMinorParent];
             const orderedTriplet = [...triplet].sort((left, right) => left - right);
@@ -1191,6 +1668,41 @@ async function analyze(message, emit = postMessage) {
     const candidateTriplet = [candidate.analysisRecombinant, candidate.analysisMajorParent, candidate.analysisMinorParent];
     const orderedCandidateTriplet = [...candidateTriplet].sort((left, right) => left - right);
     const candidateTargetSlot = orderedCandidateTriplet.indexOf(candidate.analysisRecombinant);
+    let sourceGeneconv = null;
+    for (const row of getSourceGeneconvRows(candidateTriplet, {
+      sequencePtr: candidate.sequencePtr,
+      rotation: candidate.rotation,
+    })) {
+      if (row[1] !== candidateTargetSlot) continue;
+      const signal = sourceGeneconvSignal(row, candidate.rotation, nSites);
+      if (!isCoLocatedSignal(candidate, signal, nSites)) continue;
+      if (!sourceGeneconv || signal.sourceGeneconv.rawP < sourceGeneconv.sourceGeneconv.rawP) {
+        sourceGeneconv = signal;
+      }
+    }
+    if (sourceGeneconv) {
+      candidate.methodSignals = [
+        ...(candidate.methodSignals ?? []).filter((entry) => entry.method !== "GENECONV"),
+        sourceGeneconv,
+      ];
+    }
+    let sourceBootscan = null;
+    for (const row of getSourceBootscanRows(candidateTriplet, {
+      sequencePtr: candidate.sequencePtr,
+      rotation: candidate.rotation,
+    })) {
+      const signal = sourceBootscanSignal(row, candidate.rotation, nSites);
+      if (!isCoLocatedSignal(candidate, signal, nSites)) continue;
+      if (!sourceBootscan || signal.sourceBootscan.rawP < sourceBootscan.sourceBootscan.rawP) {
+        sourceBootscan = signal;
+      }
+    }
+    if (sourceBootscan) {
+      candidate.methodSignals = [
+        ...(candidate.methodSignals ?? []).filter((entry) => entry.method !== "BootScan"),
+        sourceBootscan,
+      ];
+    }
     const sourceChiByMethod = new Map();
     for (const row of getSourceChiRows(candidateTriplet, {
       sequencePtr: candidate.sequencePtr,
@@ -1214,13 +1726,13 @@ async function analyze(message, emit = postMessage) {
     const sourceChimaera = sourceChiByMethod.get("Chimaera")
       ?? (candidate.methodSignals ?? []).find((signal) => signal.method === "Chimaera" && signal.sourceChi);
     candidate.stats = {
-      genconvRun: 0,
-      genconvEligible: 0,
-      genconvMatches: 0,
-      genconvStart: 0,
-      genconvEnd: 0,
-      bootscanConsistent: 0,
-      bootscanWindows: 0,
+      genconvRun: sourceGeneconv?.sourceGeneconv.fragmentScore ?? sourceGeneconv?.statistic ?? 0,
+      genconvEligible: sourceGeneconv?.sourceGeneconv.informativeSites ?? 0,
+      genconvMatches: sourceGeneconv?.sourceGeneconv.matchingSites ?? 0,
+      genconvStart: sourceGeneconv ? sourceGeneconv.start : 0,
+      genconvEnd: sourceGeneconv ? sourceGeneconv.end : 0,
+      bootscanConsistent: sourceBootscan?.sourceBootscan.runWindows ?? 0,
+      bootscanWindows: sourceBootscan?.sourceBootscan.runWindows ?? 0,
       maxChi: sourceMaxChi?.statistic ?? 0,
       chimaera: sourceChimaera?.statistic ?? 0,
       siskanScore: 0,
@@ -1235,21 +1747,24 @@ async function analyze(message, emit = postMessage) {
       chimaeraHalfWindow: sourceChimaera?.sourceChi?.halfWindow,
       threeSeqMajorSites: 0,
       threeSeqMinorSites: 0,
-      bootscanBootstrapConsistent: 0,
-      bootscanBootstrapReplicates: 0,
+      bootscanBootstrapConsistent: sourceBootscan
+        ? Math.round(sourceBootscan.sourceBootscan.bootstrapSupport * sourceBootscan.sourceBootscan.bootstrapReplicates)
+        : 0,
+      bootscanBootstrapReplicates: sourceBootscan?.sourceBootscan.bootstrapReplicates ?? 0,
       threeSeqStart: 0,
       threeSeqEnd: 0,
       maxChiStart: 0,
       maxChiEnd: 0,
       chimaeraStart: 0,
       chimaeraEnd: 0,
-      bootscanStart: 0,
-      bootscanEnd: 0,
+      bootscanStart: sourceBootscan?.start ?? 0,
+      bootscanEnd: sourceBootscan?.end ?? 0,
       siskanStart: 0,
       siskanEnd: 0,
-      bootscanRunWindows: 0,
+      bootscanRunWindows: sourceBootscan?.sourceBootscan.runWindows ?? 0,
       siskanRunWindows: 0,
       rdpSource: candidate.sourceRdp,
+      bootscanSource: sourceBootscan?.sourceBootscan,
     };
     if (options.methods.includes("SiScan")) {
       const sourceRequested = options.methods.includes("SiScan");
@@ -1676,9 +2191,21 @@ async function analyze(message, emit = postMessage) {
       erasedCanonicalBases: disassembly.erasedCanonicalBases,
     },
     rdpSignalTruncations: truncatedRdpSignals,
+    geneconvSignalTruncations: truncatedGeneconvSignals,
     chiSignalTruncations: truncatedChiSignals,
+    bootscanSignalTruncations: truncatedBootscanSignals,
+    bootscanBatch: sourceBootscanEnabled ? {
+      calls: sourceBootscanBatchCalls,
+      triplets: sourceBootscanTripletCount,
+      usedPairs: sourceBootscanUsedPairCount,
+      windows: Math.floor(nSites / Math.max(1, sourceBootscanStep)) + 2,
+      replicates: sourceBootscanReplicates,
+      workspaceBytes: sourceBootscanWorkspaceBytes,
+      relationshipMode: "distance",
+    } : undefined,
     tripletKernelCalls: {
       rdp: rdpTripletKernelCalls,
+      geneconv: sourceGeneconvTripletKernelCalls,
       sourceChi: sourceChiTripletKernelCalls,
     },
     matrixCount,
@@ -1696,6 +2223,7 @@ async function analyze(message, emit = postMessage) {
       "WebAssembly",
       options.exhaustive ? "all concrete sequence triplets" : "approximate parent-shortlist triplets",
       exactDistanceMatrix ? "packed distance" : "sampled parent search",
+      `source RDP/GENECONV${sourceBootscanEnabled ? "/BOOTSCAN" : ""}/MAXCHI/CHIMAERA`,
       options.circular ? "dual-origin circular scan" : "linear scan",
       options.polishBreakpoints ? (options.burtMode === "manual-step-up" ? "BURT 2–20-state step-up" : "RDP5-source BURT") : "raw breakpoints",
       options.ancestralClustering === false ? "event clustering off" : `${clustered.clusters.length} ancestral clusters`,
@@ -1774,8 +2302,15 @@ async function analyzeCyclic(message) {
     diagnosticsMs: 0,
     clusteringMs: 0,
     rdpSignalTruncations: 0,
+    geneconvSignalTruncations: 0,
     chiSignalTruncations: 0,
+    bootscanSignalTruncations: 0,
+    bootscanBatchCalls: 0,
+    bootscanTriplets: 0,
+    bootscanUsedPairs: 0,
+    bootscanWorkspaceBytes: 0,
     rdpCalls: 0,
+    geneconvCalls: 0,
     sourceChiCalls: 0,
   };
 
@@ -1817,8 +2352,15 @@ async function analyzeCyclic(message) {
     aggregate.diagnosticsMs += passResult.timing?.diagnosticsMs ?? 0;
     aggregate.clusteringMs += passResult.timing?.clusteringMs ?? 0;
     aggregate.rdpSignalTruncations += passResult.rdpSignalTruncations ?? 0;
+    aggregate.geneconvSignalTruncations += passResult.geneconvSignalTruncations ?? 0;
     aggregate.chiSignalTruncations += passResult.chiSignalTruncations ?? 0;
+    aggregate.bootscanSignalTruncations += passResult.bootscanSignalTruncations ?? 0;
+    aggregate.bootscanBatchCalls += passResult.bootscanBatch?.calls ?? 0;
+    aggregate.bootscanTriplets += passResult.bootscanBatch?.triplets ?? 0;
+    aggregate.bootscanUsedPairs += passResult.bootscanBatch?.usedPairs ?? 0;
+    aggregate.bootscanWorkspaceBytes = Math.max(aggregate.bootscanWorkspaceBytes, passResult.bootscanBatch?.workspaceBytes ?? 0);
     aggregate.rdpCalls += passResult.tripletKernelCalls?.rdp ?? 0;
+    aggregate.geneconvCalls += passResult.tripletKernelCalls?.geneconv ?? 0;
     aggregate.sourceChiCalls += passResult.tripletKernelCalls?.sourceChi ?? 0;
 
     pool = mergeCyclePool(
@@ -1886,9 +2428,19 @@ async function analyzeCyclic(message) {
       clusteringMs: aggregate.clusteringMs,
     },
     rdpSignalTruncations: aggregate.rdpSignalTruncations,
+    geneconvSignalTruncations: aggregate.geneconvSignalTruncations,
     chiSignalTruncations: aggregate.chiSignalTruncations,
+    bootscanSignalTruncations: aggregate.bootscanSignalTruncations,
+    bootscanBatch: lastResult.bootscanBatch ? {
+      ...lastResult.bootscanBatch,
+      calls: aggregate.bootscanBatchCalls,
+      triplets: aggregate.bootscanTriplets,
+      usedPairs: aggregate.bootscanUsedPairs,
+      workspaceBytes: aggregate.bootscanWorkspaceBytes,
+    } : undefined,
     tripletKernelCalls: {
       rdp: aggregate.rdpCalls,
+      geneconv: aggregate.geneconvCalls,
       sourceChi: aggregate.sourceChiCalls,
     },
     detectionCycle: {
@@ -1996,6 +2548,7 @@ async function recalculate(message) {
   const prefixBPtr = prefixAPtr + (nSites + 1) * 4;
   const outPtr = align(prefixBPtr + (nSites + 1) * 4, 16);
   const chiSignalCapacity = Math.max(1, Math.min(256, Math.trunc(options.chiSignalsPerTriplet ?? 24)));
+  const geneconvSignalCapacity = Math.max(1, Math.min(256, Math.trunc(options.geneconvSignalsPerTriplet ?? 64)));
   const chiTrackCount = 3 * (
     Number(options.methods.includes("MaxChi")) + Number(options.methods.includes("Chimaera"))
   );
@@ -2009,8 +2562,21 @@ async function recalculate(message) {
   const chiSmoothPtr = chiProfilePtr + (nSites + 1) * 8;
   const chiPeakPtr = align(chiSmoothPtr + (nSites + 1) * 8, 4);
   const chiOutPtr = chiPeakPtr + chiPeakCapacity * SOURCE_CHI_PEAK_INTS * 4;
+  const geneconvPositionsPtr = align(chiOutPtr + chiSignalCapacity * SOURCE_CHI_ROW_INTS * 4, 16);
+  const geneconvCategoriesPtr = geneconvPositionsPtr + nSites * 4;
+  const geneconvRunStartPtr = align(geneconvCategoriesPtr + nSites, 4);
+  const geneconvRunEndPtr = geneconvRunStartPtr + nSites * 4;
+  const geneconvRunScorePtr = geneconvRunEndPtr + nSites * 4;
+  const geneconvPrefixPtr = align(geneconvRunScorePtr + nSites * 4, 8);
+  const geneconvTreePtr = geneconvPrefixPtr + (nSites + 1) * 8;
+  const geneconvWorkspaceBytes = (nSites + 1) * 16 + 8;
+  const geneconvCalibrationPtr = align(geneconvTreePtr + geneconvWorkspaceBytes, 8);
+  const geneconvCandidatePtr = align(geneconvCalibrationPtr + 6 * 40, 8);
+  const geneconvCandidateCapacity = 3 * (nSites + 1);
+  const geneconvDeletePtr = align(geneconvCandidatePtr + geneconvCandidateCapacity * 24, 4);
+  const geneconvOutPtr = align(geneconvDeletePtr + nSites * 4, 8);
   const workingPacked = packSequences(working, workingSequenceCount, nSites);
-  const packedPtr = align(chiOutPtr + chiSignalCapacity * SOURCE_CHI_ROW_INTS * 4, 16);
+  const packedPtr = align(geneconvOutPtr + geneconvSignalCapacity * SOURCE_GENECONV_ROW_INTS * 4, 16);
   const validityPtr = packedPtr + workingPacked.packed.byteLength;
   const sourceSiScanExactDistance = options.methods.includes("SiScan")
     && workingSequenceCount <= 512
@@ -2022,7 +2588,34 @@ async function recalculate(message) {
   const roleTractMaskPtr = roleCohortPtr + roleCohortCapacity * 4;
   const roleBackgroundMaskPtr = roleTractMaskPtr + workingPacked.wordsPerSequence * 4;
   const roleDmaxOutPtr = align(roleBackgroundMaskPtr + workingPacked.wordsPerSequence * 4, 8);
-  const requiredPages = Math.ceil((roleDmaxOutPtr + 40) / 65536);
+  const recalcBootscanEnabled = options.methods.includes("BootScan");
+  const recalcBootscanWindow = Math.max(5, Math.min(32_767, Math.min(Math.floor(nSites / 2), Math.trunc(options.bootscanWindow ?? 200))));
+  const recalcBootscanStep = Math.max(1, Math.min(Math.max(1, Math.floor(nSites / 4)), Math.trunc(options.bootscanStep ?? 20)));
+  const recalcBootscanReplicates = Math.max(0, Math.min(1000, Math.trunc(options.bootstrapReplicates ?? 100)));
+  if (recalcBootscanEnabled && recalcBootscanReplicates < 2) {
+    throw new Error("BootScan requires at least two replicates. Increase Bootstrap replicates or disable BootScan.");
+  }
+  const recalcBootscanPairCount = workingSequenceCount * (workingSequenceCount - 1) / 2;
+  const recalcBootscanTripletPtr = align(roleDmaxOutPtr + 40, 16);
+  const recalcBootscanPairMapPtr = recalcBootscanTripletPtr + 12;
+  const recalcBootscanPairListPtr = recalcBootscanPairMapPtr + recalcBootscanPairCount * 4;
+  const recalcBootscanWeightPtr = align(recalcBootscanPairListPtr + 3 * 8, 2);
+  const recalcBootscanPairDistancePtr = recalcBootscanWeightPtr + recalcBootscanWindow * Math.max(2, recalcBootscanReplicates) * 2;
+  const recalcBootscanGlobalPairPtr = recalcBootscanPairDistancePtr + 3 * Math.max(2, recalcBootscanReplicates) * 2;
+  const recalcBootscanStatePtr = align(recalcBootscanGlobalPairPtr + 3 * 8, 4);
+  const recalcBootscanDifferencePtr = recalcBootscanStatePtr + 24;
+  const recalcBootscanValidPtr = recalcBootscanDifferencePtr + Math.max(2, recalcBootscanReplicates) * 4;
+  const recalcBootscanLookupPtr = align(recalcBootscanValidPtr + Math.max(2, recalcBootscanReplicates) * 4, 2);
+  // A noisy or long triplet can contain many source runs.  Keep enough rows to
+  // find the event being recalculated instead of silently treating a truncated
+  // prefix as the complete RDP5 signal ledger.
+  const recalcBootscanOutCapacity = 4_096;
+  const recalcBootscanLookupEntries = (recalcBootscanWindow + 1) * (recalcBootscanWindow + 2) / 2;
+  const recalcBootscanOutPtr = align(recalcBootscanLookupPtr + recalcBootscanLookupEntries * 2, 4);
+  const recalcRequiredBytes = recalcBootscanEnabled
+    ? recalcBootscanOutPtr + recalcBootscanOutCapacity * SOURCE_BOOTSCAN_ROW_INTS * 4
+    : roleDmaxOutPtr + 40;
+  const requiredPages = Math.ceil(recalcRequiredBytes / 65536);
   const currentPages = instance.exports.memory.buffer.byteLength / 65536;
   if (requiredPages > currentPages) instance.exports.memory.grow(requiredPages - currentPages);
   const memory = instance.exports.memory;
@@ -2156,6 +2749,114 @@ async function recalculate(message) {
     stats,
     diagnostics: null,
   };
+  let recalculatedGeneconvSignal = null;
+  if (options.methods.includes("GENECONV")) {
+    const orderedTriplet = [analysisRecombinant, analysisMajorParent, analysisMinorParent]
+      .sort((left, right) => left - right);
+    const targetSlot = orderedTriplet.indexOf(analysisRecombinant);
+    const total = instance.exports.scan_source_geneconv_all_packed(
+      packedPtr,
+      validityPtr,
+      workingPacked.wordsPerSequence,
+      nSites,
+      orderedTriplet[0],
+      orderedTriplet[1],
+      orderedTriplet[2],
+      Math.max(0, Math.round(options.geneconvGScale ?? 1)),
+      Math.max(Number.MIN_VALUE, Math.min(1, options.alpha ?? 0.05)),
+      geneconvPositionsPtr,
+      geneconvCategoriesPtr,
+      geneconvRunStartPtr,
+      geneconvRunEndPtr,
+      geneconvRunScorePtr,
+      geneconvPrefixPtr,
+      geneconvTreePtr,
+      geneconvCalibrationPtr,
+      geneconvCandidatePtr,
+      geneconvCandidateCapacity,
+      geneconvDeletePtr,
+      geneconvOutPtr,
+      geneconvSignalCapacity,
+    );
+    for (let index = 0; index < Math.min(total, geneconvSignalCapacity); index += 1) {
+      const row = Array.from(new Int32Array(
+        memory.buffer,
+        geneconvOutPtr + index * SOURCE_GENECONV_ROW_INTS * 4,
+        SOURCE_GENECONV_ROW_INTS,
+      ));
+      if (row[1] !== targetSlot) continue;
+      const signal = sourceGeneconvSignal(row, rotation, nSites);
+      if (!isCoLocatedSignal(candidate, signal, nSites)) continue;
+      if (!recalculatedGeneconvSignal
+        || signal.sourceGeneconv.rawP < recalculatedGeneconvSignal.sourceGeneconv.rawP) {
+        recalculatedGeneconvSignal = signal;
+      }
+    }
+    if (recalculatedGeneconvSignal) {
+      stats.genconvRun = recalculatedGeneconvSignal.sourceGeneconv.fragmentScore;
+      stats.genconvEligible = recalculatedGeneconvSignal.sourceGeneconv.informativeSites;
+      stats.genconvMatches = recalculatedGeneconvSignal.sourceGeneconv.matchingSites;
+      stats.genconvStart = recalculatedGeneconvSignal.start;
+      stats.genconvEnd = recalculatedGeneconvSignal.end;
+    }
+  }
+  let recalculatedBootscanSignal = null;
+  if (recalcBootscanEnabled) {
+    const orderedTriplet = [analysisRecombinant, analysisMajorParent, analysisMinorParent]
+      .sort((left, right) => left - right);
+    new Int32Array(memory.buffer, recalcBootscanTripletPtr, 3).set(orderedTriplet);
+    const total = instance.exports.scan_source_bootscan_batch_packed(
+      packedPtr,
+      validityPtr,
+      workingPacked.wordsPerSequence,
+      workingSequenceCount,
+      nSites,
+      recalcBootscanTripletPtr,
+      1,
+      recalcBootscanWindow,
+      recalcBootscanStep,
+      recalcBootscanReplicates,
+      Math.round(Math.max(0.5, Math.min(0.999, options.bootscanCutoff ?? 0.7)) * 1000),
+      (options.randomSeed ?? 0x5a17c0de) >>> 0,
+      recalcBootscanPairMapPtr,
+      recalcBootscanPairListPtr,
+      recalcBootscanWeightPtr,
+      recalcBootscanPairDistancePtr,
+      recalcBootscanGlobalPairPtr,
+      recalcBootscanStatePtr,
+      recalcBootscanDifferencePtr,
+      recalcBootscanValidPtr,
+      recalcBootscanLookupPtr,
+      recalcBootscanOutPtr,
+      recalcBootscanOutCapacity,
+    );
+    for (let index = 0; index < Math.min(total, recalcBootscanOutCapacity); index += 1) {
+      const row = Array.from(new Int32Array(
+        memory.buffer,
+        recalcBootscanOutPtr + index * SOURCE_BOOTSCAN_ROW_INTS * 4,
+        SOURCE_BOOTSCAN_ROW_INTS,
+      ));
+      const signal = sourceBootscanSignal(row, rotation, nSites);
+      if (!isCoLocatedSignal(candidate, signal, nSites)) continue;
+      if (!recalculatedBootscanSignal
+        || signal.sourceBootscan.rawP < recalculatedBootscanSignal.sourceBootscan.rawP) {
+        recalculatedBootscanSignal = signal;
+      }
+    }
+    if (recalculatedBootscanSignal) {
+      stats.bootscanConsistent = recalculatedBootscanSignal.sourceBootscan.runWindows;
+      stats.bootscanWindows = recalculatedBootscanSignal.sourceBootscan.runWindows;
+      stats.bootscanBootstrapConsistent = Math.round(
+        recalculatedBootscanSignal.sourceBootscan.bootstrapSupport
+          * recalculatedBootscanSignal.sourceBootscan.bootstrapReplicates,
+      );
+      stats.bootscanBootstrapReplicates = recalculatedBootscanSignal.sourceBootscan.bootstrapReplicates;
+      stats.bootscanStart = recalculatedBootscanSignal.start;
+      stats.bootscanEnd = recalculatedBootscanSignal.end;
+      stats.bootscanRunWindows = recalculatedBootscanSignal.sourceBootscan.runWindows;
+      stats.bootscanSource = recalculatedBootscanSignal.sourceBootscan;
+    }
+  }
   const recalculatedSourceChiSignals = [];
   const recalculatedChiMask = (options.methods.includes("MaxChi") ? 4 : 0)
     | (options.methods.includes("Chimaera") ? 8 : 0);
@@ -2309,11 +3010,10 @@ async function recalculate(message) {
   candidate.diagnostics = candidateDiagnostics(candidate, encoded, nSites, profile);
   const recalculatedMethodSignals = [
     ...(options.methods.includes("RDP") ? [{ method: "RDP", ...mappedInterval, statistic: candidate.chiSquare, locator: "edited hypothesis recalculation" }] : []),
-    ...(options.methods.includes("GENECONV") && output[4] > output[3] ? [{ method: "GENECONV", ...mapInterval(output[3], output[4], rotation, nSites), statistic: output[0], locator: "maximum concordant fragment" }] : []),
-    ...(options.methods.includes("BootScan") && output[30] > output[29] ? [{ method: "BootScan", ...mapInterval(output[29], output[30], rotation, nSites), statistic: output[21] / Math.max(1, output[22]), locator: "minor-topology window run" }] : []),
+    ...(recalculatedGeneconvSignal ? [recalculatedGeneconvSignal] : []),
+    ...(recalculatedBootscanSignal ? [recalculatedBootscanSignal] : []),
     ...recalculatedSourceChiSignals,
     ...(recalculatedSiScanSignal ? [recalculatedSiScanSignal] : []),
-    ...(options.methods.includes("3Seq") && output[24] > output[23] ? [{ method: "3Seq", ...mapInterval(output[23], output[24], rotation, nSites), statistic: output[11], locator: "maximum HGRW descent" }] : []),
   ].filter((signal) => isCoLocatedSignal(candidate, signal, nSites));
   candidate.methodSignals = primaryMethodSignals(recalculatedMethodSignals);
   const familyComparisons = Math.max(1, Math.trunc(message.comparisons ?? event.hypothesisTests ?? 1));

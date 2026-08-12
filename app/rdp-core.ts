@@ -12,7 +12,7 @@ export type MethodName = (typeof PRIMARY_METHODS)[number];
 // Only these families are allowed in production scans until their complete
 // author-source discovery path has been ported. This prevents a simplified
 // stand-in from silently participating in an analysis labelled RDP parity.
-export const SOURCE_READY_METHODS: MethodName[] = ["RDP", "MaxChi", "Chimaera", "SiScan"];
+export const SOURCE_READY_METHODS: MethodName[] = ["RDP", "GENECONV", "BootScan", "MaxChi", "Chimaera", "SiScan"];
 export type EventDecision = "unreviewed" | "accepted" | "rejected";
 
 export interface SequenceRecord {
@@ -72,6 +72,35 @@ export interface MethodSignal {
     boundaryRanks: [number, number];
     growthWidths: [number, number];
     direction: 1 | -1;
+  };
+  sourceGeneconv?: {
+    track: number;
+    targetSlot: number;
+    minorSlot: number;
+    majorSlot: number;
+    fragmentScore: number;
+    informativeSites: number;
+    matchingSites: number;
+    mismatchSites: number;
+    mismatchPenalty: number;
+    rawP: number;
+    startRank: number;
+    endRank: number;
+  };
+  sourceBootscan?: {
+    topology: number;
+    baselineTopology: number;
+    bootstrapSupport: number;
+    bootstrapReplicates: number;
+    runWindows: number;
+    tractPairMatches: number;
+    backgroundPairMatches: number;
+    tractInformativeSites: number;
+    informativeSites: number;
+    rawP: number;
+    window: number;
+    step: number;
+    relationshipMode: "distance";
   };
   outgroup?: number | null;
   outgroupMode?: "nearest" | "most-divergent" | "randomized" | "manual";
@@ -366,7 +395,12 @@ export interface AnalysisOptions {
   rdpWindow: number;
   rdpSignalsPerTriplet: number;
   chiSignalsPerTriplet: number;
+  geneconvSignalsPerTriplet: number;
   geneconvGScale: number;
+  bootscanWindow: number;
+  bootscanStep: number;
+  bootscanCutoff: number;
+  bootscanSignals: number;
   siskanOutgroupMode: "nearest" | "most-divergent" | "randomized" | "manual";
   siskanOutgroupSequence: number | null;
   siskanPositionMode: "triplet-variable" | "quartet-variable" | "all";
@@ -1214,7 +1248,13 @@ export const DEFAULT_OPTIONS: AnalysisOptions = {
   rdpWindow: 30,
   rdpSignalsPerTriplet: 128,
   chiSignalsPerTriplet: 24,
+  geneconvSignalsPerTriplet: 64,
   geneconvGScale: 1,
+  // RDP5 automatic BOOTSCAN defaults from the supplied source/options form.
+  bootscanWindow: 200,
+  bootscanStep: 20,
+  bootscanCutoff: 0.7,
+  bootscanSignals: 20_000,
   siskanOutgroupMode: "nearest",
   siskanOutgroupSequence: null,
   siskanPositionMode: "triplet-variable",
@@ -1279,7 +1319,18 @@ export interface RdpProject {
     disassembly?: { appliedEvents: number; components: number; erasedCanonicalBases: number };
     rdpSignalTruncations?: number;
     chiSignalTruncations?: number;
-    tripletKernelCalls?: { rdp: number; sourceChi: number };
+    tripletKernelCalls?: { rdp: number; geneconv: number; sourceChi: number };
+    bootscanSignalTruncations?: number;
+    bootscanBatch?: {
+      calls: number;
+      triplets: number;
+      usedPairs: number;
+      windows: number;
+      replicates: number;
+      workspaceBytes: number;
+      relationshipMode: "distance";
+    };
+    geneconvSignalTruncations?: number;
     detectionCycle?: {
       enabled: boolean;
       eventsApplied: number;
@@ -1369,7 +1420,12 @@ export function parseProject(text: string): RdpProject {
     rdpWindow: Math.max(5, Math.min(300, Math.trunc(finiteNumber(rawOptions.rdpWindow, DEFAULT_OPTIONS.rdpWindow)))),
     rdpSignalsPerTriplet: Math.max(1, Math.min(256, Math.trunc(finiteNumber(rawOptions.rdpSignalsPerTriplet, DEFAULT_OPTIONS.rdpSignalsPerTriplet)))),
     chiSignalsPerTriplet: Math.max(1, Math.min(256, Math.trunc(finiteNumber(rawOptions.chiSignalsPerTriplet, DEFAULT_OPTIONS.chiSignalsPerTriplet)))),
+    geneconvSignalsPerTriplet: Math.max(1, Math.min(256, Math.trunc(finiteNumber(rawOptions.geneconvSignalsPerTriplet, DEFAULT_OPTIONS.geneconvSignalsPerTriplet)))),
     geneconvGScale: Math.max(0, Math.min(100, finiteNumber(rawOptions.geneconvGScale, DEFAULT_OPTIONS.geneconvGScale))),
+    bootscanWindow: Math.max(5, Math.min(Math.max(5, Math.floor(alignment.length / 2)), Math.trunc(finiteNumber(rawOptions.bootscanWindow, DEFAULT_OPTIONS.bootscanWindow)))),
+    bootscanStep: Math.max(1, Math.min(Math.max(1, Math.floor(alignment.length / 4)), Math.trunc(finiteNumber(rawOptions.bootscanStep, DEFAULT_OPTIONS.bootscanStep)))),
+    bootscanCutoff: Math.max(0.5, Math.min(0.999, finiteNumber(rawOptions.bootscanCutoff, DEFAULT_OPTIONS.bootscanCutoff))),
+    bootscanSignals: Math.max(128, Math.min(50_000, Math.trunc(finiteNumber(rawOptions.bootscanSignals, DEFAULT_OPTIONS.bootscanSignals)))),
     siskanOutgroupMode: rawOptions.siskanOutgroupMode === "most-divergent" || rawOptions.siskanOutgroupMode === "randomized" || rawOptions.siskanOutgroupMode === "manual"
       ? rawOptions.siskanOutgroupMode
       : "nearest",
@@ -1717,6 +1773,35 @@ export function parseProject(text: string): RdpProject {
             ] as [number, number],
             direction: signal.sourceChi.direction === -1 ? -1 as const : 1 as const,
           } : undefined,
+          sourceGeneconv: signal.sourceGeneconv && typeof signal.sourceGeneconv === "object" ? {
+            track: Math.max(0, Math.min(5, Math.trunc(finiteNumber(signal.sourceGeneconv.track, 0)))),
+            targetSlot: Math.max(0, Math.min(2, Math.trunc(finiteNumber(signal.sourceGeneconv.targetSlot, 0)))),
+            minorSlot: Math.max(0, Math.min(2, Math.trunc(finiteNumber(signal.sourceGeneconv.minorSlot, 1)))),
+            majorSlot: Math.max(0, Math.min(2, Math.trunc(finiteNumber(signal.sourceGeneconv.majorSlot, 2)))),
+            fragmentScore: Math.max(0, Math.trunc(finiteNumber(signal.sourceGeneconv.fragmentScore, signal.statistic))),
+            informativeSites: Math.max(0, Math.trunc(finiteNumber(signal.sourceGeneconv.informativeSites, 0))),
+            matchingSites: Math.max(0, Math.trunc(finiteNumber(signal.sourceGeneconv.matchingSites, 0))),
+            mismatchSites: Math.max(0, Math.trunc(finiteNumber(signal.sourceGeneconv.mismatchSites, 0))),
+            mismatchPenalty: Math.max(1, Math.trunc(finiteNumber(signal.sourceGeneconv.mismatchPenalty, 1))),
+            rawP: Math.max(Number.MIN_VALUE, Math.min(1, finiteNumber(signal.sourceGeneconv.rawP, 1))),
+            startRank: Math.max(0, Math.trunc(finiteNumber(signal.sourceGeneconv.startRank, 0))),
+            endRank: Math.max(0, Math.trunc(finiteNumber(signal.sourceGeneconv.endRank, 0))),
+          } : undefined,
+          sourceBootscan: signal.sourceBootscan && typeof signal.sourceBootscan === "object" ? {
+            topology: Math.max(0, Math.min(2, Math.trunc(finiteNumber(signal.sourceBootscan.topology, 0)))),
+            baselineTopology: Math.max(0, Math.min(2, Math.trunc(finiteNumber(signal.sourceBootscan.baselineTopology, 0)))),
+            bootstrapSupport: Math.max(0, Math.min(1, finiteNumber(signal.sourceBootscan.bootstrapSupport, 0))),
+            bootstrapReplicates: Math.max(2, Math.min(1000, Math.trunc(finiteNumber(signal.sourceBootscan.bootstrapReplicates, 100)))),
+            runWindows: Math.max(1, Math.trunc(finiteNumber(signal.sourceBootscan.runWindows, 1))),
+            tractPairMatches: Math.max(0, Math.trunc(finiteNumber(signal.sourceBootscan.tractPairMatches, 0))),
+            backgroundPairMatches: Math.max(0, Math.trunc(finiteNumber(signal.sourceBootscan.backgroundPairMatches, 0))),
+            tractInformativeSites: Math.max(0, Math.trunc(finiteNumber(signal.sourceBootscan.tractInformativeSites, 0))),
+            informativeSites: Math.max(0, Math.trunc(finiteNumber(signal.sourceBootscan.informativeSites, 0))),
+            rawP: Math.max(Number.MIN_VALUE, Math.min(1, finiteNumber(signal.sourceBootscan.rawP, 1))),
+            window: Math.max(5, Math.trunc(finiteNumber(signal.sourceBootscan.window, DEFAULT_OPTIONS.bootscanWindow))),
+            step: Math.max(1, Math.trunc(finiteNumber(signal.sourceBootscan.step, DEFAULT_OPTIONS.bootscanStep))),
+            relationshipMode: "distance" as const,
+          } : undefined,
           outgroup: signal.outgroup === null
             ? null
             : Number.isFinite(signal.outgroup) && (signal.outgroup as number) >= 0 && (signal.outgroup as number) < alignment.sequences.length
@@ -1931,10 +2016,24 @@ export function parseProject(text: string): RdpProject {
         concreteTripletInputs: rawMetrics.concreteTripletInputs !== false,
         parentSamples: finiteNumber(rawMetrics.parentSamples, 0) || undefined,
         rdpSignalTruncations: Math.max(0, Math.trunc(finiteNumber(rawMetrics.rdpSignalTruncations, 0))) || undefined,
+        geneconvSignalTruncations: Math.max(0, Math.trunc(finiteNumber(rawMetrics.geneconvSignalTruncations, 0))) || undefined,
         chiSignalTruncations: Math.max(0, Math.trunc(finiteNumber(rawMetrics.chiSignalTruncations, 0))) || undefined,
-        tripletKernelCalls: rawMetrics.tripletKernelCalls && typeof rawMetrics.tripletKernelCalls === "object"
+        bootscanSignalTruncations: Math.max(0, Math.trunc(finiteNumber(rawMetrics.bootscanSignalTruncations, 0))) || undefined,
+        bootscanBatch: rawMetrics.bootscanBatch && typeof rawMetrics.bootscanBatch === "object"
           ? {
+              calls: Math.max(0, Math.trunc(finiteNumber(rawMetrics.bootscanBatch.calls, 0))),
+              triplets: Math.max(0, Math.trunc(finiteNumber(rawMetrics.bootscanBatch.triplets, 0))),
+              usedPairs: Math.max(0, Math.trunc(finiteNumber(rawMetrics.bootscanBatch.usedPairs, 0))),
+              windows: Math.max(0, Math.trunc(finiteNumber(rawMetrics.bootscanBatch.windows, 0))),
+              replicates: Math.max(0, Math.trunc(finiteNumber(rawMetrics.bootscanBatch.replicates, 0))),
+              workspaceBytes: Math.max(0, Math.trunc(finiteNumber(rawMetrics.bootscanBatch.workspaceBytes, 0))),
+              relationshipMode: "distance" as const,
+            }
+          : undefined,
+        tripletKernelCalls: rawMetrics.tripletKernelCalls && typeof rawMetrics.tripletKernelCalls === "object"
+            ? {
               rdp: Math.max(0, Math.trunc(finiteNumber(rawMetrics.tripletKernelCalls.rdp, 0))),
+              geneconv: Math.max(0, Math.trunc(finiteNumber(rawMetrics.tripletKernelCalls.geneconv, 0))),
               sourceChi: Math.max(0, Math.trunc(finiteNumber(rawMetrics.tripletKernelCalls.sourceChi, 0))),
             }
           : undefined,

@@ -80,10 +80,36 @@ component alignment before it is characterized and applied. The cycle stops
 only when no supported signal remains (or a disclosed, tunable safety cap is
 reached), and its internally applied events remain visibly unreviewed for the
 analyst.
+Version 0.9.4 re-enables GENECONV with the author-source six-track batch rather
+than the retired simplified locator. One packed concrete triplet pass removes
+only locally invariant/incomplete columns, retains all-different columns,
+builds three pair-identity and three complementary outer tracks, applies the
+source integer-G mismatch penalty and `CalcKMaxP`/`GCCalcPValP` calibration,
+then drains one globally p-ordered overlap-suppressed fragment queue. The
+native quadratic fragment extension is represented exactly by a linear-time
+monotone excursion index. GENECONV can now independently create hypotheses,
+confirm co-located hypotheses from other methods, and recalculate edited events;
+the project, CSV and interface retain its full track/role/score/probability
+ledger.
+Version 0.9.5 re-enables the default RDP5 distance-mode BootScan/RecScan path.
+The worker enumerates each unordered concrete triplet once, generates one
+seeded `SEQBOOT2` table, computes every requested sequence-pair distance once
+per window, and shares that pair matrix across all triplets. The packed WASM
+kernel follows `FastBootDistIP` Jukes–Cantor distances and `GetPltVal2` tie
+ordering, while the whole-alignment baseline follows the source `Distance`
+identity matrix without JC-saturation ties. It retains supported topology runs and applies triplet-local
+`BSSubSeq`/`MakeScoresBS`/`ProbCalc` scoring. It independently creates
+hypotheses, confirms co-located signals, recalculates edited events, and
+persists topology/support/window/probability provenance. Sparse preview/query
+batches compact the requested pair set; complete high-identity windows visit
+bootstrap weights only at mismatches. The optional desktop UPGMA/NJ
+relationship transformations and broad executable golden corpus remain parity
+gates and are disclosed in the interface.
 
 Scientific integrity takes precedence over a seven-method checkbox count.
-GENECONV, BootScan and 3Seq are disabled in production until their complete
-author-source batch paths replace the retired simplified locators. SiScan is
+3Seq is disabled in production until its complete author-source batch path
+replaces the retired simplified locator. BootScan/RecScan's author-source
+distance mode is active; its optional tree relationship modes remain pending. SiScan is
 run through its source confirmation path on candidates from the source
 triplet detectors; its former oriented prelocator is retired. Direct
 ports of `MakePhPrScore`, `MakeTrpGroups`/`MakeTrpScore`,
@@ -165,7 +191,8 @@ implementation.
 The tests cover scalar/packed distance equivalence, the RDP5 multi-signal VNP event locator,
 the C(5,3) full-concrete-triplet invariant, order-invariant cached triplets,
 source-detector discovery with exact current-triplet site compression, co-location
-gating, finite-G GENECONV fragment scoring/KA calibration, informative-site
+gating, all six GENECONV tracks, finite-G fragment scoring/KA calibration,
+global overlap-suppressed source queueing, informative-site
 MAXCHI/CHIMAERA windows and source peak correction,
 source SiScan quartet categories, outgroup selection, cached/streamed MSVC
 randomization, topology-run calibration and multi-event expansion,

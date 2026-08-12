@@ -46,7 +46,7 @@ assert.deepEqual(
 );
 assert.equal(patch.evidenceStale, false);
 assert.ok(patch.informativeSites > 250);
-assert.ok(!patch.evidence.some((item) => ["GENECONV", "BootScan", "3Seq"].includes(item.method)));
+assert.ok(!patch.evidence.some((item) => item.method === "3Seq"));
 assert.match(patch.evidence[0].correctionScope, /56 scanned triplets/);
 assert.equal(patch.hypothesisTests, 56);
 assert.match(patch.recalculationNote, /conservative Bonferroni/);

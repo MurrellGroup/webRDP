@@ -288,16 +288,13 @@ export function methodEvidence(candidate, stats, options, comparisons, nSites) {
   const threeSeqBound = Math.min(1, 2 * Math.exp(
     (-2 * descent * descent) / Math.max(1, stats.threeSeqSites),
   ));
-  const bootstrapAvailable = stats.bootscanBootstrapReplicates > 0;
-  const bootstrapP = bootstrapAvailable
-    ? binomialUpper(stats.bootscanBootstrapConsistent, stats.bootscanBootstrapReplicates, 0.5)
-    : 1;
-  const windowSignP = binomialUpper(stats.bootscanConsistent, stats.bootscanWindows, 0.5);
   const sourceRdpP = rdp5SourceProbability(stats.rdpSource
     ? { ...stats.rdpSource, informativeSites: candidate.informative }
     : null);
   const hasSignalLedger = Array.isArray(candidate.methodSignals);
   const locatedMethods = new Set((candidate.methodSignals ?? []).map((signal) => signal.method));
+  const geneconvSignal = (candidate.methodSignals ?? []).find((signal) => signal.method === "GENECONV" && signal.sourceGeneconv);
+  const bootscanSignal = (candidate.methodSignals ?? []).find((signal) => signal.method === "BootScan" && signal.sourceBootscan);
   const maxChiSignal = (candidate.methodSignals ?? []).find((signal) => signal.method === "MaxChi" && signal.sourceChi);
   const chimaeraSignal = (candidate.methodSignals ?? []).find((signal) => signal.method === "Chimaera" && signal.sourceChi);
 
@@ -309,20 +306,23 @@ export function methodEvidence(candidate, stats, options, comparisons, nSites) {
       calibration: sourceRdpP === null ? "binomial · window-corrected fallback" : "RDP5 ProbCalcP/P2-equivalent binomial tail",
     },
     GENECONV: {
-      p: geneconvSourceProbability(stats.genconvRun, stats.genconvEligible, stats.genconvMatches, options.geneconvGScale ?? 1),
-      statistic: stats.genconvRun,
+      p: geneconvSignal?.sourceGeneconv?.rawP
+        ?? geneconvSourceProbability(stats.genconvRun, stats.genconvEligible, stats.genconvMatches, options.geneconvGScale ?? 1),
+      statistic: geneconvSignal?.sourceGeneconv?.fragmentScore ?? stats.genconvRun,
       statisticLabel: "fragment score",
-      calibration: `RDP5 CalcKMaxP/GCCalcPValP · G-scale ${options.geneconvGScale ?? 1}`,
+      calibration: geneconvSignal?.sourceGeneconv
+        ? `RDP5 six-track fragment queue · ${geneconvSignal.sourceGeneconv.informativeSites} compressed sites · G-scale ${Math.round(options.geneconvGScale ?? 1)}`
+        : `RDP5 CalcKMaxP/GCCalcPValP · G-scale ${Math.round(options.geneconvGScale ?? 1)}`,
     },
     BootScan: {
-      p: bootstrapAvailable ? Math.max(windowSignP, bootstrapP) : windowSignP,
-      statistic: bootstrapAvailable
-        ? stats.bootscanBootstrapConsistent / Math.max(1, stats.bootscanBootstrapReplicates)
-        : stats.bootscanConsistent / Math.max(1, stats.bootscanWindows),
-      statisticLabel: bootstrapAvailable ? "bootstrap topology support" : "topology agreement",
-      calibration: bootstrapAvailable
-        ? "seeded p-distance bootstrap + window sign"
-        : "distance-window sign test",
+      p: bootscanSignal?.sourceBootscan?.rawP ?? 1,
+      statistic: bootscanSignal?.sourceBootscan?.bootstrapSupport ?? 0,
+      statisticLabel: bootscanSignal?.sourceBootscan
+        ? "maximum topology bootstrap"
+        : "source batch signal unavailable",
+      calibration: bootscanSignal?.sourceBootscan
+        ? `RDP5 RecScan distance batch · ${bootscanSignal.sourceBootscan.bootstrapReplicates} SEQBOOT2 replicates · ${bootscanSignal.sourceBootscan.window}/${bootscanSignal.sourceBootscan.step} nt window/step · MakeScoresBS/ProbCalc`
+        : "RDP5 source BootScan batch signal unavailable · recalculate this hypothesis",
     },
     MaxChi: {
       p: sourceChiWindowProbability(

@@ -28,8 +28,22 @@ const chiProfilePtr = align(chiMissingPtr + (nSites + 1) * 4, 8);
 const chiSmoothPtr = chiProfilePtr + (nSites + 1) * 8;
 const chiPeakPtr = align(chiSmoothPtr + (nSites + 1) * 8, 4);
 const chiOutPtr = chiPeakPtr + chiPeakCapacity * 6 * 4;
+const geneconvSignalCapacity = 64;
+const geneconvPositionsPtr = align(chiOutPtr + chiSignalCapacity * 16 * 4);
+const geneconvCategoriesPtr = geneconvPositionsPtr + nSites * 4;
+const geneconvRunStartPtr = align(geneconvCategoriesPtr + nSites, 4);
+const geneconvRunEndPtr = geneconvRunStartPtr + nSites * 4;
+const geneconvRunScorePtr = geneconvRunEndPtr + nSites * 4;
+const geneconvPrefixPtr = align(geneconvRunScorePtr + nSites * 4, 8);
+const geneconvTreePtr = geneconvPrefixPtr + (nSites + 1) * 8;
+const geneconvWorkspaceBytes = (nSites + 1) * 16 + 8;
+const geneconvCalibrationPtr = align(geneconvTreePtr + geneconvWorkspaceBytes, 8);
+const geneconvCandidatePtr = align(geneconvCalibrationPtr + 6 * 40, 8);
+const geneconvCandidateCapacity = 3 * (nSites + 1);
+const geneconvDeletePtr = align(geneconvCandidatePtr + geneconvCandidateCapacity * 24, 4);
+const geneconvOutPtr = align(geneconvDeletePtr + nSites * 4, 8);
 const roleCohortCount = Math.min(30, nSeq);
-const roleCohortPtr = align(chiOutPtr + chiSignalCapacity * 16 * 4);
+const roleCohortPtr = align(geneconvOutPtr + geneconvSignalCapacity * 16 * 4);
 const tractMaskPtr = align(roleCohortPtr + roleCohortCount * 4);
 const backgroundMaskPtr = tractMaskPtr + wordsPerSequence * 4;
 const dmaxOutPtr = align(backgroundMaskPtr + wordsPerSequence * 4, 8);
@@ -80,6 +94,8 @@ const distanceMs = performance.now() - packedDistanceStart;
 let comparisons = 0;
 let signals = 0;
 let retainedRdpSignals = 0;
+let geneconvSignals = 0;
+let geneconvMs = 0;
 const concreteTriplets = new Set();
 const scanStart = performance.now();
 for (let recombinant = 0; recombinant < nSeq; recombinant += 1) {
@@ -112,6 +128,34 @@ for (let recombinant = 0; recombinant < nSeq; recombinant += 1) {
       const retainedRdp = Math.min(rdpSignalCapacity, Math.max(0, rdpSignals));
       signals += rdpSignals;
       retainedRdpSignals += retainedRdp;
+      const geneconvStarted = performance.now();
+      const geneconv = instance.exports.scan_source_geneconv_all_packed(
+        packedPtr,
+        validityPtr,
+        wordsPerSequence,
+        nSites,
+        triplet[0],
+        triplet[1],
+        triplet[2],
+        1,
+        0.05,
+        geneconvPositionsPtr,
+        geneconvCategoriesPtr,
+        geneconvRunStartPtr,
+        geneconvRunEndPtr,
+        geneconvRunScorePtr,
+        geneconvPrefixPtr,
+        geneconvTreePtr,
+        geneconvCalibrationPtr,
+        geneconvCandidatePtr,
+        geneconvCandidateCapacity,
+        geneconvDeletePtr,
+        geneconvOutPtr,
+        geneconvSignalCapacity,
+      );
+      geneconvMs += performance.now() - geneconvStarted;
+      geneconvSignals += geneconv;
+      signals += geneconv;
       signals += instance.exports.scan_source_chi_all_packed(
         packedPtr,
         validityPtr,
@@ -214,6 +258,9 @@ const report = {
   candidateParents: parentCount,
   comparisons,
   signals,
+  geneconvSignals,
+  geneconvMs: Number(geneconvMs.toFixed(2)),
+  geneconvMillionTripletSitesPerSecond: Number(((comparisons * nSites) / (geneconvMs * 1000)).toFixed(1)),
   retainedSignals: retainedRdpSignals,
   scalarDistanceMs: Number(scalarDistanceMs.toFixed(2)),
   distanceMs: Number(distanceMs.toFixed(2)),
@@ -243,7 +290,12 @@ if (process.env.RDP_PERFORMANCE_GATE === "1") {
   if (report.sourcePhiMs > 500) failures.push(`bounded source PHI ${report.sourcePhiMs} ms > 500 ms`);
   if (report.sourceSiScanMs > 2_000) failures.push(`80 kb source SiScan ${report.sourceSiScanMs} ms > 2000 ms`);
   if (String(report.sourceSiScanRecovered) !== "30000,45000") failures.push(`source SiScan recovered ${report.sourceSiScanRecovered} instead of 30000,45000`);
+  if (report.geneconvMs > 500) failures.push(`six-track source GENECONV ${report.geneconvMs} ms > 500 ms`);
   if (report.totalMs > 2_000) failures.push(`production total ${report.totalMs} ms > 2000 ms`);
-  if (report.millionSiteComparisonsPerSecond < 25) failures.push(`source triplet scan throughput ${report.millionSiteComparisonsPerSecond} M/s < 25 M/s`);
+  // The aggregate now includes three complete source detector families per
+  // concrete triplet (RDP, six-track GENECONV, and MAXCHI/CHIMAERA).  Keep a
+  // strict total-time gate and independently require the new kernel to exceed
+  // 50 million full six-track triplet-sites/s.
+  if (report.geneconvMillionTripletSitesPerSecond < 50) failures.push(`six-track source GENECONV throughput ${report.geneconvMillionTripletSitesPerSecond} M/s < 50 M/s`);
   if (failures.length) throw new Error(`Performance regression gate failed: ${failures.join("; ")}`);
 }

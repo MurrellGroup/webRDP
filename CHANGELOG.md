@@ -1,5 +1,71 @@
 # Changelog
 
+## 0.9.5 — 2026-08-12
+
+- Re-enabled BootScan/RecScan production discovery with a direct port of the
+  author-supplied RDP5 default distance-mode path: `BSXoverR2`, `SEQBOOT2`,
+  `FastBootDistIP`, `SingleToInt`, `GetPltVal2`, the source cutoff/overlap run
+  logic, `BSSubSeq`, `MakeScoresBS`, and `ProbCalc`.
+- Removed the retired triplet-at-a-time/reference-style behavior. Full mode
+  now constructs every unordered concrete triplet exactly once, generates one
+  deterministic MSVCRT bootstrap table, computes each requested sequence pair
+  once per window, and reuses that row across every containing triplet. All
+  three pair relationships are evaluated together; no sequence outside the
+  triplet can act as a proxy.
+- Added an optimized packed WASM batch with 16-bit quantized JC distances,
+  sparse pair compaction for preview/query scans, a triangular distance lookup,
+  mismatch-only bootstrap accumulation for complete high-identity windows, and
+  an exact missing-data fallback. Whole-alignment baseline ordering uses the
+  source `Distance` identity fractions, so JC saturation cannot scramble a
+  divergent triplet's role assignment. The reproducible 24 × 2,000 all-triplet
+  benchmark reports 2,024 triplets, 276 pairs, 102 windows × 100 replicates in
+  307.01 ms, a 22× pair-row reuse factor and 0.71 MiB workspace.
+- BootScan can independently create hypotheses, confirm co-located hypotheses
+  from other detectors, and recalculate edited events. Projects retain source
+  topology/baseline, bootstrap support and replicate count, run windows,
+  triplet-local tract/background counts, window/step, raw probability,
+  truncation count, batch calls, triplets, reused pairs and workspace bytes.
+- Added source controls for window, step, topology cutoff and raw-run retention;
+  raised the default retained-run buffer to 20,000 while keeping overflow
+  explicit. The method result ledger names the source routine/calibration.
+- Added byte/packed, deterministic-seed, unrelated-decoy, multi-triplet,
+  divergent-baseline,
+  independent worker discovery, recalculation and project-round-trip tests,
+  plus `npm run bench:bootscan`.
+- Optional desktop `BSTypeFlag` UPGMA/NJ relationship transformations and a
+  broad RDP5 executable golden corpus remain explicit parity gates; this release
+  does not claim those modes.
+
+## 0.9.4 — 2026-08-12
+
+- Re-enabled GENECONV with a direct WebAssembly port of the author-supplied
+  RDP5 batch path. Each unordered concrete triplet is compressed locally,
+  invariant and incomplete columns are removed, all-different columns are
+  retained, and all six source tracks are evaluated together: the three
+  pair-identity tracks and their three complementary outer tracks.
+- Ported the source default finite-G fragment rules, mismatch penalties,
+  `CalcKMaxP` lambda/K calibration, `GCCalcPValP` probability conversion,
+  global cross-track p-value ordering, and source overlap deletion. Every
+  retained row carries its actual track, target/minor/major slots, compressed
+  ranks, nucleotide interval, score, match/mismatch counts, penalty, raw p,
+  and routine provenance.
+- Added independent GENECONV discovery, co-located method confirmation,
+  exact-hypothesis recalculation, project/CSV round-trip support, per-triplet
+  retention controls, truncation accounting, and unordered-triplet kernel-call
+  provenance. No designated reference sequence or alignment-wide proxy is
+  involved.
+- Replaced the source routine's quadratic positive-run extension with an exact
+  right-to-left monotone excursion index. The 100 × 10,000 benchmark processes
+  2,632 complete six-track GENECONV triplets in about 0.36 s (about 74 million
+  full triplet-sites/s) while preserving the native latest-maximum tie rule.
+  Scratch memory for that index was reduced from roughly 64 to 16 bytes per
+  alignment column.
+- Added byte-versus-packed oracle tests, decoy independence, all-different-site
+  retention, exact six-track role mapping, finite-G bridging, worker-level
+  independent discovery, recalculation, diagnostics, and performance gates.
+  A broad desktop-generated golden corpus and non-default indel/permutation
+  modes remain validation/feature gates.
+
 ## 0.9.3 — 2026-08-12
 
 - Made automated analysis follow the RDP5 manual §4.1.6 cycle by default:

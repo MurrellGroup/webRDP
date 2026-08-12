@@ -60,7 +60,9 @@ const events = message.events as Array<{
   diagnostics: { rateRatio: number };
   warnings: string[];
 }>;
-const event = events.find((candidate) => candidate.recombinant === 0);
+const event = events
+  .filter((candidate) => candidate.recombinant === 0)
+  .sort((left, right) => right.diagnostics.rateRatio - left.diagnostics.rateRatio)[0];
 assert.ok(event, "the challenge should retain its strong mosaic-like signal");
 assert.ok(event.diagnostics.rateRatio > 4, `expected a strong rate shift, got ${event.diagnostics.rateRatio}`);
 assert.ok(event.warnings.some((warning) => warning.includes("variable-site density")));

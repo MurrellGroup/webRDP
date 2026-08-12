@@ -130,6 +130,7 @@ const metrics = {
   diagnostics: message.diagnostics as NonNullable<Parameters<typeof serializeProject>[0]["metrics"]>["diagnostics"],
   disassembly: message.disassembly as NonNullable<Parameters<typeof serializeProject>[0]["metrics"]>["disassembly"],
   rdpSignalTruncations: Number(message.rdpSignalTruncations) || undefined,
+  geneconvSignalTruncations: Number(message.geneconvSignalTruncations) || undefined,
   chiSignalTruncations: Number(message.chiSignalTruncations) || undefined,
   tripletKernelCalls: message.tripletKernelCalls as NonNullable<Parameters<typeof serializeProject>[0]["metrics"]>["tripletKernelCalls"],
   detectionCycle: message.detectionCycle as NonNullable<Parameters<typeof serializeProject>[0]["metrics"]>["detectionCycle"],

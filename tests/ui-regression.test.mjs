@@ -50,6 +50,16 @@ test("source SiScan controls, provenance, and interactive trace are wired", () =
   assert.match(sisterScan, /GetSSOL \+ Get3Score\/GetPScores2 \+ DoPerms3P/);
 });
 
+test("source GENECONV owns discovery, controls, and fragment provenance", () => {
+  assert.match(page, /RDP5 GENECONV fragment ledger/);
+  assert.match(page, /GENECONV fragments retained\/triplet/);
+  assert.match(page, /Original integer source parameter/);
+  assert.match(page, /sourceGeneconv\.rawP/);
+  assert.match(worker, /scan_source_geneconv_all_packed/);
+  assert.match(worker, /sourceGeneconvTripletKernelCalls/);
+  assert.match(worker, /FindSubSeqGCAP6\/7 → GetFragsP → GetMaxFragScoreP/);
+});
+
 test("source BURT exposes the desktop polish path and an interactive posterior workbench", () => {
   assert.match(burt, /export function buildSourceBurtWorkingSet/);
   assert.match(burt, /export function sourceBurtSwitches/);

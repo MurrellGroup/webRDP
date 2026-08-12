@@ -117,6 +117,40 @@ test("a method cannot confirm a distant candidate without a co-located signal", 
   assert.equal(geneconv?.calibration, "no co-located discovery signal");
 });
 
+test("BootScan never falls back to the retired pairwise/window approximation", () => {
+  const evidence = methodEvidence({
+    insideMinor: 95,
+    insideMajor: 5,
+    outsideMinor: 8,
+    outsideMajor: 92,
+  }, {
+    genconvRun: 0,
+    genconvEligible: 200,
+    genconvMatches: 100,
+    bootscanConsistent: 38,
+    bootscanWindows: 40,
+    bootscanBootstrapConsistent: 286,
+    bootscanBootstrapReplicates: 300,
+    maxChi: 0,
+    chimaera: 0,
+    siskanScore: 0,
+    siskanSites: 0,
+    threeSeqDescent: 0,
+    threeSeqSites: 0,
+    threeSeqMajorSites: 0,
+    threeSeqMinorSites: 0,
+  }, {
+    methods: ["BootScan"],
+    window: 120,
+    step: 5,
+    correction: "none",
+    alpha: 0.05,
+  }, 1, 2_400);
+  assert.equal(evidence[0]?.pValue, 1);
+  assert.equal(evidence[0]?.statistic, 0);
+  assert.match(evidence[0]?.calibration ?? "", /source BootScan batch signal unavailable/);
+});
+
 function bruteForceThreeSeq(up, down, threshold) {
   let paths = 0;
   let hits = 0;

@@ -28,8 +28,8 @@ corpus validation or implementation before the project can claim full parity.
 | Fully exploratory triplet scan | Role-agnostic default; the scheduler constructs exactly one `a < b < c` record per unordered combination, and the source kernels resolve their internal pair tracks/polarities. Packed extraction retains only that triplet's informative columns. Kernel-call provenance and C(5,3)=10 regressions guard the invariant. | RDP5 desktop fixture comparison and simulation ROC curves |
 | Query vs reference scan | Operational roles, editable reference groups, every allowed concrete query × reference pair by default, and opt-in reference-as-recombinant testing | RDP5 naming/group parity fixtures |
 | RDP evidence | Source-compatible `FindSubSeqPB3` → `XOHomologyP2` → `FindNextP` → `DefineEventP2` VNP-window locator, RDP5 common/different tract rule, polarity assignment, multiple distinct excursions per triplet with a tunable retention ceiling, and `ProbCalcP/P2`-equivalent binomial-tail scaling | Golden desktop corpus across ties, missing data, circular origins, raw-signal multiplicity, and correction modes |
-| GENECONV evidence | Disabled in production; the simplified locator was retired. | Complete `AlistGC2` → `GCXoverDP2` → fragment/probability batch port, then desktop corpus |
-| BootScan/RecScan evidence | Disabled in production; the triplet p-distance stand-in was retired. | Complete source multi-taxon window/tree/bootstrap orchestration and desktop corpus |
+| GENECONV evidence | Production `AlistGC2`/`GCXoverD`-shape batch over one unordered concrete triplet: local complete-variable compression, all six pair/outer tracks, source integer-G mismatch penalties, `GetFragsP`/`GetMaxFragScoreP` endpoints, `CalcKMaxP`/`GCCalcPValP` calibration, globally p-ordered overlap deletion, and independent multi-fragment hypotheses. Packed and byte paths are exact. | Broad desktop missing/tie/circular corpus plus non-default indel, overlap-count and permutation modes |
+| BootScan/RecScan evidence | Author-source default distance mode is active: one shared `SEQBOOT2` table, one `FastBootDistIP` distance row per requested pair/window, explicit unordered triplet topology interpretation, source cutoff/overlap runs, and triplet-local `MakeScoresBS`/`ProbCalc` evidence. It independently discovers and recalculates events; packed and byte paths are deterministic and decoy-independent. | Optional UPGMA/NJ relationship modes, desktop boundary/warning/tie corpus, and broad sensitivity comparison |
 | MaxChi evidence | One source triplet pass builds all three pair-equality tracks; all-different triplet sites are retained. Source half-window selection, missing/end bans, adjacent χ² profiles, circular 11-position smoothing, peak-basin destruction, GrowMChiWin expansion and bounded multi-peak pairing are active. | Lookup-table rounding and broad missing/circular/tie desktop corpus |
 | Chimaera evidence | The same source triplet pass builds all three recombinant-oriented binary tracks, excluding all-different sites. Source window, smoothing, basin, growth and multi-peak behavior is active. | Lookup-table rounding and broad missing/circular/tie desktop corpus |
 | SiScan evidence | Source `GetSSOL` → 15-category/sum → `DoPerms3P`/`MakeZValue2` → `FindMaxZ` → `ShrinkRegionC` confirmation runs on source-detector candidates; the generic oriented prelocator is retired. Fourth-sequence, position/gap, permutation, multi-run and whole-region controls are operational. | Independent source discovery orchestration and desktop missing/tie/GUI corpus |
@@ -124,22 +124,25 @@ The WebAssembly engine uses three layers:
    tunable ceiling and reports any truncation. Its order-invariant result set
    is cached per unordered triplet to avoid repeating the native scan during
    the three target passes.
-   Every other enabled family now contributes its own full-alignment interval:
-   GENECONV fragments, topology windows, compressed-variable-site MAXCHI,
-   binary CHIMAERA, a fast oriented SISCAN locator, and maximum-HGRW descent.
-   Directional families are run in both parent orientations. A method is
+   GENECONV independently drains the source six-track fragment queue with an
+   exact O(L) excursion index; the combined MAXCHI/CHIMAERA pass independently
+   drains its source peak-pair queues. BootScan/RecScan consumes the concrete
+   triplet set as a single shared-pair batch: the bootstrap table and each
+   requested pair/window distance row are computed once, then reused across
+   every relevant triplet. A method is
    excluded from an event's evidence family unless its interval is co-located
-   with that event. A WebAssembly bitmask skips disabled kernels; seeded column
-   bootstraps run natively only when BootScan is enabled. A preliminary SiScan
-   interval is then confirmed by the supplied-source fourth-sequence,
+   with that event. A WebAssembly bitmask skips disabled kernels. Each retained
+   candidate is then checked by the supplied-source SiScan fourth-sequence,
    15-category, vertical-permutation and topology-run workflow; its several
    significant runs are queued independently. Fixed-outgroup windows use
    rolling category counts and cached exact permutation-prefix ranges, while
    very large historical random tables are regenerated from the identical
    MSVC stream rather than materialized.
-4. Exact 3SEQ first-passage probabilities are computed in the worker within a
-   per-event and per-job work budget; larger cases retain a labeled
-   conservative bound so one alignment cannot monopolize the browser.
+4. Exact 3SEQ first-passage probability helpers remain regression-tested, but
+   3Seq does not enter production evidence until its complete author-source
+   discovery batch has been ported. BootScan's optional tree-derived
+   relationship modes remain disabled; its source-default distance mode is the
+   production path.
 5. Breakpoints can be refined with source-compatible fixed-three-state BURT or
    the manual's optional 2–20-state step-up model over parent-discriminating
    sites. Source mode reproduces circular informative-site half-copy padding,

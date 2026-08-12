@@ -12,17 +12,24 @@ simulation results, workflow parity, and browser-scale performance.
   refresh before application. Finish desktop golden fixtures for exact
   redo-list compaction, minimum-size component dropping, and tie ordering.
 - The parity scan now constructs one `a < b < c` record for every unordered
-  concrete triplet. RDP and combined MAXCHI/CHIMAERA each run once and resolve
-  internal tracks/polarities; two-bit extraction skips invariant columns for
-  that triplet only. Keep the exact packed/byte and kernel-call regressions.
+  concrete triplet. RDP, six-track GENECONV and combined MAXCHI/CHIMAERA each
+  run once and resolve internal tracks/polarities; two-bit extraction skips
+  invariant columns for that triplet only. Keep the exact packed/byte and
+  kernel-call regressions.
 - RDP: reproduce reference selection, informative-window enumeration, and
   local/global p-values on documented triplets. Multi-excursion source
   enumeration is operational; complete the desktop tie/missing/circular corpus.
-- GENECONV: port the complete `AlistGC2`/`GCXoverDP2` batch, fragment queues,
-  `CalcKMaxP`/`GCCalcPValP`, indel/overlap modes and permutations before
-  re-enabling the method.
-- BOOTSCAN/RECSCAN: port the complete source multi-taxon window/tree/bootstrap
-  batch before re-enabling the method.
+- GENECONV: the default `AlistGC2`/`GCXoverD` six-track batch, fragment queue,
+  `CalcKMaxP`/`GCCalcPValP`, overlap deletion, independent discovery and exact
+  packed/byte paths are operational. Finish desktop golden fixtures and the
+  non-default indel, overlap-count and permutation modes.
+- BOOTSCAN/RECSCAN: the author-source default distance batch is operational and
+  independently discovers events. It shares one `SEQBOOT2` table and every
+  requested pair/window `FastBootDistIP` row across the unordered triplet set,
+  applies `GetPltVal2` topology support and triplet-local
+  `MakeScoresBS`/`ProbCalc` evidence, and supports exact recalculation. Finish
+  optional `BSTypeFlag` UPGMA/NJ relationship modes, desktop warning/tie edges,
+  circular boundary goldens and the broad executable corpus.
 - MAXCHI and CHIMAERA: source compressed tracks, window rules, 11-position
   smoothing, basin destruction, GrowMChiWin expansion and multi-peak queues are
   operational; finish desktop lookup-table/rounding and edge-case corpus.
@@ -102,8 +109,10 @@ simulation results, workflow parity, and browser-scale performance.
   large-path fixtures are automated; expand low/high-diversity and
   recombinant-of-recombinant corpora.
 - The C(5,3) worker regression guards complete concrete-triplet coverage and
-  proves one RDP plus one combined χ kernel call per triple. Extend the same
-  call-count contract as each remaining source batch is enabled.
+  proves one RDP plus one combined χ kernel call per triple. BootScan records
+  its batch calls, concrete triplets, unique reused pairs, windows, replicates
+  and workspace bytes. Extend the same call-count contract as each remaining
+  source batch is enabled.
 - Numerical comparison ledger against RDP5 outputs supplied by the original
   authors and collaborators; the permitted desktop source is the reference
   specification for browser ports.
