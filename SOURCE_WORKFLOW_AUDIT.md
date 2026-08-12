@@ -55,9 +55,9 @@ new Review studio.
 
 ## Observable behavior crosswalk
 
-| RDP5 evidence | Observable behavior | RDP Web 0.9.5 implementation | Fidelity boundary |
+| RDP5 evidence | Observable behavior | RDP Web 0.9.9 implementation | Fidelity boundary |
 | --- | --- | --- | --- |
-| Manual §4.1 and §10.3 | Detection and unique-event inference are separate phases, and detection screens real sequence triplets. | Full mode emits one `a < b < c` record per concrete triple. RDP, six-track GENECONV and combined MAXCHI/CHIMAERA each receive it once. BootScan consumes the same set in one shared-pair `BSXoverR2`-shape batch, evaluates all three relationships together, and never substitutes a consensus/reference proxy. Packed extraction and triplet-local scoring ignore only the current triplet's invariant/incomplete sites where the source does. | BootScan optional UPGMA/NJ relationship modes and 3Seq remain pending; source SiScan presently confirms source-detector candidates rather than owning the initial batch. |
+| Manual §4.1 and §10.3 | Detection and unique-event inference are separate phases, and detection screens real sequence triplets. | Full mode emits one `a < b < c` record per concrete triple. RDP, six-track GENECONV, fused all-three-role 3Seq, SiScan and combined MAXCHI/CHIMAERA each receive it once. SiScan maps the member shared by the whole-alignment and local sister pairs to the recombinant, so no presumed-target rerun or designated reference is required. BootScan consumes the same set in one shared-pair `BSXoverR2`-shape batch, evaluates all three relationships together, and never substitutes a consensus/reference proxy. Packed extraction and triplet-local scoring ignore only the current triplet's invariant/incomplete sites where the source does. 3Seq uses its own `CheckwrapC`, so circular mode does not add a second artificial-origin 3Seq test. | BootScan optional UPGMA/NJ relationship modes and desktop method-output goldens remain. |
 | Manual §5.1 and §10.4; `GoToNextEventMnu_Click` | Events are reviewed in stored characterization order; next/previous wrap and can skip accepted/rejected events. | Ordered queue, previous/next wrap, best-unresolved jump, skip accepted, skip rejected, warning-only, stale-only, and minimum-method filters. | RDP5's exact internal `BestEvent` ordering has not been numerically replicated. |
 | `GoToBestMnu`, `Detect1Mnu`–`Detect7Mnu` | Jump to strongest unaccepted evidence and filter by number of detecting methods. | Best adjusted-p unresolved jump and 0–7 minimum-support filter. | Adjusted p is used as the transparent tie-breaker; exact desktop ordering remains a fixture target. |
 | Manual §5.1–5.3; `ShowBestAllMnu` / `ShowAllAllMnu` | Schematic context, event information, and method plots work together; best evidence and all evidence can be selected. | Integrated dossier, recombination map, all-method tabs, and best-evidence mode in one continuous review surface. | The original method-specific graphic primitives are not pixel-cloned. |
@@ -93,7 +93,7 @@ global-variable architecture. Group decisions and shared-breakpoint edits are
 single undo frames, every action receives an audit entry, and stale downstream
 evidence is visible rather than silently recomputed.
 
-## Implemented through the 0.9.5 source-parity checkpoint
+## Implemented through the 0.9.9 source-parity checkpoint
 
 - Review studio replaces the disconnected main-page result stack.
 - Six-stage selected-event rail: signal, breakpoints, roles, trees, grouping,
@@ -125,6 +125,9 @@ evidence is visible rather than silently recomputed.
   `GetPltVal2` topology support, source cutoff/overlap runs, triplet-local
   `BSSubSeq`/`MakeScoresBS`/`ProbCalc`, independent discovery and exact
   hypothesis recalculation.
+- Direct fused 3Seq target walks with `CheckwrapC` circular/linear-complement
+  handling and `CheckSplit3Seq`/`SubPVal` recalibration of continuously
+  observed pieces after component erasure.
 - Fixed-three-state source BURT with exact circular working-set construction,
   shifted switch/CI scanning, `MatchBPtoCI`, principal non-reassortment
   `PolishBP`, and an interactive posterior workbench, plus the manual 2–20-state
@@ -138,17 +141,20 @@ evidence is visible rather than silently recomputed.
   audit provenance.
 - Source Sister-Scanning with tree/direct/manual/randomized fourth-sequence
   selection, the 15-pattern/sum table, horizontal/vertical randomization,
-  topology-run enumeration, region shrinkage, calibrated whole-region Z
-  probability, all significant runs, and bounded-memory long-genome execution.
+  one independent call per unordered triplet, baseline-to-run sister-pair role
+  inference, topology-run enumeration, region shrinkage, calibrated whole-region
+  Z probability, all significant runs, and bounded-memory long-genome execution.
+  Exact telescoping band prefixes and cached deterministic randomization moments
+  accelerate different category vectors without changing direct `DoPerms3P`
+  results; final-region acceleration has a hard 72 MiB workspace budget.
 
 ## Remaining workflow gaps
 
 The following are not disguised as complete:
 
-- the optional BootScan UPGMA/NJ relationship modes; the complete disabled
-  3Seq source discovery batch; GENECONV's non-default indel/permutation modes;
-  independent source SiScan discovery orchestration; and desktop numerical
-  parity for every method;
+- the optional BootScan UPGMA/NJ relationship modes; desktop 3Seq
+  coordinate/tie and probability-table-rounding corpus; GENECONV's non-default indel/permutation modes;
+  and desktop numerical parity for every method;
 - the optional RDP5 logistic/neural recombinant selectors and desktop
   golden-corpus calibration of the default decision tree;
 - editable tree nodes/clades, RF distances, ML/Bayesian inference, SH/AU tests,

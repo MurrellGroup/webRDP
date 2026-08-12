@@ -36,10 +36,19 @@ simulation results, workflow parity, and browser-scale performance.
 - SISCAN: source nearest-tree/direct, most-divergent, manual and randomized
   fourth-sequence paths; 15 site categories and topology sums;
   horizontal/vertical randomization; reproducible seeds; topology-run
-  enumeration and shrinkage; and bounded-memory fast/full controls are
-  operational. Finish desktop tie/missing-data and plot-by-plot corpus parity.
-- 3SEQ: port the complete author-source discovery and probability-table path
-  before re-enabling the method.
+  enumeration and shrinkage; once-per-unordered-triplet independent discovery;
+  topology-transition role inference; exact telescoping permutation bands;
+  deterministic band-moment reuse; and bounded-memory fast/full controls are
+  operational. The 220-triplet source workload is 2.40× faster than 0.9.8 with
+  direct-enumeration equality coverage. Finish desktop tie/missing-data and
+  plot-by-plot corpus parity, then pursue larger-cohort worker parallelism/SIMD.
+- 3SEQ: the fused all-three-role `FindSubSeqTS` triplet walk, strict excursion
+  selection, `Seq3PVals`-equivalent exact probabilities, `GetTSPVal` large-walk
+  path, source `CheckwrapC` origin/linear-complement handling,
+  `CheckSplit3Seq`/`SubPVal` continuous-piece recalibration, independent
+  discovery and edited-event recalculation are operational. Finish desktop
+  coordinate/tie output fixtures, precomputed-table rounding comparison, and
+  the broad executable golden corpus.
 
 ## Track B — false-positive control and breakpoint inference
 
@@ -109,10 +118,10 @@ simulation results, workflow parity, and browser-scale performance.
   large-path fixtures are automated; expand low/high-diversity and
   recombinant-of-recombinant corpora.
 - The C(5,3) worker regression guards complete concrete-triplet coverage and
-  proves one RDP plus one combined χ kernel call per triple. BootScan records
+  proves one RDP, one SiScan, one fused three-role 3Seq and one combined χ
+  source call per triple whenever those families are enabled. BootScan records
   its batch calls, concrete triplets, unique reused pairs, windows, replicates
-  and workspace bytes. Extend the same call-count contract as each remaining
-  source batch is enabled.
+  and workspace bytes.
 - Numerical comparison ledger against RDP5 outputs supplied by the original
   authors and collaborators; the permitted desktop source is the reference
   specification for browser ports.

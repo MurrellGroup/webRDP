@@ -52,14 +52,15 @@ runtime.self.onmessage({
     options: {
       ...DEFAULT_OPTIONS,
       mode: "query-reference",
-      // Source SiScan currently confirms/expands candidates from a source
-      // triplet detector; its independent desktop batch orchestration remains
-      // a disclosed parity task.
-      methods: ["RDP", "MaxChi", "Chimaera", "SiScan"],
+      // No other detector is allowed to seed these events: this exercises the
+      // independent SetUpSiScan-style triplet screen itself.
+      methods: ["SiScan"],
       minMethods: 1,
       candidateParents: 3,
       window: 40,
       step: 10,
+      siskanWindow: 40,
+      siskanStep: 10,
       polishBreakpoints: false,
       ancestralClustering: false,
       siskanScanPermutations: 100,
@@ -76,7 +77,11 @@ const events = message.events as Array<{
   minorParent: number;
   start: number;
   end: number;
-  methodSignals?: Array<{ method: string; sourceRoutine?: string }>;
+  methodSignals?: Array<{
+    method: string;
+    sourceRoutine?: string;
+    sourceSiScan?: { rawP: number; topologyTriplet: [number, number, number] };
+  }>;
 }>;
 const calls = events.filter((event) => (
   event.recombinant === 0
@@ -86,3 +91,9 @@ const calls = events.filter((event) => (
 ));
 assert.ok(calls.some((event) => Math.abs(event.start - 100) <= 2 && Math.abs(event.end - 180) <= 2), `first source topology run must become an event: calls=${JSON.stringify(calls)} all=${JSON.stringify(events)}`);
 assert.ok(calls.some((event) => Math.abs(event.start - 350) <= 2 && Math.abs(event.end - 450) <= 2), "second source topology run must become a separate event");
+assert.ok(calls.every((event) => event.methodSignals?.some((signal) => (
+  signal.method === "SiScan"
+  && signal.sourceSiScan?.rawP !== undefined
+  && signal.sourceSiScan.topologyTriplet.join(":") === "0:1:2"
+))), "standalone SiScan calls must retain their calibrated source and topology-triplet ledger");
+assert.equal((message.tripletKernelCalls as { siscan: number }).siscan, 3, "three query/reference triplets must each be screened once, never once per presumed orientation");

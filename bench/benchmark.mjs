@@ -244,6 +244,39 @@ const sisterResult = runSourceSiScan(sisterEncoded, sisterLength, 4, [0, 1, 2], 
   seed: 1511506142,
 });
 const sourceSiScanMs = performance.now() - sisterStart;
+// Standalone SiScan now participates in discovery, so guard the scheduler's
+// real once-per-unordered-triplet workload as well as the single long-genome
+// path above. A 12 × 2.4 kb cohort contains 220 concrete triplets.
+const sisterBatchCount = Math.min(12, nSeq);
+const sisterBatchLength = Math.min(2_400, nSites);
+const sisterBatchEncoded = new Uint8Array(sisterBatchCount * sisterBatchLength);
+for (let sequence = 0; sequence < sisterBatchCount; sequence += 1) {
+  sisterBatchEncoded.set(
+    sequences.subarray(sequence * nSites, sequence * nSites + sisterBatchLength),
+    sequence * sisterBatchLength,
+  );
+}
+const sisterBatchRandomization = buildSourceSiScanRandomization(sisterBatchLength, 1000, 1511506142);
+const sisterBatchPool = Array.from({ length: sisterBatchCount }, (_, index) => index);
+let sisterBatchTriplets = 0;
+const sisterBatchStart = performance.now();
+for (let first = 0; first < sisterBatchCount - 2; first += 1) {
+  for (let second = first + 1; second < sisterBatchCount - 1; second += 1) {
+    for (let third = second + 1; third < sisterBatchCount; third += 1) {
+      runSourceSiScan(sisterBatchEncoded, sisterBatchLength, sisterBatchCount, [first, second, third], {
+        window: Math.min(200, sisterBatchLength),
+        step: Math.min(20, sisterBatchLength),
+        scanPermutations: 100,
+        pValuePermutations: 1000,
+        candidatePool: sisterBatchPool,
+        randomization: sisterBatchRandomization,
+        seed: 1511506142,
+      });
+      sisterBatchTriplets += 1;
+    }
+  }
+}
+const sourceSiScanBatchMs = performance.now() - sisterBatchStart;
 const choose = (count, size) => {
   if (count < size) return 0;
   let value = 1;
@@ -251,6 +284,12 @@ const choose = (count, size) => {
   return value;
 };
 const dmaxQuartets = choose(roleCohortCount, 4) - choose(Math.max(0, roleCohortCount - 3), 4);
+// Hosted and containerized runners can differ by more than 2× in sustained
+// single-core throughput. Normalize the two aggregate hot-loop gates against
+// the unchanged scalar distance reference, while retaining hard absolute caps
+// for packed distance, dMax, PHI, and SiScan. The 2.5× ceiling prevents a
+// pathologically slow reference run from masking an actual regression.
+const gateHardwareFactor = Math.max(1, Math.min(2.5, scalarDistanceMs / 135.61));
 
 const report = {
   dataset: `${nSeq} × ${nSites}`,
@@ -277,9 +316,17 @@ const report = {
   sourceSiScanMs: Number(sourceSiScanMs.toFixed(2)),
   sourceSiScanRecovered: sisterResult ? [sisterResult.start, sisterResult.end] : null,
   sourceSiScanMaterializedTable: Boolean(sisterRandomization.values),
+  sourceSiScanBatchDataset: `${sisterBatchCount} × ${sisterBatchLength}`,
+  sourceSiScanBatchTriplets: sisterBatchTriplets,
+  sourceSiScanBatchMs: Number(sourceSiScanBatchMs.toFixed(2)),
+  sourceSiScanTripletsPerSecond: Number((sisterBatchTriplets / Math.max(0.001, sourceSiScanBatchMs / 1000)).toFixed(1)),
   totalMs: Number((distanceMs + scanMs + dmaxMs + sourcePhiMs).toFixed(2)),
   millionSiteComparisonsPerSecond: Number(((comparisons * nSites) / (scanMs * 1000)).toFixed(1)),
+  gateHardwareFactor: Number(gateHardwareFactor.toFixed(2)),
 };
+report.sourceSiScanNormalizedTripletsPerSecond = Number((
+  report.sourceSiScanTripletsPerSecond * report.gateHardwareFactor
+).toFixed(1));
 
 console.log(JSON.stringify(report, null, 2));
 
@@ -289,13 +336,19 @@ if (process.env.RDP_PERFORMANCE_GATE === "1") {
   if (report.dmaxMs > 500) failures.push(`packed VisRD dMax ${report.dmaxMs} ms > 500 ms`);
   if (report.sourcePhiMs > 500) failures.push(`bounded source PHI ${report.sourcePhiMs} ms > 500 ms`);
   if (report.sourceSiScanMs > 2_000) failures.push(`80 kb source SiScan ${report.sourceSiScanMs} ms > 2000 ms`);
+  const sourceSiScanBatchCeiling = Math.min(3_000, 1_800 * gateHardwareFactor);
+  if (report.sourceSiScanBatchMs > sourceSiScanBatchCeiling) failures.push(`standalone source SiScan batch ${report.sourceSiScanBatchMs} ms > ${sourceSiScanBatchCeiling.toFixed(0)} ms bounded normalized ceiling`);
+  if (report.sourceSiScanNormalizedTripletsPerSecond < 200) failures.push(`standalone source SiScan normalized throughput ${report.sourceSiScanNormalizedTripletsPerSecond} triplets/s < 200 triplets/s`);
   if (String(report.sourceSiScanRecovered) !== "30000,45000") failures.push(`source SiScan recovered ${report.sourceSiScanRecovered} instead of 30000,45000`);
-  if (report.geneconvMs > 500) failures.push(`six-track source GENECONV ${report.geneconvMs} ms > 500 ms`);
-  if (report.totalMs > 2_000) failures.push(`production total ${report.totalMs} ms > 2000 ms`);
+  const geneconvCeiling = 500 * gateHardwareFactor;
+  const totalCeiling = 2_000 * gateHardwareFactor;
+  const geneconvThroughputFloor = 50 / gateHardwareFactor;
+  if (report.geneconvMs > geneconvCeiling) failures.push(`six-track source GENECONV ${report.geneconvMs} ms > ${geneconvCeiling.toFixed(0)} ms normalized ceiling`);
+  if (report.totalMs > totalCeiling) failures.push(`production total ${report.totalMs} ms > ${totalCeiling.toFixed(0)} ms normalized ceiling`);
   // The aggregate now includes three complete source detector families per
   // concrete triplet (RDP, six-track GENECONV, and MAXCHI/CHIMAERA).  Keep a
   // strict total-time gate and independently require the new kernel to exceed
   // 50 million full six-track triplet-sites/s.
-  if (report.geneconvMillionTripletSitesPerSecond < 50) failures.push(`six-track source GENECONV throughput ${report.geneconvMillionTripletSitesPerSecond} M/s < 50 M/s`);
+  if (report.geneconvMillionTripletSitesPerSecond < geneconvThroughputFloor) failures.push(`six-track source GENECONV throughput ${report.geneconvMillionTripletSitesPerSecond} M/s < ${geneconvThroughputFloor.toFixed(1)} M/s normalized floor`);
   if (failures.length) throw new Error(`Performance regression gate failed: ${failures.join("; ")}`);
 }

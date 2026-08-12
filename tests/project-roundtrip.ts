@@ -42,10 +42,11 @@ const event = {
   },
   methodSignals: [
     { method: "RDP" as const, start: 2_200, end: 100, wraps: true, statistic: 91.2, locator: "RDP5 source" },
-    { method: "SiScan" as const, start: 2_210, end: 90, wraps: true, statistic: 12.5, locator: "RDP5 Sister-Scanning pattern 3 topology run", sourceRoutine: "GetSSOL + DoPerms3P + ShrinkRegionC", outgroup: 10, outgroupMode: "manual" as const, permutations: 1000, scanPermutations: 100, pattern: 3, scoreFamily: "pattern" as const, baselineTopology: 0, inferredTopology: 1, profile: [{ position: 10, z: 3.2, topology: 1, baselineTopology: 0, pattern: 3, scoreFamily: "pattern" as const }] },
+    { method: "SiScan" as const, start: 2_210, end: 90, wraps: true, statistic: 12.5, locator: "RDP5 Sister-Scanning pattern 3 topology run", sourceRoutine: "GetSSOL + DoPerms3P + ShrinkRegionC", sourceSiScan: { rawP: 1e-12, rawStart: 2_210, rawEnd: 2_300, runWindows: 7, outgroupSourcePath: "analyst-selected fourth sequence", positionMode: "triplet-variable" as const, gapMode: "strip" as const, window: 200, step: 20, topologyTriplet: [0, 1, 2] as [number, number, number], recombinant: 0, majorParent: 1, minorParent: 2 }, outgroup: 10, outgroupMode: "manual" as const, permutations: 1000, scanPermutations: 100, pattern: 3, scoreFamily: "pattern" as const, baselineTopology: 0, inferredTopology: 1, profile: [{ position: 10, z: 3.2, topology: 1, baselineTopology: 0, pattern: 3, scoreFamily: "pattern" as const }] },
     { method: "MaxChi" as const, start: 2_200, end: 100, wraps: true, statistic: 18.2, locator: "RDP5 pair-equality track 2 · paired source peak basin", sourceRoutine: "FindSubSeqMCPB2 → GrowMChiWinP2", sourceChi: { track: 1, targetSlot: null, informativeSites: 284, halfWindow: 60, boundaryStatistics: [18.2, 22.1] as [number, number], boundaryRanks: [140, 230] as [number, number], growthWidths: [74, 81] as [number, number], direction: -1 as const } },
     { method: "GENECONV" as const, start: 2_205, end: 95, wraps: true, statistic: 86, locator: "RDP5 six-track fragment queue · track 4", sourceRoutine: "FindSubSeqGCAP6/7 → GetFragsP → CalcKMaxP", sourceGeneconv: { track: 3, targetSlot: 0, minorSlot: 1, majorSlot: 2, fragmentScore: 86, informativeSites: 284, matchingSites: 170, mismatchSites: 114, mismatchPenalty: 3, rawP: 1.2e-9, startRank: 41, endRank: 198 } },
     { method: "BootScan" as const, start: 2_190, end: 110, wraps: true, statistic: 0.92, locator: "RDP5 RecScan distance topology 2", sourceRoutine: "BSXoverR2 → SEQBOOT2 → FastBootDistIP → GetPltVal2 → MakeScoresBS/ProbCalc", sourceBootscan: { topology: 1, baselineTopology: 0, bootstrapSupport: 0.92, bootstrapReplicates: 100, runWindows: 17, tractPairMatches: 94, backgroundPairMatches: 12, tractInformativeSites: 108, informativeSites: 284, rawP: 3.4e-12, window: 200, step: 20, relationshipMode: "distance" as const } },
+    { method: "3Seq" as const, start: 2_200, end: 100, wraps: true, statistic: 71, locator: "RDP5 3Seq target walk · cycle 2 · descent", sourceRoutine: "FindSubSeqTS → CheckwrapC → GetTSPVal → CheckSplit3Seq/SubPVal", sourceThreeSeq: { target: 0, majorParent: 1, minorParent: 2, direction: 1 as const, upSteps: 180, downSteps: 104, descent: 71, informativeSites: 284, cycle: 1, rawStart: 12, rawEnd: 312, rawP: 8.2e-14, probabilityMode: "exact-table" as const, sourceWrap: true, linearComplement: false, splitRefined: true, fullDescent: 80, splitInformativeSites: 240 } },
   ],
   coRecombinantSets: [{
     presumedRecombinant: 0,
@@ -122,9 +123,9 @@ const serialized = serializeProject({
     ...makeDemoAlignment(),
     features: parseGenomeAnnotations("genome\ttest\tCDS\t101\t900\t.\t+\t0\tID=cds1;Name=rep", "fixture.gff3", 2_400),
   },
-  options: { ...DEFAULT_OPTIONS, candidateParents: 12, chiSignalsPerTriplet: 96, geneconvSignalsPerTriplet: 112, bootscanWindow: 240, bootscanStep: 12, bootscanCutoff: 0.82, bootscanSignals: 8192, siskanOutgroupMode: "manual", siskanOutgroupSequence: 10, siskanPositionMode: "quartet-variable", siskanGapMode: "fifth-state", siskanScanPermutations: 200, siskanPValuePermutations: 2000 },
+  options: { ...DEFAULT_OPTIONS, candidateParents: 12, chiSignalsPerTriplet: 96, geneconvSignalsPerTriplet: 112, bootscanWindow: 240, bootscanStep: 12, bootscanCutoff: 0.82, bootscanSignals: 8192, threeSeqExactOperations: 2_000_000, siskanOutgroupMode: "manual", siskanOutgroupSequence: 10, siskanPositionMode: "quartet-variable", siskanGapMode: "fifth-state", siskanScanPermutations: 200, siskanPValuePermutations: 2000 },
   events: [event],
-  metrics: { elapsedMs: 12.5, comparisons: 56, engine: "test", tripletMode: "all-concrete-triplets", concreteTripletInputs: true, rdpSignalTruncations: 3, geneconvSignalTruncations: 4, chiSignalTruncations: 2, bootscanSignalTruncations: 5, bootscanBatch: { calls: 2, triplets: 56, usedPairs: 28, windows: 202, replicates: 100, workspaceBytes: 65_536, relationshipMode: "distance" as const }, tripletKernelCalls: { rdp: 56, geneconv: 56, sourceChi: 56 }, disassembly: { appliedEvents: 1, components: 2, erasedCanonicalBases: 1_000 } },
+  metrics: { elapsedMs: 12.5, comparisons: 56, engine: "test", tripletMode: "all-concrete-triplets", concreteTripletInputs: true, rdpSignalTruncations: 3, geneconvSignalTruncations: 4, chiSignalTruncations: 2, bootscanSignalTruncations: 5, bootscanBatch: { calls: 2, triplets: 56, usedPairs: 28, windows: 202, replicates: 100, workspaceBytes: 65_536, relationshipMode: "distance" as const }, tripletKernelCalls: { rdp: 56, geneconv: 56, sourceChi: 56, threeSeq: 56, siscan: 56 }, disassembly: { appliedEvents: 1, components: 2, erasedCanonicalBases: 1_000 } },
   distance: [0, 0.1, 0.1, 0],
   auditLog: [{ id: "audit-1", timestamp: "2026-08-11T00:00:00.000Z", action: "Accepted event", summary: "Reviewed fixture.", eventId: event.id }],
 });
@@ -144,6 +145,7 @@ assert.equal(restored.options.bootscanWindow, 240);
 assert.equal(restored.options.bootscanStep, 12);
 assert.equal(restored.options.bootscanCutoff, 0.82);
 assert.equal(restored.options.bootscanSignals, 8192);
+assert.equal(restored.options.threeSeqExactOperations, 2_000_000);
 assert.equal(restored.events[0].decision, "accepted");
 assert.equal(restored.events[0].note, "reviewed circular positive control");
 assert.equal(restored.events[0].wraps, true);
@@ -171,9 +173,19 @@ assert.deepEqual(restored.events[0].methodSignals?.[3].sourceGeneconv && [
   restored.events[0].methodSignals?.[3].sourceGeneconv?.minorSlot,
   restored.events[0].methodSignals?.[3].sourceGeneconv?.majorSlot,
 ], [3, 0, 1, 2]);
+assert.equal(restored.events[0].methodSignals?.[1].sourceSiScan?.rawP, 1e-12);
+assert.equal(restored.events[0].methodSignals?.[1].sourceSiScan?.outgroupSourcePath, "analyst-selected fourth sequence");
+assert.deepEqual(restored.events[0].methodSignals?.[1].sourceSiScan?.topologyTriplet, [0, 1, 2]);
 assert.equal(restored.events[0].methodSignals?.[4].sourceBootscan?.bootstrapSupport, 0.92);
 assert.equal(restored.events[0].methodSignals?.[4].sourceBootscan?.baselineTopology, 0);
 assert.equal(restored.events[0].methodSignals?.[4].sourceBootscan?.relationshipMode, "distance");
+assert.equal(restored.events[0].methodSignals?.[5].sourceThreeSeq?.rawP, 8.2e-14);
+assert.equal(restored.events[0].methodSignals?.[5].sourceThreeSeq?.probabilityMode, "exact-table");
+assert.equal(restored.events[0].methodSignals?.[5].sourceThreeSeq?.sourceWrap, true);
+assert.equal(restored.events[0].methodSignals?.[5].sourceThreeSeq?.linearComplement, false);
+assert.equal(restored.events[0].methodSignals?.[5].sourceThreeSeq?.splitRefined, true);
+assert.equal(restored.events[0].methodSignals?.[5].sourceThreeSeq?.fullDescent, 80);
+assert.equal(restored.events[0].methodSignals?.[5].sourceThreeSeq?.splitInformativeSites, 240);
 assert.deepEqual(restored.events[0].coRecombinantSets?.[0].sequenceMembers, [0, 3]);
 assert.equal(restored.events[0].coRecombinantSets?.[0].evidence[0].bestCorrelation?.r, 0.94);
 assert.equal(restored.events[0].coRecombinantSets?.[0].evidence[0].regionEvidence?.[0].bootstrapSupport, 0.93);
@@ -205,7 +217,7 @@ assert.equal(restored.metrics?.geneconvSignalTruncations, 4);
 assert.equal(restored.metrics?.chiSignalTruncations, 2);
 assert.equal(restored.metrics?.bootscanSignalTruncations, 5);
 assert.deepEqual(restored.metrics?.bootscanBatch, { calls: 2, triplets: 56, usedPairs: 28, windows: 202, replicates: 100, workspaceBytes: 65_536, relationshipMode: "distance" });
-assert.deepEqual(restored.metrics?.tripletKernelCalls, { rdp: 56, geneconv: 56, sourceChi: 56 });
+assert.deepEqual(restored.metrics?.tripletKernelCalls, { rdp: 56, geneconv: 56, sourceChi: 56, threeSeq: 56, siscan: 56 });
 assert.equal(restored.metrics?.tripletMode, "all-concrete-triplets");
 assert.equal(restored.metrics?.concreteTripletInputs, true);
 

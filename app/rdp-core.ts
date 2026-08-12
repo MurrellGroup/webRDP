@@ -12,7 +12,7 @@ export type MethodName = (typeof PRIMARY_METHODS)[number];
 // Only these families are allowed in production scans until their complete
 // author-source discovery path has been ported. This prevents a simplified
 // stand-in from silently participating in an analysis labelled RDP parity.
-export const SOURCE_READY_METHODS: MethodName[] = ["RDP", "GENECONV", "BootScan", "MaxChi", "Chimaera", "SiScan"];
+export const SOURCE_READY_METHODS: MethodName[] = ["RDP", "GENECONV", "BootScan", "MaxChi", "Chimaera", "SiScan", "3Seq"];
 export type EventDecision = "unreviewed" | "accepted" | "rejected";
 
 export interface SequenceRecord {
@@ -101,6 +101,41 @@ export interface MethodSignal {
     window: number;
     step: number;
     relationshipMode: "distance";
+  };
+  sourceThreeSeq?: {
+    target: number;
+    majorParent: number;
+    minorParent: number;
+    direction: 1 | -1;
+    upSteps: number;
+    downSteps: number;
+    descent: number;
+    informativeSites: number;
+    cycle: number;
+    rawStart: number;
+    rawEnd: number;
+    rawP: number;
+    probabilityMode: "exact-table" | "siegmund-discrete" | "scaled-table" | "unavailable";
+    sourceWrap?: boolean;
+    linearComplement?: boolean;
+    splitRefined?: boolean;
+    fullDescent?: number;
+    splitInformativeSites?: number;
+  };
+  sourceSiScan?: {
+    rawP: number;
+    rawStart: number;
+    rawEnd: number;
+    runWindows: number;
+    outgroupSourcePath: string;
+    positionMode: "triplet-variable" | "quartet-variable" | "all";
+    gapMode: "strip" | "fifth-state";
+    window: number;
+    step: number;
+    topologyTriplet: [number, number, number];
+    recombinant: number;
+    majorParent: number;
+    minorParent: number;
   };
   outgroup?: number | null;
   outgroupMode?: "nearest" | "most-divergent" | "randomized" | "manual";
@@ -401,10 +436,13 @@ export interface AnalysisOptions {
   bootscanStep: number;
   bootscanCutoff: number;
   bootscanSignals: number;
+  threeSeqExactOperations: number;
   siskanOutgroupMode: "nearest" | "most-divergent" | "randomized" | "manual";
   siskanOutgroupSequence: number | null;
   siskanPositionMode: "triplet-variable" | "quartet-variable" | "all";
   siskanGapMode: "strip" | "fifth-state";
+  siskanWindow: number;
+  siskanStep: number;
   siskanScanPermutations: number;
   siskanPValuePermutations: number;
   step: number;
@@ -1255,10 +1293,15 @@ export const DEFAULT_OPTIONS: AnalysisOptions = {
   bootscanStep: 20,
   bootscanCutoff: 0.7,
   bootscanSignals: 20_000,
+  // Maximum work for an on-demand Seq3PVals-equivalent calculation. Larger
+  // walks follow RDP5 GetTSPVal's SiegmundDiscrete branch.
+  threeSeqExactOperations: 1_000_000,
   siskanOutgroupMode: "nearest",
   siskanOutgroupSequence: null,
   siskanPositionMode: "triplet-variable",
   siskanGapMode: "strip",
+  siskanWindow: 200,
+  siskanStep: 20,
   siskanScanPermutations: 100,
   siskanPValuePermutations: 1000,
   step: 5,
@@ -1319,7 +1362,7 @@ export interface RdpProject {
     disassembly?: { appliedEvents: number; components: number; erasedCanonicalBases: number };
     rdpSignalTruncations?: number;
     chiSignalTruncations?: number;
-    tripletKernelCalls?: { rdp: number; geneconv: number; sourceChi: number };
+    tripletKernelCalls?: { rdp: number; geneconv: number; sourceChi: number; threeSeq: number; siscan: number };
     bootscanSignalTruncations?: number;
     bootscanBatch?: {
       calls: number;
@@ -1426,6 +1469,7 @@ export function parseProject(text: string): RdpProject {
     bootscanStep: Math.max(1, Math.min(Math.max(1, Math.floor(alignment.length / 4)), Math.trunc(finiteNumber(rawOptions.bootscanStep, DEFAULT_OPTIONS.bootscanStep)))),
     bootscanCutoff: Math.max(0.5, Math.min(0.999, finiteNumber(rawOptions.bootscanCutoff, DEFAULT_OPTIONS.bootscanCutoff))),
     bootscanSignals: Math.max(128, Math.min(50_000, Math.trunc(finiteNumber(rawOptions.bootscanSignals, DEFAULT_OPTIONS.bootscanSignals)))),
+    threeSeqExactOperations: Math.max(10_000, Math.min(20_000_000, Math.trunc(finiteNumber(rawOptions.threeSeqExactOperations, DEFAULT_OPTIONS.threeSeqExactOperations)))),
     siskanOutgroupMode: rawOptions.siskanOutgroupMode === "most-divergent" || rawOptions.siskanOutgroupMode === "randomized" || rawOptions.siskanOutgroupMode === "manual"
       ? rawOptions.siskanOutgroupMode
       : "nearest",
@@ -1438,6 +1482,8 @@ export function parseProject(text: string): RdpProject {
       ? rawOptions.siskanPositionMode
       : "triplet-variable",
     siskanGapMode: rawOptions.siskanGapMode === "fifth-state" ? "fifth-state" : "strip",
+    siskanWindow: Math.max(12, Math.min(Math.max(12, alignment.length), Math.trunc(finiteNumber(rawOptions.siskanWindow, DEFAULT_OPTIONS.siskanWindow)))),
+    siskanStep: Math.max(1, Math.min(Math.max(1, alignment.length), Math.trunc(finiteNumber(rawOptions.siskanStep, DEFAULT_OPTIONS.siskanStep)))),
     siskanScanPermutations: Math.max(2, Math.min(1000, Math.trunc(finiteNumber(rawOptions.siskanScanPermutations, DEFAULT_OPTIONS.siskanScanPermutations)))),
     siskanPValuePermutations: Math.max(
       Math.max(2, Math.min(1000, Math.trunc(finiteNumber(rawOptions.siskanScanPermutations, DEFAULT_OPTIONS.siskanScanPermutations)))),
@@ -1802,6 +1848,57 @@ export function parseProject(text: string): RdpProject {
             step: Math.max(1, Math.trunc(finiteNumber(signal.sourceBootscan.step, DEFAULT_OPTIONS.bootscanStep))),
             relationshipMode: "distance" as const,
           } : undefined,
+          sourceThreeSeq: signal.sourceThreeSeq && typeof signal.sourceThreeSeq === "object" ? {
+            target: Math.max(0, Math.min(alignment.sequences.length - 1, Math.trunc(finiteNumber(signal.sourceThreeSeq.target, finiteNumber(event.recombinant, 0))))),
+            majorParent: Math.max(0, Math.min(alignment.sequences.length - 1, Math.trunc(finiteNumber(signal.sourceThreeSeq.majorParent, finiteNumber(event.majorParent, 0))))),
+            minorParent: Math.max(0, Math.min(alignment.sequences.length - 1, Math.trunc(finiteNumber(signal.sourceThreeSeq.minorParent, finiteNumber(event.minorParent, 0))))),
+            direction: signal.sourceThreeSeq.direction === -1 ? -1 as const : 1 as const,
+            upSteps: Math.max(0, Math.trunc(finiteNumber(signal.sourceThreeSeq.upSteps, 0))),
+            downSteps: Math.max(0, Math.trunc(finiteNumber(signal.sourceThreeSeq.downSteps, 0))),
+            descent: Math.max(0, Math.trunc(finiteNumber(signal.sourceThreeSeq.descent, signal.statistic))),
+            informativeSites: Math.max(0, Math.trunc(finiteNumber(signal.sourceThreeSeq.informativeSites, 0))),
+            cycle: Math.max(0, Math.min(2, Math.trunc(finiteNumber(signal.sourceThreeSeq.cycle, 0)))),
+            rawStart: Math.max(0, Math.min(alignment.length - 1, Math.trunc(finiteNumber(signal.sourceThreeSeq.rawStart, signalStart)))),
+            rawEnd: Math.max(0, Math.min(alignment.length, Math.trunc(finiteNumber(signal.sourceThreeSeq.rawEnd, signalEnd)))),
+            rawP: Math.max(Number.MIN_VALUE, Math.min(1, finiteNumber(signal.sourceThreeSeq.rawP, 1))),
+            probabilityMode: signal.sourceThreeSeq.probabilityMode === "siegmund-discrete"
+              || signal.sourceThreeSeq.probabilityMode === "scaled-table"
+              || signal.sourceThreeSeq.probabilityMode === "unavailable"
+              ? signal.sourceThreeSeq.probabilityMode
+              : "exact-table" as const,
+            sourceWrap: signal.sourceThreeSeq.sourceWrap === true,
+            linearComplement: signal.sourceThreeSeq.linearComplement === true,
+            splitRefined: signal.sourceThreeSeq.splitRefined === true,
+            fullDescent: Number.isFinite(signal.sourceThreeSeq.fullDescent)
+              ? Math.max(0, Math.trunc(signal.sourceThreeSeq.fullDescent as number))
+              : undefined,
+            splitInformativeSites: Number.isFinite(signal.sourceThreeSeq.splitInformativeSites)
+              ? Math.max(0, Math.trunc(signal.sourceThreeSeq.splitInformativeSites as number))
+              : undefined,
+          } : undefined,
+          sourceSiScan: signal.sourceSiScan && typeof signal.sourceSiScan === "object"
+            && Array.isArray(signal.sourceSiScan.topologyTriplet)
+            && signal.sourceSiScan.topologyTriplet.length === 3 ? {
+              rawP: Math.max(Number.MIN_VALUE, Math.min(1, finiteNumber(signal.sourceSiScan.rawP, 1))),
+              rawStart: Math.max(0, Math.min(alignment.length - 1, Math.trunc(finiteNumber(signal.sourceSiScan.rawStart, signalStart)))),
+              rawEnd: Math.max(0, Math.min(alignment.length, Math.trunc(finiteNumber(signal.sourceSiScan.rawEnd, signalEnd)))),
+              runWindows: Math.max(1, Math.trunc(finiteNumber(signal.sourceSiScan.runWindows, 1))),
+              outgroupSourcePath: typeof signal.sourceSiScan.outgroupSourcePath === "string"
+                ? signal.sourceSiScan.outgroupSourcePath
+                : "imported source outgroup rule",
+              positionMode: signal.sourceSiScan.positionMode === "quartet-variable" || signal.sourceSiScan.positionMode === "all"
+                ? signal.sourceSiScan.positionMode
+                : "triplet-variable" as const,
+              gapMode: signal.sourceSiScan.gapMode === "fifth-state" ? "fifth-state" as const : "strip" as const,
+              window: Math.max(12, Math.min(alignment.length, Math.trunc(finiteNumber(signal.sourceSiScan.window, DEFAULT_OPTIONS.siskanWindow)))),
+              step: Math.max(1, Math.min(alignment.length, Math.trunc(finiteNumber(signal.sourceSiScan.step, DEFAULT_OPTIONS.siskanStep)))),
+              topologyTriplet: signal.sourceSiScan.topologyTriplet.map((value) => (
+                Math.max(0, Math.min(alignment.sequences.length - 1, Math.trunc(finiteNumber(value, 0))))
+              )) as [number, number, number],
+              recombinant: Math.max(0, Math.min(alignment.sequences.length - 1, Math.trunc(finiteNumber(signal.sourceSiScan.recombinant, finiteNumber(event.recombinant, 0))))),
+              majorParent: Math.max(0, Math.min(alignment.sequences.length - 1, Math.trunc(finiteNumber(signal.sourceSiScan.majorParent, finiteNumber(event.majorParent, 0))))),
+              minorParent: Math.max(0, Math.min(alignment.sequences.length - 1, Math.trunc(finiteNumber(signal.sourceSiScan.minorParent, finiteNumber(event.minorParent, 0))))),
+            } : undefined,
           outgroup: signal.outgroup === null
             ? null
             : Number.isFinite(signal.outgroup) && (signal.outgroup as number) >= 0 && (signal.outgroup as number) < alignment.sequences.length
@@ -2035,6 +2132,8 @@ export function parseProject(text: string): RdpProject {
               rdp: Math.max(0, Math.trunc(finiteNumber(rawMetrics.tripletKernelCalls.rdp, 0))),
               geneconv: Math.max(0, Math.trunc(finiteNumber(rawMetrics.tripletKernelCalls.geneconv, 0))),
               sourceChi: Math.max(0, Math.trunc(finiteNumber(rawMetrics.tripletKernelCalls.sourceChi, 0))),
+              threeSeq: Math.max(0, Math.trunc(finiteNumber(rawMetrics.tripletKernelCalls.threeSeq, 0))),
+              siscan: Math.max(0, Math.trunc(finiteNumber(rawMetrics.tripletKernelCalls.siscan, 0))),
             }
           : undefined,
         detectionCycle: rawMetrics.detectionCycle && typeof rawMetrics.detectionCycle === "object" && rawMetrics.detectionCycle.enabled === true

@@ -10,6 +10,14 @@ export {
   scan_source_bootscan_batch_packed,
 } from "./bootscan";
 
+export {
+  scan_source_three_seq_triplet,
+  scan_source_three_seq_triplet_packed,
+  scan_source_three_seq_triplet_mode,
+  scan_source_three_seq_triplet_packed_mode,
+  source_three_seq_workspace_bytes,
+} from "./three-seq";
+
 @inline
 function valid(base: u8): bool {
   return base < 4;
@@ -2012,7 +2020,10 @@ export function triplet_counts(
     let matchesMinor = r == minor;
     if (!matchesMajor && !matchesMinor) continue;
     informative += 1;
-    if (site >= start && site < end) {
+    const inside = start <= end
+      ? site >= start && site < end
+      : site >= start || site < end;
+    if (inside) {
       if (matchesMinor) insideMinor += 1;
       if (matchesMajor) insideMajor += 1;
     } else {

@@ -53,6 +53,11 @@ if (
   || typeof instance.exports.scan_rdp5_triplet_all_packed !== "function"
   || typeof instance.exports.scan_source_chi_all !== "function"
   || typeof instance.exports.scan_source_chi_all_packed !== "function"
+  || typeof instance.exports.scan_source_three_seq_triplet !== "function"
+  || typeof instance.exports.scan_source_three_seq_triplet_packed !== "function"
+  || typeof instance.exports.source_three_seq_workspace_bytes !== "function"
+  || typeof instance.exports.scan_source_three_seq_triplet_mode !== "function"
+  || typeof instance.exports.scan_source_three_seq_triplet_packed_mode !== "function"
 ) {
   throw new Error("The GitHub Pages artifact is missing the optimized RDP Web kernels.");
 }

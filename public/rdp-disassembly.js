@@ -150,8 +150,60 @@ export function candidateComponentProvenance(disassembly, recombinant, majorPare
   };
 }
 
+// RDP5 CheckSplit3Seq delegates each continuously observed side of a signal
+// to SubPVal. SubPVal keeps the full-walk nM/nN calibration counts but replaces
+// nK with the height range inside that continuous piece. This helper computes
+// that piece statistic without joining across an erased/missing tract.
+export function sourceThreeSeqSubPValExcursion(
+  encoded,
+  length,
+  target,
+  plusParent,
+  minusParent,
+  start,
+  end,
+) {
+  if (!(encoded instanceof Uint8Array) || length <= 0) {
+    return { excursion: 0, informativeSites: 0, upSteps: 0, downSteps: 0 };
+  }
+  const sequenceCount = Math.floor(encoded.length / length);
+  if ([target, plusParent, minusParent].some((index) => index < 0 || index >= sequenceCount)) {
+    return { excursion: 0, informativeSites: 0, upSteps: 0, downSteps: 0 };
+  }
+  const span = end >= start ? end - start : length - start + end;
+  let height = 0;
+  let maximum = 0;
+  let minimum = 0;
+  let upSteps = 0;
+  let downSteps = 0;
+  for (let offset = 0; offset < span; offset += 1) {
+    const site = (start + offset) % length;
+    const targetBase = encoded[target * length + site];
+    const plus = encoded[plusParent * length + site];
+    const minus = encoded[minusParent * length + site];
+    if (targetBase >= 4 || plus >= 4 || minus >= 4 || plus === minus) continue;
+    if (targetBase === plus) {
+      height += 1;
+      upSteps += 1;
+    } else if (targetBase === minus) {
+      height -= 1;
+      downSteps += 1;
+    } else {
+      continue;
+    }
+    if (height > maximum) maximum = height;
+    if (height < minimum) minimum = height;
+  }
+  return {
+    excursion: maximum - minimum,
+    informativeSites: upSteps + downSteps,
+    upSteps,
+    downSteps,
+  };
+}
+
 function mapRawInterval(start, end, rotation, length) {
-  if (rotation === 0) return { start, end, wraps: false };
+  if (rotation === 0) return { start, end, wraps: start > end };
   const mappedStart = (start + rotation) % length;
   const mappedEnd = (end + rotation) % length;
   if (mappedEnd === 0) return { start: mappedStart, end: length, wraps: false };
@@ -174,11 +226,15 @@ export function splitCandidateAtStructuralGaps(candidate, disassembly, length) {
   const runs = [];
   let runStart = -1;
   let interrupted = false;
-  for (let site = candidate.rawStart; site <= candidate.rawEnd; site += 1) {
-    const observed = site < candidate.rawEnd && available(site);
+  const rawSpan = candidate.rawEnd >= candidate.rawStart
+    ? candidate.rawEnd - candidate.rawStart
+    : length - candidate.rawStart + candidate.rawEnd;
+  for (let offset = 0; offset <= rawSpan; offset += 1) {
+    const site = (candidate.rawStart + offset) % length;
+    const observed = offset < rawSpan && available(site);
     if (observed && runStart < 0) runStart = site;
     if (observed) continue;
-    if (site < candidate.rawEnd) interrupted = true;
+    if (offset < rawSpan) interrupted = true;
     if (runStart >= 0) {
       runs.push([runStart, site]);
       runStart = -1;
@@ -225,7 +281,9 @@ export function splitCandidateAtStructuralGaps(candidate, disassembly, length) {
       },
     }];
   }
-  const retained = runs.filter(([start, end]) => end - start >= 4);
+  const retained = runs.filter(([start, end]) => (
+    end >= start ? end - start : length - start + end
+  ) >= 4);
   return retained.map(([rawStart, rawEnd], index) => {
     const mapped = mapRawInterval(rawStart, rawEnd, rotation, length);
     return {
@@ -234,7 +292,15 @@ export function splitCandidateAtStructuralGaps(candidate, disassembly, length) {
       rawStart,
       rawEnd,
       sourceRdp: undefined,
-      methodSignals: (candidate.methodSignals ?? []).map((signal) => ({ ...signal, ...mapped })),
+      methodSignals: (candidate.methodSignals ?? []).map((signal) => ({
+        ...signal,
+        ...mapped,
+        sourceThreeSeq: signal.sourceThreeSeq ? {
+          ...signal.sourceThreeSeq,
+          rawStart,
+          rawEnd,
+        } : undefined,
+      })),
       structuralUncertainty: {
         source: "rdp5-erased-signal-boundary",
         originalStart: candidate.start,
@@ -242,8 +308,8 @@ export function splitCandidateAtStructuralGaps(candidate, disassembly, length) {
         originalWraps: candidate.wraps === true,
         piece: index + 1,
         pieces: retained.length,
-        uncertainStart: rawStart > candidate.rawStart || nearDeletedTract(rawStart, candidate.circular === true),
-        uncertainEnd: rawEnd < candidate.rawEnd || nearDeletedTract(rawEnd, candidate.circular === true),
+        uncertainStart: rawStart !== candidate.rawStart || nearDeletedTract(rawStart, candidate.circular === true),
+        uncertainEnd: rawEnd !== candidate.rawEnd || nearDeletedTract(rawEnd, candidate.circular === true),
         adjacentEventIds: sourceEventIds,
       },
     };

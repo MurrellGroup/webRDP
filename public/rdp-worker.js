@@ -1,10 +1,10 @@
-import { methodEvidence, rdp5SourceProbability } from "./rdp-statistics.js";
+import { methodEvidence, rdp5SourceProbability, threeSeqSiegmundP, threeSeqSourceP } from "./rdp-statistics.js";
 import { fitBurtTriplet } from "./rdp-burt.js";
 import { inferAncestralEventClusters } from "./rdp-clustering.js";
-import { buildDisassembledAlignment, candidateComponentProvenance, findComponentIndex, splitCandidateAtStructuralGaps } from "./rdp-disassembly.js";
+import { buildDisassembledAlignment, candidateComponentProvenance, findComponentIndex, sourceThreeSeqSubPValExcursion, splitCandidateAtStructuralGaps } from "./rdp-disassembly.js";
 import { identifyRecombinantRoles } from "./rdp-recombinant-identification.js";
 import { buildNeighborJoiningPathMatrix } from "./rdp-bootstrap-tree.js";
-import { buildSourceSiScanRandomization, runSourceSiScan } from "./rdp-siscan.js";
+import { buildSourceSiScanRandomization, runSourceSiScan, sourceSiScanRoles } from "./rdp-siscan.js";
 import { sourcePhiTest } from "./rdp-phi.js";
 
 let wasmPromise;
@@ -13,7 +13,7 @@ const BASES = { A: 0, C: 1, G: 2, T: 3, U: 3, "-": 5 };
 
 function enabledMethodMask(options) {
   // Production discovery is source-only. BootScan has its own whole-cohort
-  // batch below; 3Seq remains disabled until its author-source batch is ported.
+  // batch below; 3Seq has its own fused concrete-triplet kernel.
   const bits = { GENECONV: 2, MaxChi: 4, Chimaera: 8, SiScan: 16 };
   let mask = 0;
   for (const method of options.methods) mask |= bits[method] ?? 0;
@@ -140,6 +140,10 @@ function candidateSegments(candidate, length) {
   return candidate.end > candidate.start ? [[candidate.start, candidate.end]] : [];
 }
 
+function rawIntervalLength(start, end, length) {
+  return end >= start ? end - start : length - start + end;
+}
+
 function tractLength(candidate, length) {
   return candidateSegments(candidate, length)
     .reduce((total, segment) => total + segment[1] - segment[0], 0);
@@ -196,6 +200,7 @@ const SOURCE_CHI_ROW_INTS = 16;
 const SOURCE_CHI_PEAK_INTS = 6;
 const SOURCE_GENECONV_ROW_INTS = 16;
 const SOURCE_BOOTSCAN_ROW_INTS = 16;
+const SOURCE_THREE_SEQ_ROW_INTS = 16;
 
 function sourceChiRoutine(method) {
   return method === "MaxChi"
@@ -308,9 +313,124 @@ function sourceBootscanRoles(row) {
   };
 }
 
-function selectCoLocatedSiScanRegion(result, candidate, rotation, length) {
+function sourceThreeSeqSignal(row, rotation, length, exactOperations = 1_000_000) {
+  const probability = threeSeqSourceP(row[6], row[7], row[8], exactOperations);
+  const mapped = mapInterval(row[4], row[5], rotation, length);
+  return {
+    method: "3Seq",
+    ...mapped,
+    statistic: row[8],
+    locator: `RDP5 3Seq target walk · cycle ${row[10] + 1} · ${row[3] > 0 ? "descent" : "ascent"}`,
+    sourceRoutine: "FindSubSeqTS/FindSubSeqTS2 → CheckwrapC → GetTSPVal → Seq3PVals/Get3SeqPvalC",
+    sourceThreeSeq: {
+      target: row[0],
+      majorParent: row[1],
+      minorParent: row[2],
+      direction: row[3] > 0 ? 1 : -1,
+      upSteps: row[6],
+      downSteps: row[7],
+      descent: row[8],
+      informativeSites: row[9],
+      cycle: row[10],
+      rawStart: row[4],
+      rawEnd: row[5],
+      rawP: probability.p,
+      probabilityMode: probability.mode,
+      sourceWrap: row[11] === 1,
+      linearComplement: row[12] === 1,
+    },
+  };
+}
+
+function refineSourceThreeSeqSignalForPiece(
+  signal,
+  candidate,
+  encoded,
+  length,
+  exactOperations = 1_000_000,
+) {
+  if (!signal?.sourceThreeSeq || !candidate?.structuralUncertainty) return signal;
+  const source = signal.sourceThreeSeq;
+  if (candidate.rawStart === source.rawStart && candidate.rawEnd === source.rawEnd) return signal;
+  const piece = sourceThreeSeqSubPValExcursion(
+    encoded,
+    length,
+    source.target,
+    source.majorParent,
+    source.minorParent,
+    candidate.rawStart,
+    candidate.rawEnd,
+  );
+  if (piece.informativeSites < 1 || piece.excursion < 1) return null;
+  // SubPVal deliberately uses the original full-walk nM/nN counts and only
+  // substitutes the continuously observed piece's height range for nK.
+  const probability = threeSeqSourceP(
+    source.upSteps,
+    source.downSteps,
+    piece.excursion,
+    exactOperations,
+  );
+  return {
+    ...signal,
+    start: candidate.start,
+    end: candidate.end,
+    wraps: candidate.wraps === true,
+    statistic: piece.excursion,
+    locator: `${signal.locator} · CheckSplit3Seq piece ${candidate.structuralUncertainty.piece}/${candidate.structuralUncertainty.pieces}`,
+    sourceRoutine: `${signal.sourceRoutine} → CheckSplit3Seq/SubPVal`,
+    sourceThreeSeq: {
+      ...source,
+      fullDescent: source.fullDescent ?? source.descent,
+      descent: piece.excursion,
+      splitInformativeSites: piece.informativeSites,
+      splitRefined: true,
+      rawStart: candidate.rawStart,
+      rawEnd: candidate.rawEnd,
+      rawP: probability.p,
+      probabilityMode: probability.mode,
+    },
+  };
+}
+
+// TSXOver evaluates both directions, then keeps the smaller raw probability
+// (descent wins exact ties). A cheap source Siegmund screen prevents exact
+// table-equivalent DPs from dominating large all-triplet analyses; plausible
+// signals are then recalculated through the exact/source dispatcher.
+function selectSourceThreeSeqSignals(rows, rotation, length, alpha, exactOperations = 1_000_000) {
+  const grouped = new Map();
+  for (const row of rows) grouped.set(row[0], [...(grouped.get(row[0]) ?? []), row]);
+  const selected = [];
+  const prefilter = Math.min(0.5, Math.max(0.1, alpha * 20));
+  for (const targetRows of grouped.values()) {
+    let approximateMinimum = 1;
+    for (const row of targetRows) {
+      const approximate = threeSeqSiegmundP(row[6], row[7], row[8]);
+      if (approximate !== null) approximateMinimum = Math.min(approximateMinimum, approximate);
+      else if ((row[6] + 1) * (row[7] + 1) * Math.max(1, row[8]) <= exactOperations) approximateMinimum = 0;
+    }
+    if (approximateMinimum > prefilter) continue;
+    let best = null;
+    for (const row of targetRows) {
+      // TSXOver rejects two degenerate walk configurations before recording.
+      if ((row[7] > 0 && row[8] === 1) || row[7] - row[6] === row[8]) continue;
+      const signal = sourceThreeSeqSignal(row, rotation, length, exactOperations);
+      if (!best || signal.sourceThreeSeq.rawP < best.sourceThreeSeq.rawP) best = signal;
+    }
+    if (best) selected.push(best);
+  }
+  return selected;
+}
+
+function selectCoLocatedSiScanRegion(result, candidate, rotation, length, analysisTriplet = null) {
   if (!result) return null;
   return (result.regions?.length ? result.regions : [result])
+    .filter((region) => {
+      if (!analysisTriplet) return true;
+      const roles = sourceSiScanRoles(analysisTriplet, result.baselineTopology, region.inferredTopology);
+      return roles?.recombinant === candidate.analysisRecombinant
+        && roles?.majorParent === candidate.analysisMajorParent
+        && roles?.minorParent === candidate.analysisMinorParent;
+    })
     .map((region) => {
       const mapped = mapInterval(region.start, region.end, rotation, length);
       const shared = overlap(candidate, mapped, length);
@@ -334,6 +454,83 @@ function sourceSiScanProfile(result, rotation, length, maximumPoints = 192) {
     pattern: entry.index,
     scoreFamily: entry.family,
   })).sort((left, right) => left.position - right.position);
+}
+
+function sourceSiScanMethodSignal(result, region, analysisTriplet, rotation, length, mappings, maximumPoints = 192) {
+  const mapped = mapInterval(region.start, region.end, rotation, length);
+  const topologyTriplet = analysisTriplet.map((index) => mappings[index].originIndex);
+  const analysisRoles = sourceSiScanRoles(analysisTriplet, result.baselineTopology, region.inferredTopology);
+  const resolvedRoles = analysisRoles ? {
+    recombinant: mappings[analysisRoles.recombinant].originIndex,
+    majorParent: mappings[analysisRoles.majorParent].originIndex,
+    minorParent: mappings[analysisRoles.minorParent].originIndex,
+  } : null;
+  const signal = {
+    method: "SiScan",
+    ...mapped,
+    statistic: region.z,
+    locator: `RDP5 Sister-Scanning ${region.scoreFamily} ${region.pattern} topology run`,
+    sourceRoutine: result.sourceRoutine,
+    outgroup: result.outgroupIndex === null ? null : mappings[result.outgroupIndex].originIndex,
+    outgroupMode: result.outgroupMode,
+    outgroupSampled: result.outgroupSampled,
+    permutations: region.pValuePermutations,
+    scanPermutations: region.scanPermutations,
+    pattern: region.pattern,
+    scoreFamily: region.scoreFamily,
+    baselineTopology: result.baselineTopology,
+    inferredTopology: region.inferredTopology,
+    profile: sourceSiScanProfile(result, rotation, length, maximumPoints),
+    sourceSiScan: {
+      rawP: region.rawP,
+      rawStart: region.start,
+      rawEnd: region.end,
+      runWindows: Math.max(1, region.last - region.first + 1),
+      outgroupSourcePath: result.outgroupSourcePath,
+      positionMode: result.positionMode,
+      gapMode: result.gapsAsState ? "fifth-state" : "strip",
+      window: result.window,
+      step: result.step,
+      topologyTriplet,
+      recombinant: resolvedRoles?.recombinant,
+      majorParent: resolvedRoles?.majorParent,
+      minorParent: resolvedRoles?.minorParent,
+    },
+  };
+  // Analysis component indexes are intentionally transient. Imported
+  // projects retain topologyTriplet above, while a live scan uses this
+  // non-enumerable key to reuse the exact once-per-triplet result during
+  // characterization without leaking internal component indexes to output.
+  Object.defineProperty(signal, "sourceAnalysisTripletKey", {
+    value: [...analysisTriplet].sort((left, right) => left - right).join(":"),
+    enumerable: false,
+  });
+  return signal;
+}
+
+function applySourceSiScanStats(stats, signal) {
+  const source = signal?.sourceSiScan;
+  if (!source) return;
+  stats.siskanScore = signal.statistic;
+  stats.siskanSites = Math.max(0, source.rawEnd - source.rawStart);
+  stats.siskanStart = source.rawStart;
+  stats.siskanEnd = source.rawEnd;
+  stats.siskanRunWindows = source.runWindows;
+  stats.siskanSourceP = source.rawP;
+  stats.siskanSourceZ = signal.statistic;
+  stats.siskanOutgroupIndex = signal.outgroup;
+  stats.siskanOutgroupMode = signal.outgroupMode;
+  stats.siskanOutgroupSampled = signal.outgroupSampled;
+  stats.siskanOutgroupSourcePath = source.outgroupSourcePath;
+  stats.siskanPositionMode = source.positionMode;
+  stats.siskanGapMode = source.gapMode;
+  stats.siskanScanPermutations = signal.scanPermutations;
+  stats.siskanPValuePermutations = signal.permutations;
+  stats.siskanPattern = signal.pattern;
+  stats.siskanScoreFamily = signal.scoreFamily;
+  stats.siskanBaselineTopology = signal.baselineTopology;
+  stats.siskanInferredTopology = signal.inferredTopology;
+  stats.siskanSourceRoutine = signal.sourceRoutine;
 }
 
 function addWarnings(candidate, sequences, length, options) {
@@ -702,7 +899,12 @@ async function analyze(message, emit = postMessage) {
   const roleTractMaskPtr = roleCohortPtr + roleCohortCapacity * 4;
   const roleBackgroundMaskPtr = roleTractMaskPtr + wordsPerSequence * 4;
   const roleDmaxOutPtr = align(roleBackgroundMaskPtr + wordsPerSequence * 4, 8);
-  const requiredBytes = roleDmaxOutPtr + 40;
+  const sourceThreeSeqOutPtr = align(roleDmaxOutPtr + 40, 16);
+  const sourceThreeSeqWorkspacePtr = align(sourceThreeSeqOutPtr + 6 * SOURCE_THREE_SEQ_ROW_INTS * 4, 16);
+  const sourceThreeSeqWorkspaceBytes = typeof instance.exports.source_three_seq_workspace_bytes === "function"
+    ? instance.exports.source_three_seq_workspace_bytes(nSites)
+    : 0;
+  const requiredBytes = sourceThreeSeqWorkspacePtr + sourceThreeSeqWorkspaceBytes;
   const memory = instance.exports.memory;
   const requiredPages = Math.ceil(requiredBytes / 65536);
   const currentPages = memory.buffer.byteLength / 65536;
@@ -814,16 +1016,49 @@ async function analyze(message, emit = postMessage) {
   const sourceGeneconvEnabled = (independentMethodMask & 2) !== 0;
   const sourceChiMethodMask = independentMethodMask & (4 | 8);
   const sourceBootscanEnabled = options.methods.includes("BootScan");
-  // SiScan is source-confirmed on candidates found by the source triplet
-  // detectors. Its former oriented prelocator revisited each triplet under
-  // three target assignments and is intentionally no longer a discovery path.
+  const sourceThreeSeqEnabled = options.methods.includes("3Seq");
+  const sourceSiScanEnabled = options.methods.includes("SiScan");
+  // Every source family below consumes one explicit unordered triplet and
+  // resolves its own topology/roles. No outer presumed-target orientation is
+  // allowed to turn one biological triplet into three detector calls.
   const sourceOnlyUnorderedPass = options.mode === "exploratory"
     && options.exhaustive;
   const partialBest = new Map();
   const retainCandidate = (candidate) => {
     candidate.structuralUncertaintyVnps = Math.max(1, Math.trunc(options.rdpWindow ?? 30));
     candidate.circular = options.circular === true;
-    for (const piece of splitCandidateAtStructuralGaps(candidate, disassembly, nSites)) {
+    let retainedPieces = splitCandidateAtStructuralGaps(candidate, disassembly, nSites);
+    const fullThreeSeqSignal = (candidate.methodSignals ?? []).find((signal) => signal.sourceThreeSeq);
+    if (fullThreeSeqSignal && retainedPieces.length > 1) {
+      // CheckSplit3Seq does not emit every side of an interrupted 3Seq walk as
+      // a new event. It calls SubPVal for the continuously observed pieces and
+      // keeps the lower-p piece. Preserve that source distinction here; other
+      // detector families may still retain both structural pieces.
+      const sourceSplitPieceCandidates = retainedPieces
+        .map((piece) => {
+          const signal = refineSourceThreeSeqSignalForPiece(
+            fullThreeSeqSignal,
+            piece,
+            candidate.rotation === 0 ? scanEncoded : rotated,
+            nSites,
+            Math.max(10_000, Math.trunc(options.threeSeqExactOperations ?? 1_000_000)),
+          );
+          return signal ? { piece, signal } : null;
+        })
+        .filter(Boolean);
+      let winner = null;
+      for (const entry of sourceSplitPieceCandidates) {
+        if (!winner || entry.signal.sourceThreeSeq.rawP < winner.signal.sourceThreeSeq.rawP) winner = entry;
+      }
+      retainedPieces = winner ? [{
+        ...winner.piece,
+        methodSignals: [
+          ...(winner.piece.methodSignals ?? []).filter((signal) => !signal.sourceThreeSeq),
+          winner.signal,
+        ],
+      }] : [];
+    }
+    for (const piece of retainedPieces) {
       candidates.push(piece);
       const previousPartial = partialBest.get(piece.analysisRecombinant);
       if (!previousPartial || piece.chiSquare > previousPartial.chiSquare) {
@@ -847,17 +1082,23 @@ async function analyze(message, emit = postMessage) {
   const sourceChiTripletCacheLimit = 4_096;
   const processedSourceChiTriplets = new Set();
   const processedSourceBootscanTriplets = new Set();
+  const processedSourceThreeSeqTriplets = new Set();
+  const processedSourceSiScanTriplets = new Set();
   const countedChiTruncations = new Set();
   let truncatedChiSignals = 0;
   let rdpTripletKernelCalls = 0;
   let sourceGeneconvTripletKernelCalls = 0;
   let sourceChiTripletKernelCalls = 0;
   let sourceBootscanBatchCalls = 0;
+  let sourceThreeSeqTripletKernelCalls = 0;
+  let sourceSiScanTripletCalls = 0;
   let truncatedBootscanSignals = 0;
   let sourceBootscanWorkspaceBytes = 0;
   let sourceBootscanTripletCount = 0;
   let sourceBootscanUsedPairCount = 0;
   const sourceSiScanCache = new Map();
+  const sourceThreeSeqTripletCache = new Map();
+  const sourceThreeSeqTripletCacheLimit = 4_096;
   const sourceSiScanCacheLimit = 512;
   let sourceSiScanRandomization = null;
   const sourceSiScanPermutations = Math.max(
@@ -879,6 +1120,59 @@ async function analyze(message, emit = postMessage) {
   const scanViews = rotated
     ? [{ sequencePtr: seqPtr, rotation: 0 }, { sequencePtr: rotatedSeqPtr, rotation }]
     : [{ sequencePtr: seqPtr, rotation: 0 }];
+  const getSourceSiScanResult = (triplet, view, candidatePoolInput = null) => {
+    if (!sourceSiScanEnabled) return { result: null, triplet: [], cacheKey: "" };
+    const ordered = [...triplet].sort((left, right) => left - right);
+    const tripletOrigins = new Set(ordered.map((index) => scanMappings[index].originIndex));
+    if (tripletOrigins.size !== 3) return { result: null, triplet: ordered, cacheKey: "" };
+    const candidatePool = (candidatePoolInput ?? (exactDistanceMatrix ? allIndexes : referencePool))
+      .filter((index) => !tripletOrigins.has(scanMappings[index].originIndex));
+    const manualOutgroup = options.siskanOutgroupMode === "manual"
+      ? allIndexes.find((index) => scanMappings[index].originIndex === options.siskanOutgroupSequence
+        && !ordered.includes(index)
+        && !tripletOrigins.has(scanMappings[index].originIndex))
+      : undefined;
+    const cacheKey = `${ordered.join(":")}@${view.rotation}`;
+    if (sourceSiScanCache.has(cacheKey)) {
+      return { result: sourceSiScanCache.get(cacheKey), triplet: ordered, cacheKey };
+    }
+    sourceSiScanTripletCalls += 1;
+    const seed = (
+      (options.randomSeed ?? 0x5a17c0de)
+      ^ Math.imul(ordered[0] + 1, 0x9e3779b1)
+      ^ Math.imul(ordered[1] + 1, 0x85ebca6b)
+      ^ Math.imul(ordered[2] + 1, 0xc2b2ae35)
+      ^ Math.imul(view.rotation + 1, 0x27d4eb2f)
+    ) >>> 0;
+    const result = runSourceSiScan(
+      view.rotation === 0 ? scanEncoded : rotated,
+      nSites,
+      scanSequenceCount,
+      ordered,
+      {
+        window: Math.max(12, options.siskanWindow ?? options.window),
+        step: Math.max(1, options.siskanStep ?? options.step),
+        scanPermutations: options.siskanScanPermutations ?? 100,
+        pValuePermutations: options.siskanPValuePermutations ?? 1000,
+        seed,
+        outgroupMode: options.siskanOutgroupMode === "manual" && manualOutgroup === undefined
+          ? "nearest"
+          : options.siskanOutgroupMode ?? "nearest",
+        outgroupIndex: manualOutgroup,
+        positionMode: options.siskanPositionMode ?? "triplet-variable",
+        gapsAsState: options.siskanGapMode === "fifth-state",
+        candidatePool,
+        distanceMatrix: exactDistanceMatrix ? parentDistance : null,
+        treeDistanceMatrix: sourceSiScanTreeDistance,
+        randomization: getSourceSiScanRandomization(),
+      },
+    );
+    sourceSiScanCache.set(cacheKey, result);
+    if (sourceSiScanCache.size > sourceSiScanCacheLimit) {
+      sourceSiScanCache.delete(sourceSiScanCache.keys().next().value);
+    }
+    return { result, triplet: ordered, cacheKey };
+  };
   const sourceBootscanRowsByRotation = new Map();
   let sourceBootscanWindow = Math.max(5, Math.min(32_767, Math.min(Math.floor(nSites / 2), Math.trunc(options.bootscanWindow ?? 200))));
   if (sourceBootscanWindow > nSites / 2) sourceBootscanWindow = Math.max(5, Math.floor(nSites / 2));
@@ -1036,6 +1330,51 @@ async function analyze(message, emit = postMessage) {
     if (!sourceBootscanEnabled) return [];
     const key = [...triplet].sort((left, right) => left - right).join(":");
     return sourceBootscanRowsByRotation.get(view.rotation)?.get(key) ?? [];
+  };
+  const getSourceThreeSeqRows = (triplet, view) => {
+    if (!sourceThreeSeqEnabled) return [];
+    const ordered = [...triplet].sort((left, right) => left - right);
+    const cacheKey = `${ordered.join(":")}@${view.rotation}`;
+    let cached = sourceThreeSeqTripletCache.get(cacheKey);
+    if (!cached) {
+      sourceThreeSeqTripletKernelCalls += 1;
+      // FindSubSeqTS visits essentially every column, so the contiguous byte
+      // layout is measurably faster than repeated packed lane extraction on
+      // current browser/Node WASM engines. Rotated and ordinary views both
+      // already live in this layout; retain the packed export as an exact
+      // oracle and future SIMD target.
+      const total = typeof instance.exports.scan_source_three_seq_triplet_mode === "function"
+        ? instance.exports.scan_source_three_seq_triplet_mode(
+            view.sequencePtr,
+            nSites,
+            ordered[0],
+            ordered[1],
+            ordered[2],
+            options.circular ? 1 : 0,
+            sourceThreeSeqWorkspacePtr,
+            sourceThreeSeqOutPtr,
+          )
+        : instance.exports.scan_source_three_seq_triplet(
+            view.sequencePtr,
+            nSites,
+            ordered[0],
+            ordered[1],
+            ordered[2],
+            sourceThreeSeqOutPtr,
+          );
+      cached = Array.from({ length: Math.min(6, Math.max(0, total)) }, (_, index) => (
+        Array.from(new Int32Array(
+          memory.buffer,
+          sourceThreeSeqOutPtr + index * SOURCE_THREE_SEQ_ROW_INTS * 4,
+          SOURCE_THREE_SEQ_ROW_INTS,
+        ))
+      ));
+      sourceThreeSeqTripletCache.set(cacheKey, cached);
+      if (sourceThreeSeqTripletCache.size > sourceThreeSeqTripletCacheLimit) {
+        sourceThreeSeqTripletCache.delete(sourceThreeSeqTripletCache.keys().next().value);
+      }
+    }
+    return cached;
   };
   const getSourceGeneconvRows = (triplet, view) => {
     if (!sourceGeneconvEnabled) return [];
@@ -1503,6 +1842,117 @@ async function analyze(message, emit = postMessage) {
             }
           }
 
+          // CheckwrapC already performs the source's bounded origin-crossing
+          // extension. Do not feed 3Seq the synthetic half-genome origin as a
+          // second biological test: it can change which complementary walk
+          // wins and duplicates work. Keep the legacy rotated fallback only
+          // for older WASM builds that do not expose the CheckwrapC mode.
+          if (sourceThreeSeqEnabled && (
+            !options.circular
+            || view.rotation === 0
+            || typeof instance.exports.scan_source_three_seq_triplet_mode !== "function"
+          )) {
+            const triplet = [analysisRecombinant, inputMajorParent, inputMinorParent];
+            const orderedTriplet = [...triplet].sort((left, right) => left - right);
+            const globalConcretePass = options.mode === "exploratory" && options.exhaustive;
+            const processedKey = `${orderedTriplet.join(":")}@${view.rotation}`;
+            if (!globalConcretePass || !processedSourceThreeSeqTriplets.has(processedKey)) {
+              if (globalConcretePass) processedSourceThreeSeqTriplets.add(processedKey);
+              const sourceTargets = globalConcretePass
+                ? orderedTriplet.filter((target) => (
+                    targetSet.has(target)
+                    && orderedTriplet.every((member) => member === target || referenceSet.has(member))
+                  ))
+                : [analysisRecombinant];
+              const selectedSignals = selectSourceThreeSeqSignals(
+                getSourceThreeSeqRows(triplet, view),
+                view.rotation,
+                nSites,
+                Math.max(Number.MIN_VALUE, options.alpha ?? 0.05),
+                Math.max(10_000, Math.trunc(options.threeSeqExactOperations ?? 1_000_000)),
+              );
+              for (const sourceSignal of selectedSignals) {
+                const sourceRoles = sourceSignal.sourceThreeSeq;
+                if (sourceSignal.sourceThreeSeq.rawP > Math.max(Number.MIN_VALUE, options.alpha ?? 0.05)) continue;
+                if (!sourceTargets.includes(sourceRoles.target)
+                  || !referenceSet.has(sourceRoles.majorParent)
+                  || !referenceSet.has(sourceRoles.minorParent)) continue;
+                const kernelStart = sourceRoles.rawStart;
+                const kernelEnd = sourceRoles.rawEnd;
+                const kernelLength = rawIntervalLength(kernelStart, kernelEnd, nSites);
+                if (!(kernelLength >= 4 && kernelStart >= 0 && kernelStart < nSites && kernelEnd >= 0 && kernelEnd <= nSites)) continue;
+                let bestOrientation = null;
+                for (const [majorParent, minorParent] of [
+                  [sourceRoles.majorParent, sourceRoles.minorParent],
+                  [sourceRoles.minorParent, sourceRoles.majorParent],
+                ]) {
+                  instance.exports.triplet_counts(
+                    view.sequencePtr,
+                    nSites,
+                    sourceRoles.target,
+                    majorParent,
+                    minorParent,
+                    kernelStart,
+                    kernelEnd,
+                    rdpBestPtr,
+                  );
+                  const counts = Array.from(new Int32Array(memory.buffer, rdpBestPtr, 6));
+                  const insideTotal = counts[1] + counts[2];
+                  const outsideTotal = counts[3] + counts[4];
+                  const effect = counts[1] / Math.max(1, insideTotal)
+                    - counts[4] / Math.max(1, outsideTotal);
+                  if (!bestOrientation || effect > bestOrientation.effect) {
+                    bestOrientation = { majorParent, minorParent, counts, effect };
+                  }
+                }
+                if (!bestOrientation || bestOrientation.counts[0] < 4 || !(bestOrientation.effect > 0)) continue;
+                const mapped = mapInterval(kernelStart, kernelEnd, view.rotation, nSites);
+                const mappedSignal = {
+                  ...sourceSignal,
+                  ...mapped,
+                  sourceThreeSeq: {
+                    ...sourceSignal.sourceThreeSeq,
+                    target: scanMappings[sourceRoles.target].originIndex,
+                    // Preserve the source walk's +1/-1 parent orientation in
+                    // its ledger. Event major/minor roles are inferred below
+                    // from the tract contrast and may legitimately be swapped.
+                    majorParent: scanMappings[sourceRoles.majorParent].originIndex,
+                    minorParent: scanMappings[sourceRoles.minorParent].originIndex,
+                  },
+                };
+                retainCandidate({
+                  recombinant: scanMappings[sourceRoles.target].originIndex,
+                  ...mapped,
+                  rawStart: kernelStart,
+                  rawEnd: kernelEnd,
+                  sequencePtr: view.sequencePtr,
+                  rotation: view.rotation,
+                  majorParent: scanMappings[bestOrientation.majorParent].originIndex,
+                  minorParent: scanMappings[bestOrientation.minorParent].originIndex,
+                  analysisRecombinant: sourceRoles.target,
+                  analysisMajorParent: bestOrientation.majorParent,
+                  analysisMinorParent: bestOrientation.minorParent,
+                  siskanCandidatePool: exactDistanceMatrix ? undefined : [...referencePool],
+                  componentProvenance: candidateComponentProvenance(
+                    disassembly,
+                    sourceRoles.target,
+                    bestOrientation.majorParent,
+                    bestOrientation.minorParent,
+                  ),
+                  chiSquare: bestOrientation.counts[5] / 1000,
+                  informative: bestOrientation.counts[0],
+                  insideMinor: bestOrientation.counts[1],
+                  insideMajor: bestOrientation.counts[2],
+                  outsideMajor: bestOrientation.counts[3],
+                  outsideMinor: bestOrientation.counts[4],
+                  effect: bestOrientation.effect,
+                  alternatives: [],
+                  methodSignals: [mappedSignal],
+                });
+              }
+            }
+          }
+
           if (sourceChiMethodMask !== 0) {
             const triplet = [analysisRecombinant, inputMajorParent, inputMinorParent];
             const orderedTriplet = [...triplet].sort((left, right) => left - right);
@@ -1591,6 +2041,90 @@ async function analyze(message, emit = postMessage) {
             }
           }
 
+          if (sourceSiScanEnabled) {
+            const triplet = [analysisRecombinant, inputMajorParent, inputMinorParent];
+            const orderedTriplet = [...triplet].sort((left, right) => left - right);
+            const processedKey = `${orderedTriplet.join(":")}@${view.rotation}`;
+            if (!processedSourceSiScanTriplets.has(processedKey)) {
+              processedSourceSiScanTriplets.add(processedKey);
+              const source = getSourceSiScanResult(
+                orderedTriplet,
+                view,
+                exactDistanceMatrix ? allIndexes : referencePool,
+              );
+              for (const region of source.result?.regions ?? []) {
+                if (region.rawP > Math.max(Number.MIN_VALUE, options.alpha ?? 0.05)) continue;
+                const sourceRoles = sourceSiScanRoles(
+                  source.triplet,
+                  source.result.baselineTopology,
+                  region.inferredTopology,
+                );
+                if (!sourceRoles
+                  || !targetSet.has(sourceRoles.recombinant)
+                  || !referenceSet.has(sourceRoles.majorParent)
+                  || !referenceSet.has(sourceRoles.minorParent)) continue;
+                const rawStart = region.start;
+                const rawEnd = region.end;
+                if (!(rawEnd - rawStart >= 4 && rawStart >= 0 && rawEnd <= nSites)) continue;
+                instance.exports.triplet_counts(
+                  view.sequencePtr,
+                  nSites,
+                  sourceRoles.recombinant,
+                  sourceRoles.majorParent,
+                  sourceRoles.minorParent,
+                  rawStart,
+                  rawEnd,
+                  rdpBestPtr,
+                );
+                const counts = Array.from(new Int32Array(memory.buffer, rdpBestPtr, 6));
+                const insideTotal = counts[1] + counts[2];
+                const outsideTotal = counts[3] + counts[4];
+                const effect = counts[1] / Math.max(1, insideTotal)
+                  - counts[4] / Math.max(1, outsideTotal);
+                if (counts[0] < 4 || !(effect > 0)) continue;
+                const mapped = mapInterval(rawStart, rawEnd, view.rotation, nSites);
+                const sourceSignal = sourceSiScanMethodSignal(
+                  source.result,
+                  region,
+                  source.triplet,
+                  view.rotation,
+                  nSites,
+                  scanMappings,
+                  candidates.length > 1_000 ? 48 : candidates.length > 250 ? 96 : 192,
+                );
+                retainCandidate({
+                  recombinant: scanMappings[sourceRoles.recombinant].originIndex,
+                  ...mapped,
+                  rawStart,
+                  rawEnd,
+                  sequencePtr: view.sequencePtr,
+                  rotation: view.rotation,
+                  majorParent: scanMappings[sourceRoles.majorParent].originIndex,
+                  minorParent: scanMappings[sourceRoles.minorParent].originIndex,
+                  analysisRecombinant: sourceRoles.recombinant,
+                  analysisMajorParent: sourceRoles.majorParent,
+                  analysisMinorParent: sourceRoles.minorParent,
+                  siskanCandidatePool: exactDistanceMatrix ? undefined : [...referencePool],
+                  componentProvenance: candidateComponentProvenance(
+                    disassembly,
+                    sourceRoles.recombinant,
+                    sourceRoles.majorParent,
+                    sourceRoles.minorParent,
+                  ),
+                  chiSquare: counts[5] / 1000,
+                  informative: counts[0],
+                  insideMinor: counts[1],
+                  insideMajor: counts[2],
+                  outsideMajor: counts[3],
+                  outsideMinor: counts[4],
+                  effect,
+                  alternatives: [],
+                  methodSignals: [sourceSignal],
+                });
+              }
+            }
+          }
+
         }
       }
     }
@@ -1640,7 +2174,6 @@ async function analyze(message, emit = postMessage) {
   const scanMs = performance.now() - scanStarted;
 
   const unique = deduplicate(candidates, nSites, targets.length);
-  const calibratedCandidateLimit = Math.max(500, Math.min(5_000, targets.length * 8));
   const statisticsStarted = performance.now();
   for (let candidateIndex = 0; candidateIndex < unique.length; candidateIndex += 1) {
     const candidate = unique[candidateIndex];
@@ -1725,6 +2258,45 @@ async function analyze(message, emit = postMessage) {
       ?? (candidate.methodSignals ?? []).find((signal) => signal.method === "MaxChi" && signal.sourceChi);
     const sourceChimaera = sourceChiByMethod.get("Chimaera")
       ?? (candidate.methodSignals ?? []).find((signal) => signal.method === "Chimaera" && signal.sourceChi);
+    let sourceThreeSeq = null;
+    for (const fullSignal of selectSourceThreeSeqSignals(
+      getSourceThreeSeqRows(candidateTriplet, {
+        sequencePtr: candidate.sequencePtr,
+        rotation: candidate.rotation,
+      }),
+      candidate.rotation,
+      nSites,
+      Math.max(Number.MIN_VALUE, options.alpha ?? 0.05),
+      Math.max(10_000, Math.trunc(options.threeSeqExactOperations ?? 1_000_000)),
+    )) {
+      const signal = refineSourceThreeSeqSignalForPiece(
+        fullSignal,
+        candidate,
+        candidate.rotation === 0 ? scanEncoded : rotated,
+        nSites,
+        Math.max(10_000, Math.trunc(options.threeSeqExactOperations ?? 1_000_000)),
+      );
+      if (!signal) continue;
+      if (signal.sourceThreeSeq.target !== candidate.analysisRecombinant) continue;
+      if (!isCoLocatedSignal(candidate, signal, nSites)) continue;
+      if (!sourceThreeSeq || signal.sourceThreeSeq.rawP < sourceThreeSeq.sourceThreeSeq.rawP) {
+        sourceThreeSeq = {
+          ...signal,
+          sourceThreeSeq: {
+            ...signal.sourceThreeSeq,
+            target: scanMappings[signal.sourceThreeSeq.target].originIndex,
+            majorParent: scanMappings[signal.sourceThreeSeq.majorParent].originIndex,
+            minorParent: scanMappings[signal.sourceThreeSeq.minorParent].originIndex,
+          },
+        };
+      }
+    }
+    if (sourceThreeSeq) {
+      candidate.methodSignals = [
+        ...(candidate.methodSignals ?? []).filter((entry) => entry.method !== "3Seq"),
+        sourceThreeSeq,
+      ];
+    }
     candidate.stats = {
       genconvRun: sourceGeneconv?.sourceGeneconv.fragmentScore ?? sourceGeneconv?.statistic ?? 0,
       genconvEligible: sourceGeneconv?.sourceGeneconv.informativeSites ?? 0,
@@ -1737,22 +2309,22 @@ async function analyze(message, emit = postMessage) {
       chimaera: sourceChimaera?.statistic ?? 0,
       siskanScore: 0,
       siskanSites: 0,
-      threeSeqDescent: 0,
-      threeSeqSites: 0,
+      threeSeqDescent: sourceThreeSeq?.sourceThreeSeq.descent ?? 0,
+      threeSeqSites: sourceThreeSeq?.sourceThreeSeq.informativeSites ?? 0,
       maxChiBoundaries: sourceMaxChi?.sourceChi?.boundaryStatistics ?? [0, 0],
       chimaeraBoundaries: sourceChimaera?.sourceChi?.boundaryStatistics ?? [0, 0],
       maxChiInformative: sourceMaxChi?.sourceChi?.informativeSites,
       maxChiHalfWindow: sourceMaxChi?.sourceChi?.halfWindow,
       chimaeraInformative: sourceChimaera?.sourceChi?.informativeSites,
       chimaeraHalfWindow: sourceChimaera?.sourceChi?.halfWindow,
-      threeSeqMajorSites: 0,
-      threeSeqMinorSites: 0,
+      threeSeqMajorSites: sourceThreeSeq?.sourceThreeSeq.upSteps ?? 0,
+      threeSeqMinorSites: sourceThreeSeq?.sourceThreeSeq.downSteps ?? 0,
       bootscanBootstrapConsistent: sourceBootscan
         ? Math.round(sourceBootscan.sourceBootscan.bootstrapSupport * sourceBootscan.sourceBootscan.bootstrapReplicates)
         : 0,
       bootscanBootstrapReplicates: sourceBootscan?.sourceBootscan.bootstrapReplicates ?? 0,
-      threeSeqStart: 0,
-      threeSeqEnd: 0,
+      threeSeqStart: sourceThreeSeq?.start ?? 0,
+      threeSeqEnd: sourceThreeSeq?.end ?? 0,
       maxChiStart: 0,
       maxChiEnd: 0,
       chimaeraStart: 0,
@@ -1766,153 +2338,52 @@ async function analyze(message, emit = postMessage) {
       rdpSource: candidate.sourceRdp,
       bootscanSource: sourceBootscan?.sourceBootscan,
     };
-    if (options.methods.includes("SiScan")) {
-      const sourceRequested = options.methods.includes("SiScan");
-      // The WASM category run is a deliberately cheap locator.  It may seed a
-      // candidate, but it never supplies final SiScan evidence: the source
-      // 15-category/outgroup/permutation workflow must confirm a co-located
-      // topology run first.
+    if (sourceSiScanEnabled) {
+      const triplet = [candidate.analysisRecombinant, candidate.analysisMajorParent, candidate.analysisMinorParent];
+      const analysisTripletKey = [...triplet].sort((left, right) => left - right).join(":");
+      const existingSourceSignal = (candidate.methodSignals ?? [])
+        .filter((signal) => signal.method === "SiScan"
+          && signal.sourceAnalysisTripletKey === analysisTripletKey
+          && signal.sourceSiScan?.recombinant === candidate.recombinant
+          && signal.sourceSiScan?.majorParent === candidate.majorParent
+          && signal.sourceSiScan?.minorParent === candidate.minorParent
+          && isCoLocatedSignal(candidate, signal, nSites))
+        .sort((left, right) => (left.sourceSiScan?.rawP ?? 1) - (right.sourceSiScan?.rawP ?? 1)
+          || Math.abs(right.statistic) - Math.abs(left.statistic))[0];
       candidate.methodSignals = (candidate.methodSignals ?? []).filter((signal) => signal.method !== "SiScan");
       candidate.stats.siskanScore = 0;
       candidate.stats.siskanSites = 0;
       candidate.stats.siskanSourceP = 1;
       candidate.stats.siskanSourceZ = 0;
-      if (sourceRequested) {
-        const triplet = [candidate.analysisRecombinant, candidate.analysisMajorParent, candidate.analysisMinorParent];
-        const tripletOrigins = new Set(triplet.map((index) => scanMappings[index].originIndex));
-        const candidatePool = (candidate.siskanCandidatePool ?? allIndexes)
-          .filter((index) => !tripletOrigins.has(scanMappings[index].originIndex));
-        const manualOutgroup = options.siskanOutgroupMode === "manual"
-          ? allIndexes.find((index) => scanMappings[index].originIndex === options.siskanOutgroupSequence
-            && !triplet.includes(index)
-            && !tripletOrigins.has(scanMappings[index].originIndex))
-          : undefined;
-        const cacheKey = `${triplet.join(":")}@${candidate.rotation}:${candidatePool.join(",")}`;
-        let sourceResult = sourceSiScanCache.get(cacheKey);
-        if (sourceResult === undefined) {
-          const seed = (
-            (options.randomSeed ?? 0x5a17c0de)
-            ^ Math.imul(candidate.analysisRecombinant + 1, 0x9e3779b1)
-            ^ Math.imul(candidate.analysisMajorParent + 1, 0x85ebca6b)
-            ^ Math.imul(candidate.analysisMinorParent + 1, 0xc2b2ae35)
-          ) >>> 0;
-          sourceResult = runSourceSiScan(
-            candidate.rotation === 0 ? scanEncoded : rotated,
-            nSites,
-            scanSequenceCount,
-            triplet,
-            {
-              window: Math.max(20, options.window),
-              step: Math.max(1, options.step),
-              scanPermutations: options.siskanScanPermutations ?? 100,
-              pValuePermutations: options.siskanPValuePermutations ?? 1000,
-              seed,
-              outgroupMode: options.siskanOutgroupMode === "manual" && manualOutgroup === undefined
-                ? "nearest"
-                : options.siskanOutgroupMode ?? "nearest",
-              outgroupIndex: manualOutgroup,
-              positionMode: options.siskanPositionMode ?? "triplet-variable",
-              gapsAsState: options.siskanGapMode === "fifth-state",
-              candidatePool,
-              distanceMatrix: exactDistanceMatrix ? parentDistance : null,
-              treeDistanceMatrix: sourceSiScanTreeDistance,
-              randomization: getSourceSiScanRandomization(),
-            },
-          );
-          sourceSiScanCache.set(cacheKey, sourceResult);
-          if (sourceSiScanCache.size > sourceSiScanCacheLimit) {
-            sourceSiScanCache.delete(sourceSiScanCache.keys().next().value);
-          }
-        }
-        // The source routine can return several disjoint topology runs for one
-        // ordered triplet.  Queue every locally significant run once, bounded
-        // by the same per-recombinant/global retention limits as discovery.
-        // This preserves events that a single "best run" locator would hide.
-        if (sourceResult?.regions?.length && unique.length < calibratedCandidateLimit) {
-          let recombinantCount = unique.filter((entry) => entry.recombinant === candidate.recombinant).length;
-          for (const region of sourceResult.regions) {
-            if (region.rawP > Math.max(1e-300, options.alpha ?? 0.05) || recombinantCount >= 12 || unique.length >= calibratedCandidateLimit) continue;
-            const mapped = mapInterval(region.start, region.end, candidate.rotation, nSites);
-            const duplicateRegion = unique.some((entry) => (
-              entry.rotation === candidate.rotation
-              && entry.analysisRecombinant === candidate.analysisRecombinant
-              && entry.analysisMajorParent === candidate.analysisMajorParent
-              && entry.analysisMinorParent === candidate.analysisMinorParent
-              && overlap(entry, mapped, nSites) > 0.75
-            ));
-            if (duplicateRegion) continue;
-            const sourceSignal = {
-              method: "SiScan",
-              ...mapped,
-              statistic: region.z,
-              locator: `RDP5 Sister-Scanning ${region.scoreFamily} ${region.pattern} topology run`,
-            };
-            const expanded = splitCandidateAtStructuralGaps({
-              ...candidate,
-              ...mapped,
-              rawStart: region.start,
-              rawEnd: region.end,
-              sourceRdp: undefined,
-              breakpointModel: undefined,
-              confidenceStart: undefined,
-              confidenceEnd: undefined,
-              structuralUncertainty: undefined,
-              needsTripletRecount: true,
-              methodSignals: [sourceSignal],
-              alternatives: [...(candidate.alternatives ?? [])],
-            }, disassembly, nSites);
-            for (const piece of expanded) {
-              if (recombinantCount >= 12 || unique.length >= calibratedCandidateLimit) break;
-              unique.push(piece);
-              recombinantCount += 1;
-            }
-          }
-        }
-        const selected = selectCoLocatedSiScanRegion(sourceResult, candidate, candidate.rotation, nSites);
+      let sourceSignal = existingSourceSignal;
+      if (!sourceSignal) {
+        const source = getSourceSiScanResult(
+          triplet,
+          { sequencePtr: candidate.sequencePtr, rotation: candidate.rotation },
+          candidate.siskanCandidatePool ?? (exactDistanceMatrix ? allIndexes : referencePool),
+        );
+        const selected = selectCoLocatedSiScanRegion(
+          source.result,
+          candidate,
+          candidate.rotation,
+          nSites,
+          source.triplet,
+        );
         if (selected) {
-          const { region, mapped } = selected;
-          candidate.stats.siskanScore = region.z;
-          candidate.stats.siskanSites = region.end - region.start;
-          candidate.stats.siskanStart = region.start;
-          candidate.stats.siskanEnd = region.end;
-          candidate.stats.siskanSourceP = region.rawP;
-          candidate.stats.siskanSourceZ = region.z;
-          candidate.stats.siskanOutgroupIndex = sourceResult.outgroupIndex;
-          candidate.stats.siskanOutgroupMode = sourceResult.outgroupMode;
-          candidate.stats.siskanOutgroupSampled = sourceResult.outgroupSampled;
-          candidate.stats.siskanOutgroupSourcePath = sourceResult.outgroupSourcePath;
-          candidate.stats.siskanPositionMode = sourceResult.positionMode;
-          candidate.stats.siskanGapMode = sourceResult.gapsAsState ? "fifth-state" : "strip";
-          candidate.stats.siskanScanPermutations = region.scanPermutations;
-          candidate.stats.siskanPValuePermutations = region.pValuePermutations;
-          candidate.stats.siskanPattern = region.pattern;
-          candidate.stats.siskanScoreFamily = region.scoreFamily;
-          candidate.stats.siskanBaselineTopology = sourceResult.baselineTopology;
-          candidate.stats.siskanInferredTopology = region.inferredTopology;
-          candidate.stats.siskanSourceRoutine = sourceResult.sourceRoutine;
-          candidate.methodSignals.push({
-            method: "SiScan",
-            ...mapped,
-            statistic: region.z,
-            locator: `RDP5 Sister-Scanning ${region.scoreFamily} ${region.pattern} topology run`,
-            sourceRoutine: sourceResult.sourceRoutine,
-            outgroup: sourceResult.outgroupIndex === null ? null : scanMappings[sourceResult.outgroupIndex].originIndex,
-            outgroupMode: sourceResult.outgroupMode,
-            outgroupSampled: sourceResult.outgroupSampled,
-            permutations: region.pValuePermutations,
-            scanPermutations: region.scanPermutations,
-            pattern: region.pattern,
-            scoreFamily: region.scoreFamily,
-            baselineTopology: sourceResult.baselineTopology,
-            inferredTopology: region.inferredTopology,
-            profile: sourceSiScanProfile(
-              sourceResult,
-              candidate.rotation,
-              nSites,
-              unique.length > 1000 ? 48 : unique.length > 250 ? 96 : 192,
-            ),
-          });
+          sourceSignal = sourceSiScanMethodSignal(
+            source.result,
+            selected.region,
+            source.triplet,
+            candidate.rotation,
+            nSites,
+            scanMappings,
+            unique.length > 1_000 ? 48 : unique.length > 250 ? 96 : 192,
+          );
         }
+      }
+      if (sourceSignal) {
+        candidate.methodSignals.push(sourceSignal);
+        applySourceSiScanStats(candidate.stats, sourceSignal);
       }
     }
     if (options.polishBreakpoints) {
@@ -1972,17 +2443,8 @@ async function analyze(message, emit = postMessage) {
     }
   }
   let statisticsMs = performance.now() - statisticsStarted;
-  let exactThreeSeqBudget = options.methods.includes("3Seq") ? 20_000_000 : 0;
   let events = unique.map((candidate, index) => {
-    const threeSeqOperations = (candidate.stats.threeSeqMajorSites + 1)
-      * (candidate.stats.threeSeqMinorSites + 1)
-      * Math.max(1, candidate.stats.threeSeqDescent);
-    const exactOperations = Math.min(4_000_000, exactThreeSeqBudget);
-    const evidence = methodEvidence(candidate, candidate.stats, {
-      ...options,
-      threeSeqMaxOperations: exactOperations,
-    }, Math.max(1, comparisons), nSites);
-    if (options.methods.includes("3Seq") && threeSeqOperations <= exactOperations) exactThreeSeqBudget -= threeSeqOperations;
+    const evidence = methodEvidence(candidate, candidate.stats, options, Math.max(1, comparisons), nSites);
     const supportedCount = evidence.filter((item) => item.supported).length;
     const confidence = Math.max(4, Math.floor(options.window / Math.max(6, 2 + Math.sqrt(candidate.informative))));
     return {
@@ -2207,6 +2669,8 @@ async function analyze(message, emit = postMessage) {
       rdp: rdpTripletKernelCalls,
       geneconv: sourceGeneconvTripletKernelCalls,
       sourceChi: sourceChiTripletKernelCalls,
+      threeSeq: sourceThreeSeqTripletKernelCalls,
+      siscan: sourceSiScanTripletCalls,
     },
     matrixCount,
     parentSamples: exactDistanceMatrix ? nSites : Math.min(parentSamples, nSites),
@@ -2223,7 +2687,7 @@ async function analyze(message, emit = postMessage) {
       "WebAssembly",
       options.exhaustive ? "all concrete sequence triplets" : "approximate parent-shortlist triplets",
       exactDistanceMatrix ? "packed distance" : "sampled parent search",
-      `source RDP/GENECONV${sourceBootscanEnabled ? "/BOOTSCAN" : ""}/MAXCHI/CHIMAERA`,
+      `source RDP/GENECONV${sourceBootscanEnabled ? "/BOOTSCAN" : ""}/MAXCHI/CHIMAERA${sourceSiScanEnabled ? "/SISCAN" : ""}${sourceThreeSeqEnabled ? "/3SEQ" : ""}`,
       options.circular ? "dual-origin circular scan" : "linear scan",
       options.polishBreakpoints ? (options.burtMode === "manual-step-up" ? "BURT 2–20-state step-up" : "RDP5-source BURT") : "raw breakpoints",
       options.ancestralClustering === false ? "event clustering off" : `${clustered.clusters.length} ancestral clusters`,
@@ -2312,6 +2776,8 @@ async function analyzeCyclic(message) {
     rdpCalls: 0,
     geneconvCalls: 0,
     sourceChiCalls: 0,
+    threeSeqCalls: 0,
+    siscanCalls: 0,
   };
 
   while (selected.length < maximumCycles && executedPasses < maximumCycles * 4 + 4) {
@@ -2362,6 +2828,8 @@ async function analyzeCyclic(message) {
     aggregate.rdpCalls += passResult.tripletKernelCalls?.rdp ?? 0;
     aggregate.geneconvCalls += passResult.tripletKernelCalls?.geneconv ?? 0;
     aggregate.sourceChiCalls += passResult.tripletKernelCalls?.sourceChi ?? 0;
+    aggregate.threeSeqCalls += passResult.tripletKernelCalls?.threeSeq ?? 0;
+    aggregate.siscanCalls += passResult.tripletKernelCalls?.siscan ?? 0;
 
     pool = mergeCyclePool(
       pool,
@@ -2442,6 +2910,8 @@ async function analyzeCyclic(message) {
       rdp: aggregate.rdpCalls,
       geneconv: aggregate.geneconvCalls,
       sourceChi: aggregate.sourceChiCalls,
+      threeSeq: aggregate.threeSeqCalls,
+      siscan: aggregate.siscanCalls,
     },
     detectionCycle: {
       enabled: true,
@@ -2596,7 +3066,12 @@ async function recalculate(message) {
     throw new Error("BootScan requires at least two replicates. Increase Bootstrap replicates or disable BootScan.");
   }
   const recalcBootscanPairCount = workingSequenceCount * (workingSequenceCount - 1) / 2;
-  const recalcBootscanTripletPtr = align(roleDmaxOutPtr + 40, 16);
+  const recalcThreeSeqOutPtr = align(roleDmaxOutPtr + 40, 16);
+  const recalcThreeSeqWorkspacePtr = align(recalcThreeSeqOutPtr + 6 * SOURCE_THREE_SEQ_ROW_INTS * 4, 16);
+  const recalcThreeSeqWorkspaceBytes = typeof instance.exports.source_three_seq_workspace_bytes === "function"
+    ? instance.exports.source_three_seq_workspace_bytes(nSites)
+    : 0;
+  const recalcBootscanTripletPtr = align(recalcThreeSeqWorkspacePtr + recalcThreeSeqWorkspaceBytes, 16);
   const recalcBootscanPairMapPtr = recalcBootscanTripletPtr + 12;
   const recalcBootscanPairListPtr = recalcBootscanPairMapPtr + recalcBootscanPairCount * 4;
   const recalcBootscanWeightPtr = align(recalcBootscanPairListPtr + 3 * 8, 2);
@@ -2614,7 +3089,7 @@ async function recalculate(message) {
   const recalcBootscanOutPtr = align(recalcBootscanLookupPtr + recalcBootscanLookupEntries * 2, 4);
   const recalcRequiredBytes = recalcBootscanEnabled
     ? recalcBootscanOutPtr + recalcBootscanOutCapacity * SOURCE_BOOTSCAN_ROW_INTS * 4
-    : roleDmaxOutPtr + 40;
+    : recalcThreeSeqWorkspacePtr + recalcThreeSeqWorkspaceBytes;
   const requiredPages = Math.ceil(recalcRequiredBytes / 65536);
   const currentPages = instance.exports.memory.buffer.byteLength / 65536;
   if (requiredPages > currentPages) instance.exports.memory.grow(requiredPages - currentPages);
@@ -2737,6 +3212,7 @@ async function recalculate(message) {
     analysisRecombinant,
     analysisMajorParent,
     analysisMinorParent,
+    structuralUncertainty: event.structuralUncertainty,
     componentProvenance: event.componentProvenance
       ? candidateComponentProvenance(disassembly, analysisRecombinant, analysisMajorParent, analysisMinorParent)
       : undefined,
@@ -2918,6 +3394,77 @@ async function recalculate(message) {
       stats.chimaeraBoundaries = [0, 0];
     }
   }
+  let recalculatedThreeSeqSignal = null;
+  if (options.methods.includes("3Seq")) {
+    const orderedTriplet = [analysisRecombinant, analysisMajorParent, analysisMinorParent]
+      .sort((left, right) => left - right);
+    const total = typeof instance.exports.scan_source_three_seq_triplet_mode === "function"
+      ? instance.exports.scan_source_three_seq_triplet_mode(
+          seqPtr,
+          nSites,
+          orderedTriplet[0],
+          orderedTriplet[1],
+          orderedTriplet[2],
+          options.circular ? 1 : 0,
+          recalcThreeSeqWorkspacePtr,
+          recalcThreeSeqOutPtr,
+        )
+      : instance.exports.scan_source_three_seq_triplet_packed(
+          packedPtr,
+          validityPtr,
+          workingPacked.wordsPerSequence,
+          nSites,
+          orderedTriplet[0],
+          orderedTriplet[1],
+          orderedTriplet[2],
+          recalcThreeSeqOutPtr,
+        );
+    const rows = Array.from({ length: Math.min(6, Math.max(0, total)) }, (_, index) => (
+      Array.from(new Int32Array(
+        memory.buffer,
+        recalcThreeSeqOutPtr + index * SOURCE_THREE_SEQ_ROW_INTS * 4,
+        SOURCE_THREE_SEQ_ROW_INTS,
+      ))
+    ));
+    for (const fullSignal of selectSourceThreeSeqSignals(
+      rows,
+      rotation,
+      nSites,
+      Math.max(Number.MIN_VALUE, options.alpha ?? 0.05),
+      Math.max(10_000, Math.trunc(options.threeSeqExactOperations ?? 1_000_000)),
+    )) {
+      const signal = refineSourceThreeSeqSignalForPiece(
+        fullSignal,
+        candidate,
+        working,
+        nSites,
+        Math.max(10_000, Math.trunc(options.threeSeqExactOperations ?? 1_000_000)),
+      );
+      if (!signal) continue;
+      if (signal.sourceThreeSeq.target !== analysisRecombinant) continue;
+      if (!isCoLocatedSignal(candidate, signal, nSites)) continue;
+      if (!recalculatedThreeSeqSignal
+        || signal.sourceThreeSeq.rawP < recalculatedThreeSeqSignal.sourceThreeSeq.rawP) {
+        recalculatedThreeSeqSignal = {
+          ...signal,
+          sourceThreeSeq: {
+            ...signal.sourceThreeSeq,
+            target: disassembly.mappings[signal.sourceThreeSeq.target].originIndex,
+            majorParent: disassembly.mappings[signal.sourceThreeSeq.majorParent].originIndex,
+            minorParent: disassembly.mappings[signal.sourceThreeSeq.minorParent].originIndex,
+          },
+        };
+      }
+    }
+    if (recalculatedThreeSeqSignal) {
+      stats.threeSeqDescent = recalculatedThreeSeqSignal.sourceThreeSeq.descent;
+      stats.threeSeqSites = recalculatedThreeSeqSignal.sourceThreeSeq.informativeSites;
+      stats.threeSeqMajorSites = recalculatedThreeSeqSignal.sourceThreeSeq.upSteps;
+      stats.threeSeqMinorSites = recalculatedThreeSeqSignal.sourceThreeSeq.downSteps;
+      stats.threeSeqStart = recalculatedThreeSeqSignal.start;
+      stats.threeSeqEnd = recalculatedThreeSeqSignal.end;
+    }
+  }
   let recalculatedSiScanSignal = null;
   if (options.methods.includes("SiScan")) {
     const sourceRequested = true;
@@ -2926,7 +3473,8 @@ async function recalculate(message) {
     stats.siskanSourceP = 1;
     stats.siskanSourceZ = 0;
     if (sourceRequested) {
-      const triplet = [analysisRecombinant, analysisMajorParent, analysisMinorParent];
+      const triplet = [analysisRecombinant, analysisMajorParent, analysisMinorParent]
+        .sort((left, right) => left - right);
       const tripletOrigins = new Set(triplet.map((index) => disassembly.mappings[index].originIndex));
       const candidatePool = Array.from({ length: workingSequenceCount }, (_, index) => index)
         .filter((index) => !tripletOrigins.has(disassembly.mappings[index].originIndex));
@@ -2936,17 +3484,24 @@ async function recalculate(message) {
             && !tripletOrigins.has(disassembly.mappings[index].originIndex)
           ))
         : undefined;
+      const sourceSeed = (
+        (options.randomSeed ?? 0x5a17c0de)
+        ^ Math.imul(triplet[0] + 1, 0x9e3779b1)
+        ^ Math.imul(triplet[1] + 1, 0x85ebca6b)
+        ^ Math.imul(triplet[2] + 1, 0xc2b2ae35)
+        ^ Math.imul(rotation + 1, 0x27d4eb2f)
+      ) >>> 0;
       const sourceResult = runSourceSiScan(
         working,
         nSites,
         workingSequenceCount,
         triplet,
         {
-          window: Math.max(20, options.window),
-          step: Math.max(1, options.step),
+          window: Math.max(12, options.siskanWindow ?? options.window),
+          step: Math.max(1, options.siskanStep ?? options.step),
           scanPermutations: options.siskanScanPermutations ?? 100,
           pValuePermutations: options.siskanPValuePermutations ?? 1000,
-          seed: (options.randomSeed ?? 0x5a17c0de) >>> 0,
+          seed: sourceSeed,
           outgroupMode: options.siskanOutgroupMode === "manual" && manualOutgroup === undefined
             ? "nearest"
             : options.siskanOutgroupMode ?? "nearest",
@@ -2963,47 +3518,18 @@ async function recalculate(message) {
           ),
         },
       );
-      const selected = selectCoLocatedSiScanRegion(sourceResult, candidate, rotation, nSites);
+      const selected = selectCoLocatedSiScanRegion(sourceResult, candidate, rotation, nSites, triplet);
       if (selected) {
-        const { region, mapped } = selected;
-        Object.assign(stats, {
-          siskanScore: region.z,
-          siskanSites: region.end - region.start,
-          siskanStart: region.start,
-          siskanEnd: region.end,
-          siskanSourceP: region.rawP,
-          siskanSourceZ: region.z,
-          siskanOutgroupIndex: sourceResult.outgroupIndex,
-          siskanOutgroupMode: sourceResult.outgroupMode,
-          siskanOutgroupSampled: sourceResult.outgroupSampled,
-          siskanOutgroupSourcePath: sourceResult.outgroupSourcePath,
-          siskanPositionMode: sourceResult.positionMode,
-          siskanGapMode: sourceResult.gapsAsState ? "fifth-state" : "strip",
-          siskanScanPermutations: region.scanPermutations,
-          siskanPValuePermutations: region.pValuePermutations,
-          siskanPattern: region.pattern,
-          siskanScoreFamily: region.scoreFamily,
-          siskanBaselineTopology: sourceResult.baselineTopology,
-          siskanInferredTopology: region.inferredTopology,
-          siskanSourceRoutine: sourceResult.sourceRoutine,
-        });
-        recalculatedSiScanSignal = {
-          method: "SiScan",
-          ...mapped,
-          statistic: region.z,
-          locator: `RDP5 Sister-Scanning ${region.scoreFamily} ${region.pattern} topology run`,
-          sourceRoutine: sourceResult.sourceRoutine,
-          outgroup: sourceResult.outgroupIndex === null ? null : disassembly.mappings[sourceResult.outgroupIndex].originIndex,
-          outgroupMode: sourceResult.outgroupMode,
-          outgroupSampled: sourceResult.outgroupSampled,
-          permutations: region.pValuePermutations,
-          scanPermutations: region.scanPermutations,
-          pattern: region.pattern,
-          scoreFamily: region.scoreFamily,
-          baselineTopology: sourceResult.baselineTopology,
-          inferredTopology: region.inferredTopology,
-          profile: sourceSiScanProfile(sourceResult, rotation, nSites, 192),
-        };
+        recalculatedSiScanSignal = sourceSiScanMethodSignal(
+          sourceResult,
+          selected.region,
+          triplet,
+          rotation,
+          nSites,
+          disassembly.mappings,
+          192,
+        );
+        applySourceSiScanStats(stats, recalculatedSiScanSignal);
       }
     }
   }
@@ -3013,6 +3539,7 @@ async function recalculate(message) {
     ...(recalculatedGeneconvSignal ? [recalculatedGeneconvSignal] : []),
     ...(recalculatedBootscanSignal ? [recalculatedBootscanSignal] : []),
     ...recalculatedSourceChiSignals,
+    ...(recalculatedThreeSeqSignal ? [recalculatedThreeSeqSignal] : []),
     ...(recalculatedSiScanSignal ? [recalculatedSiScanSignal] : []),
   ].filter((signal) => isCoLocatedSignal(candidate, signal, nSites));
   candidate.methodSignals = primaryMethodSignals(recalculatedMethodSignals);

@@ -218,67 +218,119 @@ function buildPermutationPrefix(maxOccurrences, permutations, randomization) {
   return { replicates, occurrences, stride, prefix6, prefix3, prefix4 };
 }
 
-function prefixedCount(prefix, modulus, stride, replicate, start, end, category) {
-  const base = replicate * stride * modulus;
-  return prefix[base + end * modulus + category] - prefix[base + start * modulus + category];
+function reusableRegionPermutationPrefix(actual, permutations, randomization) {
+  let occurrences = 0;
+  for (let category = 2; category <= 14; category += 1) occurrences += actual[category];
+  const replicates = Math.max(2, Math.min(permutations, randomization.permutations));
+  const cache = randomization.preparedRegionCache
+    ?? (randomization.preparedRegionCache = new Map());
+  const existing = cache.get(replicates);
+  if (existing?.occurrences >= occurrences) return existing;
+
+  // Region lengths vary from one inferred run to the next. Grow in 256-site
+  // quanta (and by at least 1.5× after the first allocation) so later, shorter
+  // regions reuse the same exact template prefix without power-of-two waste.
+  // The prefix is an accelerator only: very large tracts retain the bounded-
+  // memory direct DoPerms3P stream instead of allocating hundreds of MiB.
+  const quantum = 256;
+  let capacity = Math.max(quantum, Math.ceil(Math.max(1, occurrences) / quantum) * quantum);
+  if (existing) {
+    capacity = Math.max(capacity, Math.ceil((existing.occurrences * 1.5) / quantum) * quantum);
+  }
+  const counterBytes = capacity <= 65_535 ? 2 : 4;
+  const prefixBytes = replicates * (capacity + 1) * 13 * counterBytes;
+  const classBytes = replicates * capacity;
+  if (prefixBytes + classBytes > 72 * 1024 * 1024) return null;
+  const prepared = buildPermutationPrefix(capacity, replicates, randomization);
+  prepared.momentCache = existing?.momentCache ?? new Map();
+  cache.set(replicates, prepared);
+  return prepared;
 }
 
 function prefixedZScores(actual, prepared) {
-  const totals = new Float64Array(16);
-  const squares = new Float64Array(16);
-  const sumTotals = new Float64Array(8);
-  const sumSquares = new Float64Array(8);
-  const counts = new Int32Array(16);
-  for (let replicate = 0; replicate < prepared.replicates; replicate += 1) {
-    counts.fill(0);
-    let occurrence = 0;
-    for (let source = 2; source <= 7; source += 1) {
-      const end = occurrence + actual[source];
+  // DoPerms3P discards the identity of the source category inside each of its
+  // three vertical-randomization bands: 2..7 all map to 2..7, 8..10 all map
+  // to 8..10, and 11..14 all map to 11..14.  The old exact prefix path added
+  // six adjacent ranges for the first band, three for the second and four for
+  // the third.  Adjacent prefix differences telescope, so each destination
+  // count is exactly one range query over the band's total occurrence count.
+  // This preserves every source template draw and accumulation order while
+  // cutting the hot loop from 61 to 13 prefix queries per replicate.
+  const end6 = actual[2] + actual[3] + actual[4] + actual[5] + actual[6] + actual[7];
+  const end3 = end6 + actual[8] + actual[9] + actual[10];
+  const end4 = end3 + actual[11] + actual[12] + actual[13] + actual[14];
+  // For a fixed three-band total, the exact randomized mean/variance is also
+  // fixed; only the observed category vector changes.  Cache those moments by
+  // the three cumulative endpoints so neighbouring windows and other concrete
+  // triplets do not replay the same source permutation table.
+  const momentKey = `${end6}:${end3}:${end4}`;
+  const momentCache = prepared.momentCache ?? (prepared.momentCache = new Map());
+  let moments = momentCache.get(momentKey);
+  if (!moments) {
+    const totals = new Float64Array(16);
+    const squares = new Float64Array(16);
+    const sumTotals = new Float64Array(8);
+    const sumSquares = new Float64Array(8);
+    const counts = new Int32Array(16);
+    for (let replicate = 0; replicate < prepared.replicates; replicate += 1) {
+      const base6 = replicate * prepared.stride * 6;
+      const base3 = replicate * prepared.stride * 3;
+      const base4 = replicate * prepared.stride * 4;
+      const at6 = base6 + end6 * 6;
+      const from3 = base3 + end6 * 3;
+      const at3 = base3 + end3 * 3;
+      const from4 = base4 + end3 * 4;
+      const at4 = base4 + end4 * 4;
       for (let category = 0; category < 6; category += 1) {
-        counts[2 + category] += prefixedCount(prepared.prefix6, 6, prepared.stride, replicate, occurrence, end, category);
+        counts[2 + category] = prepared.prefix6[at6 + category];
       }
-      occurrence = end;
-    }
-    for (let source = 8; source <= 10; source += 1) {
-      const end = occurrence + actual[source];
       for (let category = 0; category < 3; category += 1) {
-        counts[8 + category] += prefixedCount(prepared.prefix3, 3, prepared.stride, replicate, occurrence, end, category);
+        counts[8 + category] = prepared.prefix3[at3 + category] - prepared.prefix3[from3 + category];
       }
-      occurrence = end;
-    }
-    for (let source = 11; source <= 14; source += 1) {
-      const end = occurrence + actual[source];
       for (let category = 0; category < 4; category += 1) {
-        counts[11 + category] += prefixedCount(prepared.prefix4, 4, prepared.stride, replicate, occurrence, end, category);
+        counts[11 + category] = prepared.prefix4[at4 + category] - prepared.prefix4[from4 + category];
       }
-      occurrence = end;
+      for (let category = 2; category <= 14; category += 1) {
+        totals[category] += counts[category];
+        squares[category] += counts[category] * counts[category];
+      }
+      const sum1 = counts[2] + counts[7] + counts[8];
+      const sum2 = counts[3] + counts[6] + counts[9];
+      const sum3 = counts[4] + counts[5] + counts[10];
+      const sum4 = counts[2] + counts[8] + counts[11] + counts[12];
+      const sum5 = counts[3] + counts[9] + counts[11] + counts[13];
+      const sum7 = counts[5] + counts[10] + counts[11] + counts[14];
+      sumTotals[1] += sum1; sumSquares[1] += sum1 * sum1;
+      sumTotals[2] += sum2; sumSquares[2] += sum2 * sum2;
+      sumTotals[3] += sum3; sumSquares[3] += sum3 * sum3;
+      sumTotals[4] += sum4; sumSquares[4] += sum4 * sum4;
+      sumTotals[5] += sum5; sumSquares[5] += sum5 * sum5;
+      sumTotals[7] += sum7; sumSquares[7] += sum7 * sum7;
     }
+    const patternMeans = new Float64Array(16);
+    const patternVariances = new Float64Array(16);
+    const sumMeans = new Float64Array(8);
+    const sumVariances = new Float64Array(8);
     for (let category = 2; category <= 14; category += 1) {
-      totals[category] += counts[category];
-      squares[category] += counts[category] * counts[category];
+      const mean = totals[category] / prepared.replicates;
+      patternMeans[category] = mean;
+      patternVariances[category] = Math.max(0, squares[category] / prepared.replicates - mean * mean);
     }
-    const sums = [
-      0,
-      counts[2] + counts[7] + counts[8],
-      counts[3] + counts[6] + counts[9],
-      counts[4] + counts[5] + counts[10],
-      counts[2] + counts[8] + counts[11] + counts[12],
-      counts[3] + counts[9] + counts[11] + counts[13],
-      0,
-      counts[5] + counts[10] + counts[11] + counts[14],
-    ];
     for (const group of [1, 2, 3, 4, 5, 7]) {
-      sumTotals[group] += sums[group];
-      sumSquares[group] += sums[group] * sums[group];
+      const mean = sumTotals[group] / prepared.replicates;
+      sumMeans[group] = mean;
+      sumVariances[group] = Math.max(0, sumSquares[group] / prepared.replicates - mean * mean);
     }
+    moments = { patternMeans, patternVariances, sumMeans, sumVariances };
+    momentCache.set(momentKey, moments);
+    if (momentCache.size > 8_192) momentCache.delete(momentCache.keys().next().value);
   }
   const patterns = new Float64Array(16);
   const sums = new Float64Array(13);
   for (let category = 1; category <= 15; category += 1) {
     if (actual[category] <= 0) continue;
-    const mean = totals[category] / prepared.replicates;
-    const variance = Math.max(0, squares[category] / prepared.replicates - mean * mean);
-    if (variance > 0) patterns[category] = (actual[category] - mean) / Math.sqrt(variance);
+    const variance = moments.patternVariances[category];
+    if (variance > 0) patterns[category] = (actual[category] - moments.patternMeans[category]) / Math.sqrt(variance);
   }
   const observedSums = [
     0,
@@ -292,11 +344,25 @@ function prefixedZScores(actual, prepared) {
   ];
   for (const group of [1, 2, 3, 4, 5, 7]) {
     if (observedSums[group] <= 0) continue;
-    const mean = sumTotals[group] / prepared.replicates;
-    const variance = Math.max(0, sumSquares[group] / prepared.replicates - mean * mean);
-    if (variance > 0) sums[group] = (observedSums[group] - mean) / Math.sqrt(variance);
+    const variance = moments.sumVariances[group];
+    if (variance > 0) sums[group] = (observedSums[group] - moments.sumMeans[group]) / Math.sqrt(variance);
   }
   return { patterns, sums, replicates: prepared.replicates };
+}
+
+function categoryVectorKey(actual) {
+  let key = "";
+  for (let category = 2; category <= 14; category += 1) {
+    if (category > 2) key += ",";
+    key += actual[category];
+  }
+  return key;
+}
+
+function retainBounded(cache, key, value, maximum = 16_384) {
+  cache.set(key, value);
+  if (cache.size > maximum) cache.delete(cache.keys().next().value);
+  return value;
 }
 
 function pDistance(encoded, length, first, second) {
@@ -503,6 +569,31 @@ function baselineTopology(distances) {
   return 2;
 }
 
+// Sister-Scanning describes a recombinant as the sequence shared by the
+// whole-alignment sister pair and the alternative sister pair inside a run.
+// The remaining member of the baseline pair is the major parent and the
+// remaining member of the run pair is the minor parent.  SetUpSiScan screens
+// one unordered triplet; this conversion is what lets the worker retain that
+// single source screen instead of rerunning it under three presumed targets.
+export function sourceSiScanRoles(triplet, baseline, inferred) {
+  if (!Array.isArray(triplet) || triplet.length !== 3) return null;
+  if (![baseline, inferred].every((topology) => Number.isInteger(topology) && topology >= 0 && topology <= 2)) return null;
+  if (baseline === inferred) return null;
+  const pairSlots = [[0, 1], [0, 2], [1, 2]];
+  const baselinePair = pairSlots[baseline];
+  const inferredPair = pairSlots[inferred];
+  const recombinantSlot = baselinePair.find((slot) => inferredPair.includes(slot));
+  if (recombinantSlot === undefined) return null;
+  const majorSlot = baselinePair.find((slot) => slot !== recombinantSlot);
+  const minorSlot = inferredPair.find((slot) => slot !== recombinantSlot);
+  if (majorSlot === undefined || minorSlot === undefined) return null;
+  return {
+    recombinant: triplet[recombinantSlot],
+    majorParent: triplet[majorSlot],
+    minorParent: triplet[minorSlot],
+  };
+}
+
 function winningWindowClass(scores, baseline, extendedGroups) {
   let bestZ = 0;
   let bestIndex = 0;
@@ -594,10 +685,11 @@ export function runSourceSiScan(encoded, length, sequenceCount, triplet, options
   const baseline = baselineTopology(distances);
   const windows = [];
   let preparedScanPermutations = null;
+  let preparedKey = null;
   if (options.referencePermutationPath !== true) {
     const preparedCache = randomization.preparedScanCache
       ?? (randomization.preparedScanCache = new Map());
-    const preparedKey = `${window}:${Math.min(scanPermutations, randomization.permutations)}`;
+    preparedKey = `${window}:${Math.min(scanPermutations, randomization.permutations)}`;
     preparedScanPermutations = preparedCache.get(preparedKey);
     if (!preparedScanPermutations) {
       preparedScanPermutations = buildPermutationPrefix(window, scanPermutations, randomization);
@@ -646,9 +738,16 @@ export function runSourceSiScan(encoded, length, sequenceCount, triplet, options
         seed: options.seed,
       });
     }
-    const scores = preparedScanPermutations
-      ? prefixedZScores(counts, preparedScanPermutations)
-      : zScores(counts, scanPermutations, randomization);
+    let scores;
+    if (preparedScanPermutations) {
+      const scoreCache = randomization.preparedScoreCache
+        ?? (randomization.preparedScoreCache = new Map());
+      const scoreKey = `${preparedKey}|${categoryVectorKey(counts)}`;
+      scores = scoreCache.get(scoreKey)
+        ?? retainBounded(scoreCache, scoreKey, prefixedZScores(counts, preparedScanPermutations));
+    } else {
+      scores = zScores(counts, scanPermutations, randomization);
+    }
     const winner = winningWindowClass(scores, baseline, extendedGroups);
     windows.push({ start, end: start + window, center: start + Math.floor(window / 2), ...winner });
   }
@@ -680,7 +779,23 @@ export function runSourceSiScan(encoded, length, sequenceCount, triplet, options
       gapsAsState,
       seed: options.seed,
     });
-    const scores = zScores(counts, pValuePermutations, randomization);
+    const regionScoreCache = randomization.regionScoreCache
+      ?? (randomization.regionScoreCache = new Map());
+    const regionScoreKey = `${Math.min(pValuePermutations, randomization.permutations)}|${categoryVectorKey(counts)}`;
+    let scores = options.referencePermutationPath === true
+      ? null
+      : regionScoreCache.get(regionScoreKey);
+    if (!scores) {
+      const preparedRegionPermutations = options.referencePermutationPath === true
+        ? null
+        : reusableRegionPermutationPrefix(counts, pValuePermutations, randomization);
+      scores = preparedRegionPermutations
+        ? prefixedZScores(counts, preparedRegionPermutations)
+        : zScores(counts, pValuePermutations, randomization);
+      if (options.referencePermutationPath !== true) {
+        retainBounded(regionScoreCache, regionScoreKey, scores, 4_096);
+      }
+    }
     const selected = regionAlternativeScore(scores, baseline, extendedGroups);
     if (!(selected.z > 0)) continue;
     const regionLength = run.end - run.start;

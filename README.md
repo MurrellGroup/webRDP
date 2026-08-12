@@ -34,8 +34,7 @@ detection. Version 0.9.1 replaces the remaining SiScan confirmation surrogate
 with the supplied RDP5 Sister-Scanning path: source 15-category and sum scores,
 tree/direct/manual fourth-sequence selection, horizontal or vertical
 randomization, topology-run enumeration, region shrinkage, and whole-region Z
-calibration. Every locally significant run becomes its own hypothesis and the
-fast WASM category pass is only a locator. Long-genome scans reproduce the
+calibration. Every locally significant run becomes its own hypothesis. Long-genome scans reproduce the
 desktop MSVC random stream without materializing its potentially multi-gigabyte
 table and reuse exact permutation-prefix ranges across triplets. See
 `SOURCE_WORKFLOW_AUDIT.md` for the source-to-web crosswalk. The
@@ -106,12 +105,59 @@ bootstrap weights only at mismatches. The optional desktop UPGMA/NJ
 relationship transformations and broad executable golden corpus remain parity
 gates and are disclosed in the interface.
 
+Version 0.9.6 re-enables 3Seq from the author-supplied implementation. A new
+WebAssembly kernel decodes each unordered concrete triplet once and
+updates all three `TSXOver` recombinant assignments together. Every target
+walk discards its own invariant, incomplete, triallelic and
+neither-parent-match sites before locating the strict source maximum descent
+and ascent. The probability path is `Seq3PVals`-equivalent for bounded exact
+walks and follows RDP5 `GetTSPVal`/`SiegmundDiscrete` for larger cases. 3Seq
+can independently create hypotheses, confirm co-located signals, recalculate
+edited events, participate in erase/extract redo cycles, and persist its full
+walk/probability ledger.
+
+Version 0.9.7 adds the source `CheckwrapC` and `CheckSplit3Seq`/`SubPVal`
+paths that were missing from that first 3Seq port. Circular walks use the
+source's bounded origin extension, while linear walks use its complementary
+interval branch. A circular 3Seq triplet is no longer screened again from a
+synthetic half-genome origin. After recursive event erasure, interrupted 3Seq
+signals are divided into continuously observed pieces and recalibrated with
+the piece excursion but the original full-walk step counts. The interface and
+project/CSV provenance expose wrapping/complement and full-versus-split
+statistics. Scalar source-control-flow, circular worker, wrapping component,
+and byte/packed regressions are included; desktop-output goldens and historical
+probability-table rounding remain validation gates.
+
+Version 0.9.8 makes SiScan a true independent detector. Every emitted
+unordered concrete triplet is passed once to the source 15-category,
+fourth-sequence and vertical-permutation workflow. The sequence shared by the
+whole-alignment sister pair and each significant local sister pair becomes the
+recombinant; the other baseline and local members become the major and minor
+parents. This works in exploratory alignments with no designated references,
+retains every significant disjoint topology run, records exact source p-values
+and topology triplets in project/CSV provenance, and reuses the same calibrated
+run during characterization instead of screening three presumed orientations.
+SiScan now has separate 200-position/20-position source-default window and step
+controls, so the global five-position breakpoint step no longer multiplies its
+all-triplet permutation cost by four unless the analyst explicitly requests it.
+
+Version 0.9.9 accelerates that exact source SiScan path. The three
+`DoPerms3P` randomization bands are reduced to telescoping prefix ranges, and
+their deterministic randomized moments are reused across different observed
+category vectors that share the same band totals. Final regions use the same
+MSVCRT stream through a bounded growing prefix and automatically retain the
+streamed direct path when a tract would exceed the memory budget. Direct-
+enumeration equivalence tests cover windows, regions, shared caches, Z values
+and probabilities. The 12 × 2.4 kb all-220-triplet benchmark improves from
+113.8 to 272.7 complete triplets/s (2.40×) without changing a source result.
+
 Scientific integrity takes precedence over a seven-method checkbox count.
-3Seq is disabled in production until its complete author-source batch path
-replaces the retired simplified locator. BootScan/RecScan's author-source
-distance mode is active; its optional tree relationship modes remain pending. SiScan is
-run through its source confirmation path on candidates from the source
-triplet detectors; its former oriented prelocator is retired. Direct
+3Seq's author-source walk, wrap, and deleted-signal split paths and
+BootScan/RecScan's author-source distance mode are active; remaining desktop
+coordinate/table goldens and optional tree relationship modes are disclosed.
+SiScan now independently screens the same unordered concrete triplets once and
+derives event roles from its baseline-to-run topology change; it does not wait
+for another detector and its former oriented prelocator remains retired. Direct
 ports of `MakePhPrScore`, `MakeTrpGroups`/`MakeTrpScore`,
 `MakeINList`/`MakeOUCheck`, `SimpleDist`, `MakeSSDistB`, `GetBadDists`,
 `MakeEList`/`MakeListCorr`, `MakeLDist`/`MakeRCompat`, `CalcMaxD`/
@@ -195,7 +241,8 @@ gating, all six GENECONV tracks, finite-G fragment scoring/KA calibration,
 global overlap-suppressed source queueing, informative-site
 MAXCHI/CHIMAERA windows and source peak correction,
 source SiScan quartet categories, outgroup selection, cached/streamed MSVC
-randomization, topology-run calibration and multi-event expansion,
+randomization, once-per-unordered-triplet discovery, topology-to-role mapping,
+no-reference exploratory discovery, topology-run calibration and multi-event expansion,
 source PHI incompatibility graphs, analytic moments and lower-tail calibration,
 exact HGRW tails, seeded bootstraps, sampled large-dataset parent selection,
 source-mode BURT circular padding, VB6 ties, CI matching, missing-edge and

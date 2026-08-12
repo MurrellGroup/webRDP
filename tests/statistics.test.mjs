@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { binomialUpper, chiSquareP, geneconvSourceG0Probability, geneconvSourceProbability, methodEvidence, rdp5SourceProbability, sourceChiWindowProbability, threeSeqExactP } from "../public/rdp-statistics.js";
+import { binomialUpper, chiSquareP, geneconvSourceG0Probability, geneconvSourceProbability, methodEvidence, rdp5SourceProbability, sourceChiWindowProbability, threeSeqExactP, threeSeqSourceP } from "../public/rdp-statistics.js";
 
 test("exact binomial upper tail matches closed-form small cases", () => {
   assert.ok(Math.abs(binomialUpper(5, 10, 0.5) - 0.623046875) < 1e-12);
@@ -193,4 +193,35 @@ test("3SEQ exact HGRW tail reproduces the published 30/30 example", () => {
 
 test("3SEQ calibration falls back safely when the bounded DP would be too large", () => {
   assert.deepEqual(threeSeqExactP(1_000, 1_000, 400, 10), { p: null, exact: false });
+});
+
+test("3SEQ production probability dispatch follows exact table and source large-walk paths", () => {
+  const exact = threeSeqSourceP(30, 30, 18, 1_000_000_000);
+  assert.equal(exact.mode, "exact-table");
+  assert.ok(exact.p > 1.6e-4 && exact.p < 1.9e-4);
+  const large = threeSeqSourceP(1_000, 1_000, 400, 10);
+  assert.equal(large.mode, "siegmund-discrete");
+  assert.ok(large.p > 0 && large.p < 1);
+});
+
+test("3SEQ evidence never falls back to a statistic-only approximation", () => {
+  const [evidence] = methodEvidence({
+    insideMinor: 40,
+    insideMajor: 2,
+    outsideMinor: 2,
+    outsideMajor: 40,
+  }, {
+    threeSeqDescent: 30,
+    threeSeqSites: 80,
+    threeSeqMajorSites: 50,
+    threeSeqMinorSites: 30,
+  }, {
+    methods: ["3Seq"],
+    window: 20,
+    step: 1,
+    correction: "none",
+    alpha: 0.05,
+  }, 1, 100);
+  assert.equal(evidence.pValue, 1);
+  assert.match(evidence.calibration, /source 3Seq signal unavailable/);
 });

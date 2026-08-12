@@ -31,6 +31,8 @@ Options:
   --siscan-outgroup-sequence N   (1-based; selects manual mode)
   --siscan-positions triplet-variable|quartet-variable|all
   --siscan-gaps strip|fifth-state
+  --siscan-window N             source default 200 alignment positions
+  --siscan-step N               source default 20 alignment positions
   --siscan-scan-permutations N
   --siscan-final-permutations N
   --help
@@ -90,6 +92,8 @@ const options = {
     ? requestedPositions
     : "triplet-variable" as const,
   siskanGapMode: requestedGapMode === "fifth-state" ? "fifth-state" as const : "strip" as const,
+  siskanWindow: Math.max(12, Math.min(alignment.length, Number(option("--siscan-window") ?? DEFAULT_OPTIONS.siskanWindow))),
+  siskanStep: Math.max(1, Math.min(alignment.length, Number(option("--siscan-step") ?? DEFAULT_OPTIONS.siskanStep))),
   siskanScanPermutations,
   siskanPValuePermutations: Math.max(
     siskanScanPermutations,

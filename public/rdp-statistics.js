@@ -127,11 +127,9 @@ export function binomialUpper(successes, trials, probability) {
 const threeSeqCache = new Map();
 
 // Exact tail probability for the maximum descent of a hypergeometric random
-// walk with a fixed number of up/down steps. The dynamic program follows the
-// drawdown from the running maximum and accumulates first-passage probability
-// directly, avoiding catastrophic cancellation for very small tails. The
-// bounded work guard keeps browser analyses responsive; larger cases retain a
-// conservative finite-sample bound until lookup-table generation is added.
+// walk with a fixed number of up/down steps. This is the same probability
+// represented by RDP5 Seq3PVals/Get3SeqPvalC, evaluated as a first-passage DP
+// rather than materialising the desktop program's four-dimensional YTable.
 export function threeSeqExactP(upSteps, downSteps, observedDescent, maxOperations = 4_000_000) {
   const up = Math.max(0, Math.trunc(upSteps));
   const down = Math.max(0, Math.trunc(downSteps));
@@ -178,6 +176,79 @@ export function threeSeqExactP(upSteps, downSteps, observedDescent, maxOperation
   const p = clampProbability(tail);
   threeSeqCache.set(key, p);
   return { p, exact: true };
+}
+
+function threeSeqApproxNormCdf(value) {
+  const b1 = 0.31938153;
+  const b2 = -0.356563782;
+  const b3 = 1.781477937;
+  const b4 = -1.821255978;
+  const b5 = 1.330274429;
+  const p = 0.2316419;
+  const c = 0.39894228;
+  const x = Number(value);
+  if (x > 8) return 1;
+  if (x < -8) return 0;
+  if (x >= 0) {
+    const t = 1 / (1 + p * x);
+    return 1 - c * Math.exp(-x * x / 2) * t
+      * (t * (t * (t * (t * b5 + b4) + b3) + b2) + b1);
+  }
+  const t = 1 / (1 - p * x);
+  return c * Math.exp(-x * x / 2) * t
+    * (t * (t * (t * (t * b5 + b4) + b3) + b2) + b1);
+}
+
+// Direct port of RDP5 SiegmundDiscrete and ApproxNu. GetTSPVal uses this when
+// a tuple is larger than the installed exact probability table.
+export function threeSeqSiegmundP(upSteps, downSteps, observedDescent) {
+  const up = Math.max(0, Math.trunc(upSteps));
+  const down = Math.max(0, Math.trunc(downSteps));
+  const threshold = Math.max(0, Math.trunc(observedDescent));
+  const total = up + down;
+  if (threshold <= 0 || up === 0 || down === 0 || total === 0) return 1;
+  const boundary = threshold - 0.5;
+  const displacement = down - up;
+  const exponent = Math.min(700, -2 * boundary * (boundary - displacement) / total);
+  const p1 = Math.min(1e200, Math.exp(exponent));
+  const p2 = p1 * (2 * (2 * boundary - displacement) * (boundary - displacement) / total + 1);
+  const a = 2 * (2 * boundary - displacement) / total;
+  if (!(a > 0) || !(p2 > 0) || !Number.isFinite(p2)) return null;
+  const half = a / 2;
+  const cdf = threeSeqApproxNormCdf(half);
+  const density = Math.exp(-0.5 * half * half) / Math.sqrt(2 * Math.PI);
+  const denominator = a * (density + a * cdf / 2);
+  if (!(denominator > 0)) return null;
+  const nu = ((cdf - 0.5) * 2) / denominator;
+  const poisson = nu * nu * p2;
+  if (!(poisson > 0) || !Number.isFinite(poisson)) return null;
+  const probability = -Math.expm1(-poisson);
+  return probability > 0 && probability <= 1 ? probability : null;
+}
+
+// Source dispatch used by production 3Seq. Small walks use the exact
+// Seq3PVals-equivalent DP. Large walks follow GetTSPVal's SiegmundDiscrete
+// branch; its final scaled-table fallback is retained for approximation edge
+// cases where the discrete expression is outside its numerical domain.
+export function threeSeqSourceP(upSteps, downSteps, observedDescent, maxOperations = 4_000_000) {
+  const up = Math.max(0, Math.trunc(upSteps));
+  const down = Math.max(0, Math.trunc(downSteps));
+  const threshold = Math.max(0, Math.trunc(observedDescent));
+  if (threshold <= 0 || up === 0 || down === 0) return { p: 1, mode: "exact-table" };
+  const exact = threeSeqExactP(up, down, threshold, maxOperations);
+  if (exact.exact) return { p: exact.p, mode: "exact-table" };
+  const siegmund = threeSeqSiegmundP(up, down, threshold);
+  if (siegmund !== null) return { p: clampProbability(siegmund), mode: "siegmund-discrete" };
+
+  const tableLimit = Math.max(8, Math.floor(Math.cbrt(Math.max(512, maxOperations))) - 2);
+  const factor = Math.max(up, down, threshold) / tableLimit;
+  if (!(factor > 1)) return { p: 1, mode: "unavailable" };
+  const scaledUp = Math.max(0, Math.floor(up / factor));
+  const scaledDown = Math.max(0, Math.floor(down / factor));
+  const scaledThreshold = Math.max(1, Math.floor(threshold / factor));
+  const scaled = threeSeqExactP(scaledUp, scaledDown, scaledThreshold, maxOperations);
+  if (!scaled.exact || scaled.p === null) return { p: 1, mode: "unavailable" };
+  return { p: clampProbability(Math.pow(scaled.p, factor)), mode: "scaled-table" };
 }
 
 // Direct G-scale 0 specialization of RDP5 CalcKMaxP + GCCalcPValP.
@@ -277,17 +348,6 @@ export function methodEvidence(candidate, stats, options, comparisons, nSites) {
     ? stats.siskanSourceZ
     : stats.siskanScore / Math.sqrt(Math.max(1, stats.siskanSites));
   const descent = stats.threeSeqDescent ?? stats.threeSeqBridge / 1000;
-  const exactThreeSeq = options.methods.includes("3Seq")
-    ? threeSeqExactP(
-        stats.threeSeqMajorSites ?? Math.floor(stats.threeSeqSites / 2),
-        stats.threeSeqMinorSites ?? Math.ceil(stats.threeSeqSites / 2),
-        descent,
-        options.threeSeqMaxOperations ?? 4_000_000,
-      )
-    : { p: null, exact: false };
-  const threeSeqBound = Math.min(1, 2 * Math.exp(
-    (-2 * descent * descent) / Math.max(1, stats.threeSeqSites),
-  ));
   const sourceRdpP = rdp5SourceProbability(stats.rdpSource
     ? { ...stats.rdpSource, informativeSites: candidate.informative }
     : null);
@@ -297,6 +357,7 @@ export function methodEvidence(candidate, stats, options, comparisons, nSites) {
   const bootscanSignal = (candidate.methodSignals ?? []).find((signal) => signal.method === "BootScan" && signal.sourceBootscan);
   const maxChiSignal = (candidate.methodSignals ?? []).find((signal) => signal.method === "MaxChi" && signal.sourceChi);
   const chimaeraSignal = (candidate.methodSignals ?? []).find((signal) => signal.method === "Chimaera" && signal.sourceChi);
+  const threeSeqSignal = (candidate.methodSignals ?? []).find((signal) => signal.method === "3Seq" && signal.sourceThreeSeq);
 
   const calculations = {
     RDP: {
@@ -361,10 +422,12 @@ export function methodEvidence(candidate, stats, options, comparisons, nSites) {
         : "fast category-Z locator fallback",
     },
     "3Seq": {
-      p: exactThreeSeq.p ?? clampProbability(threeSeqBound),
-      statistic: descent,
-      statisticLabel: "maximum HGRW descent",
-      calibration: exactThreeSeq.exact ? "exact HGRW first-passage DP" : "finite-sample exponential bound",
+      p: threeSeqSignal?.sourceThreeSeq?.rawP ?? 1,
+      statistic: threeSeqSignal?.sourceThreeSeq?.descent ?? descent,
+      statisticLabel: threeSeqSignal?.sourceThreeSeq ? "maximum HGRW excursion" : "source signal unavailable",
+      calibration: threeSeqSignal?.sourceThreeSeq
+        ? `RDP5 FindSubSeqTS/Seq3PVals · ${threeSeqSignal.sourceThreeSeq.informativeSites} compressed sites · ${threeSeqSignal.sourceThreeSeq.probabilityMode}`
+        : "RDP5 source 3Seq signal unavailable · recalculate this hypothesis",
     },
   };
 

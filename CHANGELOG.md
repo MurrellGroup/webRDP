@@ -1,5 +1,108 @@
 # Changelog
 
+## 0.9.9 — 2026-08-12
+
+- Reworked the independent SiScan permutation hot path without changing its
+  source decisions. `DoPerms3P`'s three vertical-randomization bands now use
+  their exact telescoping prefix ranges instead of re-adding 13 adjacent
+  source-category ranges for every replicate and window.
+- Added exact permutation-moment reuse keyed by the three band totals. Windows
+  and concrete triplets with different observed category vectors but the same
+  source randomization support now reuse the identical randomized means and
+  population variances; observed Z scores remain separately calculated.
+- Added a bounded, growing final-region prefix accelerator. It reuses the same
+  MSVCRT template stream up to a 72 MiB hard workspace budget and falls back to
+  the existing streamed `DoPerms3P` enumeration for larger tracts, preserving
+  the long-genome memory bound.
+- Added a direct-enumeration oracle for shared-cache/different-category cases.
+  Window ledgers, region ledgers, Z values and probabilities must remain exact
+  under the accelerator; the reference path stays available to the regression
+  suite.
+- Reduced the reproducible all-220-triplet 12 × 2.4 kb SiScan workload from
+  1,933.96 ms (113.8 triplets/s in 0.9.8) to 806.75 ms (272.7 triplets/s), a
+  2.40× throughput increase on the same development class. The gate now
+  requires at least 200 hardware-normalized complete triplets/s and uses a
+  bounded normalized time ceiling.
+
+## 0.9.8 — 2026-08-12
+
+- Promoted SiScan from confirmation-only use to independent source discovery.
+  Every concrete unordered triplet is screened once by the supplied
+  `SetUpSiScan`/`GetSSOL`/`DoPerms3P`-shape workflow; no other method must seed
+  a candidate and no sequence needs a reference designation.
+- Added source topology-to-role inference. The member shared by the
+  whole-alignment sister pair and a significant local sister pair is the
+  recombinant; the remaining baseline and local members become its major and
+  minor parents. Characterization and edited-event recalculation now reject
+  SiScan evidence from a different orientation of the same triplet.
+- Preserved every significant disjoint topology run as an event hypothesis and
+  added a durable source ledger: raw p, raw interval, run-window count,
+  fourth-sequence path, position/gap modes, window/step, topology triplet and
+  resolved roles. The UI, CSV and `.rdpweb` round trip expose that provenance.
+- Added separate 200-position/20-position SiScan source-default window and step
+  controls. The application's five-position general breakpoint step no longer
+  silently multiplies all-triplet SiScan work by four.
+- Added exact bounded memoization of repeated 15-category count vectors across
+  triplets and final regions while preserving the same MSVC permutation stream.
+  The performance gate now includes all 220 triplets of a 12 × 2.4 kb SiScan
+  cohort in addition to the existing 4 × 80 kb long-genome fixture.
+- Added no-reference, SiScan-only, multi-run, one-call-per-triplet,
+  topology-role, no-cross-orientation-evidence, persistence, UI and CLI
+  regressions. All seven named detector families now have independent active
+  discovery paths; desktop numerical goldens remain a release gate.
+
+## 0.9.7 — 2026-08-12
+
+- Ported the active 3Seq `CheckwrapC` control flow into the fused WebAssembly
+  kernel. Each of the three target-role walks now retains compressed positions
+  and cumulative heights, applies the source's bounded prefix extension with
+  strict tie behavior, preserves origin-spanning intervals for circular
+  alignments, and follows the source linear-complement branch otherwise.
+- Removed the redundant half-genome-origin 3Seq pass when `CheckwrapC` is
+  available. Circular 3Seq now screens each concrete triplet once, preventing
+  an artificial second origin from changing which complementary walk wins and
+  cutting that method's circular scan work in half.
+- Ported the active `CheckSplit3Seq`/`SubPVal` recalibration used after cyclical
+  signal erasure. A signal interrupted by an extracted/deleted tract is split
+  into continuous pieces; each piece gets its own height-range excursion and
+  probability while retaining the full original walk's `nM`/`nN` calibration
+  counts, as in the supplied source.
+- Made triplet recounting and structural-gap splitting native for wrapping
+  intervals. Projects, CSV, and the method ledger now preserve source-wrap,
+  linear-complement, full-versus-piece excursion, and piece informative-site
+  provenance.
+- Added scalar source-control-flow, byte/packed, circular/linear-complement,
+  no-reference worker, wrapping split, `SubPVal`, and project-round-trip
+  regressions. Broad desktop-output comparison and historical lookup-table
+  rounding remain validation gates; this release does not claim executable-
+  level numerical parity.
+- Made the aggregate performance gate runner-aware by normalizing only its
+  GENECONV/total hot-loop limits to the unchanged scalar-distance calibration,
+  capped at 2.5×. Packed-distance, dMax, PHI and long-genome SiScan retain hard
+  ceilings, so CPU-throttled CI does not fail an unchanged kernel while true
+  production-path regressions remain bounded.
+
+## 0.9.6 — 2026-08-12
+
+- Re-enabled 3Seq with a direct author-source `FindSubSeqTS`/`TSXOver` port.
+  One fused WASM call screens one concrete unordered triplet and updates all
+  three queried recombinant assignments in a fused column pass.
+- Removed alignment-global variable-site influence from 3Seq. Each target walk
+  independently discards invariant, incomplete, triallelic and
+  neither-parent-match sites, then retains the source strict-tie maximum
+  descent/ascent and degeneracy guards.
+- Replaced the retired exponential-bound evidence with a `Seq3PVals`-
+  equivalent exact first-passage calculation and the supplied
+  `GetTSPVal`/`SiegmundDiscrete` large-walk path. The exact-work boundary is an
+  advanced, persisted performance control.
+- Added independent 3Seq event discovery, co-located confirmation,
+  edited-event recalculation, sequential erase/extract redo participation,
+  method-result ledgers, CSV/project persistence and kernel-call provenance.
+- Added byte-versus-packed, all-three-role, decoy-independence,
+  informative-site compression, exact-probability, independent-worker and
+  project-roundtrip regressions. Direct `CheckWrapC` circular tie matching and
+  desktop golden-corpus validation remain explicit gates.
+
 ## 0.9.5 — 2026-08-12
 
 - Re-enabled BootScan/RecScan production discovery with a direct port of the

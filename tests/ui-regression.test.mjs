@@ -40,12 +40,17 @@ test("source SiScan controls, provenance, and interactive trace are wired", () =
   assert.match(page, /Nearest outlier · RDP5 default/);
   assert.match(page, /One analyst-selected sequence/);
   assert.match(page, /Final-region permutations/);
+  assert.match(page, /Source default 200 alignment positions/);
+  assert.match(page, /Source default 20/);
   assert.match(page, /RDP5 source topology-run Z/);
   assert.match(page, /selectedSignal\?\.profile/);
   assert.match(worker, /runSourceSiScan/);
   assert.match(worker, /sourceSiScanProfile/);
-  assert.match(worker, /sourceResult\?\.regions/);
+  assert.match(worker, /processedSourceSiScanTriplets/);
+  assert.match(worker, /sourceSiScanRoles/);
+  assert.match(worker, /sourceSiScanTripletCalls/);
   assert.match(sisterScan, /export function sourceSiScanPattern/);
+  assert.match(sisterScan, /export function sourceSiScanRoles/);
   assert.match(sisterScan, /buildPermutationPrefix/);
   assert.match(sisterScan, /GetSSOL \+ Get3Score\/GetPScores2 \+ DoPerms3P/);
 });
@@ -58,6 +63,19 @@ test("source GENECONV owns discovery, controls, and fragment provenance", () => 
   assert.match(worker, /scan_source_geneconv_all_packed/);
   assert.match(worker, /sourceGeneconvTripletKernelCalls/);
   assert.match(worker, /FindSubSeqGCAP6\/7 → GetFragsP → GetMaxFragScoreP/);
+});
+
+test("source 3Seq owns fused triplet discovery and walk provenance", () => {
+  assert.match(page, /RDP5 3Seq walk ledger/);
+  assert.match(page, /3Seq source controls/);
+  assert.match(page, /One fused pass · 3 targets/);
+  assert.match(page, /target-matches-one-parent sites/);
+  assert.doesNotMatch(page, /Author-source 3Seq discovery and exact probability-table path is pending/);
+  assert.match(worker, /scan_source_three_seq_triplet/);
+  assert.match(worker, /sourceThreeSeqTripletKernelCalls/);
+  assert.match(worker, /FindSubSeqTS\/FindSubSeqTS2 → CheckwrapC → GetTSPVal → Seq3PVals\/Get3SeqPvalC/);
+  assert.match(worker, /CheckSplit3Seq\/SubPVal/);
+  assert.match(worker, /Do not feed 3Seq the synthetic half-genome origin/);
 });
 
 test("source BURT exposes the desktop polish path and an interactive posterior workbench", () => {

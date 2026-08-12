@@ -67,4 +67,4 @@ assert.ok(events.some((event) => (
   ))
 )), "GENECONV must independently discover the source fragment without an RDP seed");
 assert.equal(message.comparisons, 1);
-assert.deepEqual(message.tripletKernelCalls, { rdp: 0, geneconv: 1, sourceChi: 0 });
+assert.deepEqual(message.tripletKernelCalls, { rdp: 0, geneconv: 1, sourceChi: 0, threeSeq: 0, siscan: 0 });

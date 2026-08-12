@@ -1,6 +1,6 @@
 {
   "name": "rdp-web",
-  "version": "0.9.5",
+  "version": "0.9.9",
   "private": true,
   "engines": {
     "node": ">=22.13.0"
@@ -8,10 +8,11 @@
   "scripts": {
     "install:ci": "bash scripts/install-ci.sh",
     "wasm:build": "asc assembly/index.ts -o public/wasm/rdp.wasm --optimize --shrinkLevel 1 --runtime stub",
-    "test:wasm": "node --test tests/wasm-engine.test.mjs tests/source-chi.test.mjs tests/source-geneconv.test.mjs tests/source-bootscan.test.mjs tests/statistics.test.mjs tests/burt-source.test.mjs tests/ancestral-clustering.test.mjs tests/signal-disassembly.test.mjs tests/recombinant-identification.test.mjs tests/siscan-source.test.mjs tests/phi-source.test.mjs && node --import tsx tests/worker-integration.ts && node --import tsx tests/worker-independent-methods.ts && node --import tsx tests/worker-bootscan.ts && node --import tsx tests/worker-source-chi.ts && node --import tsx tests/worker-siscan-multisignal.ts && node --import tsx tests/worker-comparison-scope.ts && node --import tsx tests/worker-triplet-enumeration.ts && node --import tsx tests/worker-cyclic-disassembly.ts && node --import tsx tests/worker-circular.ts && node --import tsx tests/worker-diagnostics.ts && node --import tsx tests/worker-recalculation.ts && node --import tsx tests/worker-simulation.ts && node --import tsx tests/worker-large-path.ts && node --import tsx tests/project-roundtrip.ts && node --import tsx tests/core-analysis.ts && node --import tsx tests/example-datasets.ts",
+    "test:wasm": "node --test tests/wasm-engine.test.mjs tests/source-chi.test.mjs tests/source-geneconv.test.mjs tests/source-bootscan.test.mjs tests/source-three-seq.test.mjs tests/statistics.test.mjs tests/burt-source.test.mjs tests/ancestral-clustering.test.mjs tests/signal-disassembly.test.mjs tests/recombinant-identification.test.mjs tests/siscan-source.test.mjs tests/phi-source.test.mjs && node --import tsx tests/worker-integration.ts && node --import tsx tests/worker-independent-methods.ts && node --import tsx tests/worker-three-seq.ts && node --import tsx tests/worker-bootscan.ts && node --import tsx tests/worker-source-chi.ts && node --import tsx tests/worker-siscan-independent.ts && node --import tsx tests/worker-siscan-multisignal.ts && node --import tsx tests/worker-comparison-scope.ts && node --import tsx tests/worker-triplet-enumeration.ts && node --import tsx tests/worker-cyclic-disassembly.ts && node --import tsx tests/worker-circular.ts && node --import tsx tests/worker-diagnostics.ts && node --import tsx tests/worker-recalculation.ts && node --import tsx tests/worker-simulation.ts && node --import tsx tests/worker-large-path.ts && node --import tsx tests/project-roundtrip.ts && node --import tsx tests/core-analysis.ts && node --import tsx tests/example-datasets.ts",
     "test:ui": "node --test tests/ui-regression.test.mjs && node --import tsx tests/interaction-models.ts",
     "bench:wasm": "node bench/benchmark.mjs",
     "bench:bootscan": "node bench/bootscan-batch.mjs",
+    "bench:three-seq": "node bench/three-seq.mjs",
     "bench:gate": "RDP_PERFORMANCE_GATE=1 node bench/benchmark.mjs 100 10000",
     "github:build": "bash scripts/build-github-pages.sh",
     "cli": "node --import tsx cli/rdp-web.ts",
