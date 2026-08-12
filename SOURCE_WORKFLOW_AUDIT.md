@@ -55,9 +55,9 @@ new Review studio.
 
 ## Observable behavior crosswalk
 
-| RDP5 evidence | Observable behavior | RDP Web 0.9.9 implementation | Fidelity boundary |
+| RDP5 evidence | Observable behavior | RDP Web 0.10.0 implementation | Fidelity boundary |
 | --- | --- | --- | --- |
-| Manual §4.1 and §10.3 | Detection and unique-event inference are separate phases, and detection screens real sequence triplets. | Full mode emits one `a < b < c` record per concrete triple. RDP, six-track GENECONV, fused all-three-role 3Seq, SiScan and combined MAXCHI/CHIMAERA each receive it once. SiScan maps the member shared by the whole-alignment and local sister pairs to the recombinant, so no presumed-target rerun or designated reference is required. BootScan consumes the same set in one shared-pair `BSXoverR2`-shape batch, evaluates all three relationships together, and never substitutes a consensus/reference proxy. Packed extraction and triplet-local scoring ignore only the current triplet's invariant/incomplete sites where the source does. 3Seq uses its own `CheckwrapC`, so circular mode does not add a second artificial-origin 3Seq test. | BootScan optional UPGMA/NJ relationship modes and desktop method-output goldens remain. |
+| Manual §4.1 and §10.3 | Detection and unique-event inference are separate phases, and detection screens real sequence triplets. | Full mode emits one `a < b < c` record per concrete triple. RDP, six-track GENECONV, fused all-three-role 3Seq, SiScan and combined MAXCHI/CHIMAERA each receive it once. SiScan maps the member shared by the whole-alignment and local sister pairs to the recombinant, so no presumed-target rerun or designated reference is required. BootScan consumes the same set in one shared-pair `BSXoverR2`-shape batch, evaluates all three relationships together, and never substitutes a consensus/reference proxy. Its UPGMA/NJ modes build each tree from the entire active cohort before triplet interpretation. Packed extraction and triplet-local scoring ignore only the current triplet's invariant/incomplete sites where the source does. 3Seq uses its own `CheckwrapC`, so circular mode does not add a second artificial-origin 3Seq test. | Desktop method-output, BootScan tree tie/rounding, and warning goldens remain. |
 | Manual §5.1 and §10.4; `GoToNextEventMnu_Click` | Events are reviewed in stored characterization order; next/previous wrap and can skip accepted/rejected events. | Ordered queue, previous/next wrap, best-unresolved jump, skip accepted, skip rejected, warning-only, stale-only, and minimum-method filters. | RDP5's exact internal `BestEvent` ordering has not been numerically replicated. |
 | `GoToBestMnu`, `Detect1Mnu`–`Detect7Mnu` | Jump to strongest unaccepted evidence and filter by number of detecting methods. | Best adjusted-p unresolved jump and 0–7 minimum-support filter. | Adjusted p is used as the transparent tie-breaker; exact desktop ordering remains a fixture target. |
 | Manual §5.1–5.3; `ShowBestAllMnu` / `ShowAllAllMnu` | Schematic context, event information, and method plots work together; best evidence and all evidence can be selected. | Integrated dossier, recombination map, all-method tabs, and best-evidence mode in one continuous review surface. | The original method-specific graphic primitives are not pixel-cloned. |
@@ -68,9 +68,9 @@ new Review studio.
 | Manual §5.5; `DendrogramForm6.frm` | Paired trees show recombinant region versus non-recombinant region; marking follows a sequence across trees. | Default tract-versus-combined-background trees, optional left/tract/right mode, linked leaf marking, role colors, nearest-sequence cohorts, and Newick export. | Browser trees are NJ/p-distance aids. ML/Bayesian trees and SH/AU tests remain open. |
 | Manual §5.5 | Drawn trees are unrooted even when visually oriented; absence of a topology change is not proof against recombination. | Tree caveat explicitly distinguishes midpoint-oriented drawing from an inferred root and warns against interpreting left-to-right ancestry. | No root inference is claimed. |
 | Node menus in `DendrogramForm6.frm` | Mark/unmark clades, find parent candidates, and accept/reject events above a node. | Linked leaf selection and event-group decisions are operational; event-centered role reassignment is directly accessible in the inspector. | Editable internal-node/clade operations and parent search above a node remain open. |
-| Manual §4.1.3–4.1.4 and §10.4 | Descendants of one ancestral recombinant are grouped; overprinting can obscure group membership. | Every retained event tests every other sequence under all three presumed-recombinant orientations. Six seeded JC/NJ bootstrap trees, source-default 50% branch collapse, source-style tree movement, distance correlation/SDM, and detectable-signal evidence feed the tunable 2-of-3 rule; qualifying unsignalled descendants enter `GetSupers`-style ancestral groups. Group decisions and dependency reconstruction are operational. | Exact Clearcut consensus and the complete `CheckBSTree` weighting tree need desktop-corpus parity; ancestral-sequence reconstruction remains open. |
+| Manual §4.1.3–4.1.4 and §10.4 | Descendants of one ancestral recombinant are grouped; overprinting can obscure group membership. | Every retained event tests every other sequence under all three presumed-recombinant orientations. Six seeded JC/NJ bootstrap trees, source-default 50% branch collapse, source-style tree movement, distance correlation/SDM, and detectable-signal evidence feed the tunable 2-of-3 rule; qualifying unsignalled descendants enter `GetSupers`-style ancestral groups. Bounded tree cohorts retain the detecting triplet and collectively cover every candidate, with cohort count/completeness persisted. Group decisions and dependency reconstruction are operational. | Exact Clearcut consensus and the complete `CheckBSTree` weighting tree need desktop-corpus parity; ancestral-sequence reconstruction remains open. |
 | `AcceptMnu_Click` / `AcceptSMnu_Click` and reject counterparts | A decision can apply to the selected sequence or every sequence carrying the event. | Separate selected-hypothesis and common-ancestor-group accept/reject controls; each is one undoable, audited action. | Group membership is analyst/heuristic supplied rather than guaranteed to match RDP5 inference. |
-| `FindBestRecSignal`, `BuildFirstXOList`, redo lists, `CheckDrop`/`DropSeqs`; manual §4.1.6/§10.4 | Automated detection repeatedly selects the best signal, characterizes it, erases/extracts co-recombinant tracts and re-screens; later manual corrections invalidate downstream assumptions. | Default Run performs the full sequential cycle. Unaffected signals remain pooled; changed-origin triplets alone enter the redo scan; a pooled signal is refreshed on the current component alignment before application. Scientific edits still mark later queue items stale and manual/heuristic rescans rebuild the lineage. Crossing signals split and gap-near breakpoints carry structural uncertainty. | Exact desktop redo-list compaction/minimum-size dropping, method-specific VNP uncertainty thresholds and desktop iteration-order golden fixtures remain. |
+| `FindBestRecSignal`, `BuildFirstXOList`, redo lists, `CheckDrop`/`DropSeqs`; manual §4.1.6/§10.4 | Automated detection repeatedly selects the best signal, characterizes it, erases/extracts co-recombinant tracts and re-screens; later manual corrections invalidate downstream assumptions. | Default Run performs the full sequential cycle. Unaffected signals remain pooled; changed-origin triplets alone enter the redo scan; a pooled signal is refreshed on the current component alignment before application. Scientific edits still mark later queue items stale and manual/heuristic rescans rebuild the lineage. Nested component addresses apply atomically; unresolved predecessors produce a visible lineage hold instead of a remainder fallback. Crossing signals split and gap-near breakpoints carry structural uncertainty. | Exact desktop redo-list compaction/minimum-size dropping, method-specific VNP uncertainty thresholds and desktop iteration-order golden fixtures remain. |
 | `RCheckMnu`, tree recheck commands | Re-run methods or recheck a plot with a different candidate role. | Exact selected-hypothesis recalculation, role audition, method-specific views, and full/targeted unresolved rescan. | Recalculation preserves scan multiplicity conservatively but does not claim RDP5 p-value identity. |
 | Matrix menu and manual §5.5 | Compatibility, recombination, breakpoint, LD, MaxChi, and LARD matrices are interactive context. | Dense genome-position breakpoint-pair, region-separation, local-discordance, and p-distance views with coordinate inspection. | Exact RF/SH/LD/MaxChi/LARD matrix implementations remain separate parity tasks. |
 | Manual §9 | Save project, remove recombinants, remove/mask tracts, split mosaics, and partition at breakpoints. | Restorable project, CSV, input FASTA, remove, mask, codon-aware mask, split, and breakpoint-partition outputs. | Native `.rdp` project import/export is not implemented. |
@@ -93,7 +93,7 @@ global-variable architecture. Group decisions and shared-breakpoint edits are
 single undo frames, every action receives an audit entry, and stale downstream
 evidence is visible rather than silently recomputed.
 
-## Implemented through the 0.9.9 source-parity checkpoint
+## Implemented through the 0.10.0 source-parity checkpoint
 
 - Review studio replaces the disconnected main-page result stack.
 - Six-stage selected-event rail: signal, breakpoints, roles, trees, grouping,
@@ -120,11 +120,11 @@ evidence is visible rather than silently recomputed.
 - Direct six-track GENECONV compression, finite-G fragment extension,
   lambda/K calibration, global p-value queue, source overlap suppression,
   independent discovery and exact recalculation.
-- Direct distance-mode BootScan/RecScan batch with MSVCRT-seeded `SEQBOOT2`,
-  pair/window `FastBootDistIP` reuse across the full concrete-triplet set,
+- Direct three-mode BootScan/RecScan batch with MSVCRT-seeded `SEQBOOT2`, sparse
+  distance-pair reuse or full-cohort UPGMA/NJ tree-position transforms,
   `GetPltVal2` topology support, source cutoff/overlap runs, triplet-local
-  `BSSubSeq`/`MakeScoresBS`/`ProbCalc`, independent discovery and exact
-  hypothesis recalculation.
+  `BSSubSeq`/`MakeScoresBS`/`ProbCalc`, independent discovery, affected-triplet
+  rescans and exact hypothesis recalculation.
 - Direct fused 3Seq target walks with `CheckwrapC` circular/linear-complement
   handling and `CheckSplit3Seq`/`SubPVal` recalibration of continuously
   observed pieces after component erasure.
@@ -152,8 +152,8 @@ evidence is visible rather than silently recomputed.
 
 The following are not disguised as complete:
 
-- the optional BootScan UPGMA/NJ relationship modes; desktop 3Seq
-  coordinate/tie and probability-table-rounding corpus; GENECONV's non-default indel/permutation modes;
+- BootScan desktop tree tie/rounding goldens; desktop 3Seq coordinate/tie and
+  probability-table-rounding corpus; GENECONV's non-default indel/permutation modes;
   and desktop numerical parity for every method;
 - the optional RDP5 logistic/neural recombinant selectors and desktop
   golden-corpus calibration of the default decision tree;

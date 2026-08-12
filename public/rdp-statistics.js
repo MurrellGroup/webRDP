@@ -382,7 +382,7 @@ export function methodEvidence(candidate, stats, options, comparisons, nSites) {
         ? "maximum topology bootstrap"
         : "source batch signal unavailable",
       calibration: bootscanSignal?.sourceBootscan
-        ? `RDP5 RecScan distance batch · ${bootscanSignal.sourceBootscan.bootstrapReplicates} SEQBOOT2 replicates · ${bootscanSignal.sourceBootscan.window}/${bootscanSignal.sourceBootscan.step} nt window/step · MakeScoresBS/ProbCalc`
+        ? `RDP5 RecScan ${bootscanSignal.sourceBootscan.relationshipMode} batch · ${bootscanSignal.sourceBootscan.bootstrapReplicates} SEQBOOT2 replicates · ${bootscanSignal.sourceBootscan.window}/${bootscanSignal.sourceBootscan.step} nt window/step · MakeScoresBS/ProbCalc`
         : "RDP5 source BootScan batch signal unavailable · recalculate this hypothesis",
     },
     MaxChi: {

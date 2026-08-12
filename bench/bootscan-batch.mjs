@@ -3,6 +3,10 @@ import { performance } from "node:perf_hooks";
 
 const nSeq = Math.max(3, Number(process.argv[2] ?? 24));
 const nSites = Math.max(400, Number(process.argv[3] ?? 2_000));
+const relationshipMode = ["distance", "upgma", "neighbor-joining"].includes(process.argv[4])
+  ? process.argv[4]
+  : "distance";
+const relationshipModeCode = relationshipMode === "upgma" ? 1 : relationshipMode === "neighbor-joining" ? 2 : 0;
 const window = Math.min(200, Math.floor(nSites / 2));
 const step = 20;
 const replicates = 100;
@@ -29,7 +33,11 @@ const validPtr = differencePtr + replicates * 4;
 const lookupPtr = align(validPtr + replicates * 4, 2);
 const lookupEntries = (window + 1) * (window + 2) / 2;
 const outputCapacity = 8_192;
-const outPtr = align(lookupPtr + lookupEntries * 2, 4);
+const treeWorkPtr = align(lookupPtr + lookupEntries * 2, 16);
+const treeWorkspaceBytes = relationshipModeCode === 0
+  ? 0
+  : instance.exports.source_bootscan_tree_workspace_bytes(nSeq);
+const outPtr = align(treeWorkPtr + treeWorkspaceBytes, 4);
 const requiredBytes = outPtr + outputCapacity * 16 * 4;
 const missingPages = Math.ceil((requiredBytes - instance.exports.memory.buffer.byteLength) / 65_536);
 if (missingPages > 0) instance.exports.memory.grow(missingPages);
@@ -81,6 +89,7 @@ const args = [
   step,
   replicates,
   cutoffPermille,
+  relationshipModeCode,
   0x5a17c0de,
   pairMapPtr,
   pairListPtr,
@@ -91,17 +100,19 @@ const args = [
   differencePtr,
   validPtr,
   lookupPtr,
+  treeWorkPtr,
   outPtr,
   outputCapacity,
 ];
 
-instance.exports.scan_source_bootscan_batch_packed(...args);
+instance.exports.scan_source_bootscan_batch_mode_packed(...args);
 const started = performance.now();
-const signals = instance.exports.scan_source_bootscan_batch_packed(...args);
+const signals = instance.exports.scan_source_bootscan_batch_mode_packed(...args);
 const elapsedMs = performance.now() - started;
 const naivePairRowsPerWindow = tripletCount * 3;
 const report = {
   dataset: `${nSeq} × ${nSites}`,
+  relationshipMode,
   triplets: tripletCount,
   usedPairs: pairCount,
   windows: windowCount,

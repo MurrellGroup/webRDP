@@ -263,8 +263,18 @@ function sourceGeneconvSignal(row, rotation, length) {
   };
 }
 
-function sourceBootscanSignal(row, rotation, length) {
+function sourceBootscanSignal(row, rotation, length, relationshipMode = "distance") {
   const mapped = mapInterval(row[4], row[5], rotation, length);
+  const relationshipLabel = relationshipMode === "upgma"
+    ? "UPGMA tree"
+    : relationshipMode === "neighbor-joining"
+      ? "neighbor-joining tree"
+      : "distance";
+  const relationshipRoutine = relationshipMode === "upgma"
+    ? "FastBootDistIP → UPGMA tree-position transform"
+    : relationshipMode === "neighbor-joining"
+      ? "FastBootDistIP → NEIGHBOR/NJ tree-position transform"
+      : "FastBootDistIP";
   const rawP = rdp5SourceProbability({
     common: row[9],
     tractSites: row[11],
@@ -276,8 +286,8 @@ function sourceBootscanSignal(row, rotation, length) {
     method: "BootScan",
     ...mapped,
     statistic: row[6] / Math.max(1, row[7]),
-    locator: `RDP5 RecScan distance topology ${row[3] + 1} · ${row[8]} supported windows`,
-    sourceRoutine: "BSXoverR2 → SEQBOOT2 → FastBootDistIP → GetPltVal2 → FindBeginBS/FindEndBS → MakeScoresBS/ProbCalc",
+    locator: `RDP5 RecScan ${relationshipLabel} topology ${row[3] + 1} · ${row[8]} supported windows`,
+    sourceRoutine: `BSXoverR2 → SEQBOOT2 → ${relationshipRoutine} → GetPltVal2 → FindBeginBS/FindEndBS → MakeScoresBS/ProbCalc`,
     sourceBootscan: {
       topology: row[3],
       baselineTopology: row[13],
@@ -291,7 +301,7 @@ function sourceBootscanSignal(row, rotation, length) {
       rawP,
       window: row[14],
       step: row[15],
-      relationshipMode: "distance",
+      relationshipMode,
     },
   };
 }
@@ -1016,6 +1026,15 @@ async function analyze(message, emit = postMessage) {
   const sourceGeneconvEnabled = (independentMethodMask & 2) !== 0;
   const sourceChiMethodMask = independentMethodMask & (4 | 8);
   const sourceBootscanEnabled = options.methods.includes("BootScan");
+  const sourceBootscanRelationshipMode = options.bootscanRelationshipMode === "upgma"
+    || options.bootscanRelationshipMode === "neighbor-joining"
+    ? options.bootscanRelationshipMode
+    : "distance";
+  const sourceBootscanRelationshipModeCode = sourceBootscanRelationshipMode === "upgma"
+    ? 1
+    : sourceBootscanRelationshipMode === "neighbor-joining"
+      ? 2
+      : 0;
   const sourceThreeSeqEnabled = options.methods.includes("3Seq");
   const sourceSiScanEnabled = options.methods.includes("SiScan");
   // Every source family below consumes one explicit unordered triplet and
@@ -1251,11 +1270,21 @@ async function analyze(message, emit = postMessage) {
     }
   }
   sourceBootscanTripletCount = sourceBootscanTriplets.length;
-  sourceBootscanUsedPairCount = sourceBootscanPairKeys.size;
+  sourceBootscanUsedPairCount = sourceBootscanRelationshipMode === "distance"
+    ? sourceBootscanPairKeys.size
+    : scanSequenceCount * (scanSequenceCount - 1) / 2;
   if (sourceBootscanEnabled && sourceBootscanReplicates < 2) {
     throw new Error("BootScan requires at least two replicates. Increase Bootstrap replicates or disable BootScan.");
   }
   if (sourceBootscanTripletCount > 0) {
+    emit({
+      type: "progress",
+      jobId,
+      progress: 0,
+      phase: sourceBootscanRelationshipMode === "distance"
+        ? "BootScan · sharing pair distances across concrete triplets"
+        : `BootScan · building full-cohort ${sourceBootscanRelationshipMode} bootstrap trees`,
+    });
     const pairCount = scanSequenceCount * (scanSequenceCount - 1) / 2;
     const outputCapacity = Math.max(128, Math.min(50_000, Math.trunc(options.bootscanSignals ?? 20_000)));
     const bootTripletPtr = align(roleDmaxOutPtr + 40, 16);
@@ -1269,7 +1298,14 @@ async function analyze(message, emit = postMessage) {
     const bootValidPtr = bootDifferencePtr + sourceBootscanReplicates * 4;
     const bootLookupPtr = align(bootValidPtr + sourceBootscanReplicates * 4, 2);
     const bootLookupEntries = (sourceBootscanWindow + 1) * (sourceBootscanWindow + 2) / 2;
-    const bootOutPtr = align(bootLookupPtr + bootLookupEntries * 2, 4);
+    const bootTreeWorkPtr = align(bootLookupPtr + bootLookupEntries * 2, 16);
+    const bootTreeWorkspaceBytes = sourceBootscanRelationshipMode === "distance"
+      ? 0
+      : instance.exports.source_bootscan_tree_workspace_bytes(scanSequenceCount);
+    if (sourceBootscanRelationshipMode !== "distance" && bootTreeWorkspaceBytes <= 0) {
+      throw new Error("BootScan tree relationships exceed the supported active-cohort workspace. Use distance mode or reduce the active sequence set.");
+    }
+    const bootOutPtr = align(bootTreeWorkPtr + bootTreeWorkspaceBytes, 4);
     const bootRequiredBytes = bootOutPtr + outputCapacity * SOURCE_BOOTSCAN_ROW_INTS * 4;
     sourceBootscanWorkspaceBytes = bootRequiredBytes - bootTripletPtr;
     if (sourceBootscanWorkspaceBytes > 512 * 1024 * 1024) {
@@ -1290,6 +1326,7 @@ async function analyze(message, emit = postMessage) {
         sourceBootscanStep,
         sourceBootscanReplicates,
         Math.round(Math.max(0.5, Math.min(0.999, options.bootscanCutoff ?? 0.7)) * 1000),
+        sourceBootscanRelationshipModeCode,
         (options.randomSeed ?? 0x5a17c0de) >>> 0,
         bootPairMapPtr,
         bootPairListPtr,
@@ -1300,17 +1337,18 @@ async function analyze(message, emit = postMessage) {
         bootDifferencePtr,
         bootValidPtr,
         bootLookupPtr,
+        bootTreeWorkPtr,
         bootOutPtr,
         outputCapacity,
       ];
       const total = view.rotation === 0
-        ? instance.exports.scan_source_bootscan_batch_packed(
+        ? instance.exports.scan_source_bootscan_batch_mode_packed(
             packedPtr,
             validityPtr,
             wordsPerSequence,
             ...sharedArguments,
           )
-        : instance.exports.scan_source_bootscan_batch(view.sequencePtr, ...sharedArguments);
+        : instance.exports.scan_source_bootscan_batch_mode(view.sequencePtr, ...sharedArguments);
       const retained = Math.min(outputCapacity, Math.max(0, total));
       if (total > outputCapacity) truncatedBootscanSignals += total - outputCapacity;
       const rowsByTriplet = new Map();
@@ -1785,7 +1823,9 @@ async function analyze(message, emit = postMessage) {
                 const rawStart = row[4];
                 const rawEnd = row[5];
                 if (!(rawEnd - rawStart >= 4 && rawStart >= 0 && rawEnd <= nSites)) continue;
-                const sourceSignal = sourceBootscanSignal(row, view.rotation, nSites);
+                const sourceSignal = sourceBootscanSignal(
+                  row, view.rotation, nSites, sourceBootscanRelationshipMode,
+                );
                 if (sourceSignal.sourceBootscan.rawP > Math.max(Number.MIN_VALUE, options.alpha ?? 0.05)) continue;
                 const sourceRoles = sourceBootscanRoles(row);
                 if (!sourceRoles
@@ -2224,7 +2264,9 @@ async function analyze(message, emit = postMessage) {
       sequencePtr: candidate.sequencePtr,
       rotation: candidate.rotation,
     })) {
-      const signal = sourceBootscanSignal(row, candidate.rotation, nSites);
+      const signal = sourceBootscanSignal(
+        row, candidate.rotation, nSites, sourceBootscanRelationshipMode,
+      );
       if (!isCoLocatedSignal(candidate, signal, nSites)) continue;
       if (!sourceBootscan || signal.sourceBootscan.rawP < sourceBootscan.sourceBootscan.rawP) {
         sourceBootscan = signal;
@@ -2651,6 +2693,8 @@ async function analyze(message, emit = postMessage) {
       appliedEvents: disassembly.appliedEventIds.length,
       components: disassembly.componentCount,
       erasedCanonicalBases: disassembly.erasedCanonicalBases,
+      unresolvedLineageEvents: disassembly.unresolvedLineageEventIds.length,
+      unresolvedLineageEventIds: [...disassembly.unresolvedLineageEventIds],
     },
     rdpSignalTruncations: truncatedRdpSignals,
     geneconvSignalTruncations: truncatedGeneconvSignals,
@@ -2663,7 +2707,7 @@ async function analyze(message, emit = postMessage) {
       windows: Math.floor(nSites / Math.max(1, sourceBootscanStep)) + 2,
       replicates: sourceBootscanReplicates,
       workspaceBytes: sourceBootscanWorkspaceBytes,
-      relationshipMode: "distance",
+      relationshipMode: sourceBootscanRelationshipMode,
     } : undefined,
     tripletKernelCalls: {
       rdp: rdpTripletKernelCalls,
@@ -2687,7 +2731,7 @@ async function analyze(message, emit = postMessage) {
       "WebAssembly",
       options.exhaustive ? "all concrete sequence triplets" : "approximate parent-shortlist triplets",
       exactDistanceMatrix ? "packed distance" : "sampled parent search",
-      `source RDP/GENECONV${sourceBootscanEnabled ? "/BOOTSCAN" : ""}/MAXCHI/CHIMAERA${sourceSiScanEnabled ? "/SISCAN" : ""}${sourceThreeSeqEnabled ? "/3SEQ" : ""}`,
+      `source RDP/GENECONV${sourceBootscanEnabled ? `/BOOTSCAN:${sourceBootscanRelationshipMode}` : ""}/MAXCHI/CHIMAERA${sourceSiScanEnabled ? "/SISCAN" : ""}${sourceThreeSeqEnabled ? "/3SEQ" : ""}`,
       options.circular ? "dual-origin circular scan" : "linear scan",
       options.polishBreakpoints ? (options.burtMode === "manual-step-up" ? "BURT 2–20-state step-up" : "RDP5-source BURT") : "raw breakpoints",
       options.ancestralClustering === false ? "event clustering off" : `${clustered.clusters.length} ancestral clusters`,
@@ -2747,7 +2791,7 @@ function mergeCyclePool(current, incoming, selected, invalidatedOrigins, length)
 async function analyzeCyclic(message) {
   const started = performance.now();
   const selected = [];
-  const applied = Array.isArray(message.disassemblyEvents)
+  let applied = Array.isArray(message.disassemblyEvents)
     ? message.disassemblyEvents.filter((event) => event?.decision === "accepted" && event.evidenceStale !== true)
     : [];
   const preexistingAppliedCount = applied.length;
@@ -2756,6 +2800,7 @@ async function analyzeCyclic(message) {
   let executedPasses = 0;
   let lastResult = null;
   let stoppedBecause = "no-detectable-signals";
+  const heldLineageEventIds = new Set();
   const maximumCycles = Math.max(1, Math.min(1000, Math.trunc(message.options.maximumDetectionCycles ?? 250)));
   const aggregate = {
     comparisons: 0,
@@ -2808,6 +2853,15 @@ async function analyzeCyclic(message) {
       }
     });
     if (!passResult) throw new Error(`Detection pass ${passNumber} did not return a result.`);
+    for (const eventId of passResult.disassembly?.unresolvedLineageEventIds ?? []) {
+      heldLineageEventIds.add(eventId);
+    }
+    if (heldLineageEventIds.size) {
+      // Held nested events are not part of the component state against which
+      // pooled candidates are refreshed. Leaving them in `applied` would make
+      // every candidate appear perpetually stale and spin the redo loop.
+      applied = applied.filter((event) => !heldLineageEventIds.has(event.id));
+    }
     lastResult = passResult;
     executedPasses += 1;
     aggregate.comparisons += passResult.comparisons;
@@ -2915,7 +2969,7 @@ async function analyzeCyclic(message) {
     },
     detectionCycle: {
       enabled: true,
-      eventsApplied: selected.length,
+      eventsApplied: selected.filter((event) => !heldLineageEventIds.has(event.id)).length,
       passes: executedPasses,
       initialComparisons: aggregate.initialComparisons,
       redoComparisons: Math.max(0, aggregate.comparisons - aggregate.initialComparisons),
@@ -2925,6 +2979,8 @@ async function analyzeCyclic(message) {
     disassembly: {
       ...(lastResult.disassembly ?? {}),
       appliedEvents: applied.length,
+      unresolvedLineageEvents: heldLineageEventIds.size,
+      unresolvedLineageEventIds: [...heldLineageEventIds],
     },
     engine: `${lastResult.engine} · sequential erase/extract redo queue (${selected.length} new events; ${preexistingAppliedCount} pre-applied)`,
   });
@@ -3059,6 +3115,15 @@ async function recalculate(message) {
   const roleBackgroundMaskPtr = roleTractMaskPtr + workingPacked.wordsPerSequence * 4;
   const roleDmaxOutPtr = align(roleBackgroundMaskPtr + workingPacked.wordsPerSequence * 4, 8);
   const recalcBootscanEnabled = options.methods.includes("BootScan");
+  const recalcBootscanRelationshipMode = options.bootscanRelationshipMode === "upgma"
+    || options.bootscanRelationshipMode === "neighbor-joining"
+    ? options.bootscanRelationshipMode
+    : "distance";
+  const recalcBootscanRelationshipModeCode = recalcBootscanRelationshipMode === "upgma"
+    ? 1
+    : recalcBootscanRelationshipMode === "neighbor-joining"
+      ? 2
+      : 0;
   const recalcBootscanWindow = Math.max(5, Math.min(32_767, Math.min(Math.floor(nSites / 2), Math.trunc(options.bootscanWindow ?? 200))));
   const recalcBootscanStep = Math.max(1, Math.min(Math.max(1, Math.floor(nSites / 4)), Math.trunc(options.bootscanStep ?? 20)));
   const recalcBootscanReplicates = Math.max(0, Math.min(1000, Math.trunc(options.bootstrapReplicates ?? 100)));
@@ -3066,6 +3131,9 @@ async function recalculate(message) {
     throw new Error("BootScan requires at least two replicates. Increase Bootstrap replicates or disable BootScan.");
   }
   const recalcBootscanPairCount = workingSequenceCount * (workingSequenceCount - 1) / 2;
+  const recalcBootscanUsedPairCount = recalcBootscanRelationshipMode === "distance"
+    ? 3
+    : recalcBootscanPairCount;
   const recalcThreeSeqOutPtr = align(roleDmaxOutPtr + 40, 16);
   const recalcThreeSeqWorkspacePtr = align(recalcThreeSeqOutPtr + 6 * SOURCE_THREE_SEQ_ROW_INTS * 4, 16);
   const recalcThreeSeqWorkspaceBytes = typeof instance.exports.source_three_seq_workspace_bytes === "function"
@@ -3074,10 +3142,10 @@ async function recalculate(message) {
   const recalcBootscanTripletPtr = align(recalcThreeSeqWorkspacePtr + recalcThreeSeqWorkspaceBytes, 16);
   const recalcBootscanPairMapPtr = recalcBootscanTripletPtr + 12;
   const recalcBootscanPairListPtr = recalcBootscanPairMapPtr + recalcBootscanPairCount * 4;
-  const recalcBootscanWeightPtr = align(recalcBootscanPairListPtr + 3 * 8, 2);
+  const recalcBootscanWeightPtr = align(recalcBootscanPairListPtr + recalcBootscanUsedPairCount * 8, 2);
   const recalcBootscanPairDistancePtr = recalcBootscanWeightPtr + recalcBootscanWindow * Math.max(2, recalcBootscanReplicates) * 2;
-  const recalcBootscanGlobalPairPtr = recalcBootscanPairDistancePtr + 3 * Math.max(2, recalcBootscanReplicates) * 2;
-  const recalcBootscanStatePtr = align(recalcBootscanGlobalPairPtr + 3 * 8, 4);
+  const recalcBootscanGlobalPairPtr = recalcBootscanPairDistancePtr + recalcBootscanUsedPairCount * Math.max(2, recalcBootscanReplicates) * 2;
+  const recalcBootscanStatePtr = align(recalcBootscanGlobalPairPtr + recalcBootscanUsedPairCount * 8, 4);
   const recalcBootscanDifferencePtr = recalcBootscanStatePtr + 24;
   const recalcBootscanValidPtr = recalcBootscanDifferencePtr + Math.max(2, recalcBootscanReplicates) * 4;
   const recalcBootscanLookupPtr = align(recalcBootscanValidPtr + Math.max(2, recalcBootscanReplicates) * 4, 2);
@@ -3086,10 +3154,20 @@ async function recalculate(message) {
   // prefix as the complete RDP5 signal ledger.
   const recalcBootscanOutCapacity = 4_096;
   const recalcBootscanLookupEntries = (recalcBootscanWindow + 1) * (recalcBootscanWindow + 2) / 2;
-  const recalcBootscanOutPtr = align(recalcBootscanLookupPtr + recalcBootscanLookupEntries * 2, 4);
+  const recalcBootscanTreeWorkPtr = align(recalcBootscanLookupPtr + recalcBootscanLookupEntries * 2, 16);
+  const recalcBootscanTreeWorkspaceBytes = recalcBootscanRelationshipMode === "distance"
+    ? 0
+    : instance.exports.source_bootscan_tree_workspace_bytes(workingSequenceCount);
+  if (recalcBootscanRelationshipMode !== "distance" && recalcBootscanTreeWorkspaceBytes <= 0) {
+    throw new Error("BootScan tree relationships exceed the supported active-cohort workspace. Use distance mode or reduce the active sequence set.");
+  }
+  const recalcBootscanOutPtr = align(recalcBootscanTreeWorkPtr + recalcBootscanTreeWorkspaceBytes, 4);
   const recalcRequiredBytes = recalcBootscanEnabled
     ? recalcBootscanOutPtr + recalcBootscanOutCapacity * SOURCE_BOOTSCAN_ROW_INTS * 4
     : recalcThreeSeqWorkspacePtr + recalcThreeSeqWorkspaceBytes;
+  if (recalcRequiredBytes > 512 * 1024 * 1024) {
+    throw new Error(`Edited-event recalculation needs ${(recalcRequiredBytes / (1024 * 1024)).toFixed(0)} MiB. Use BootScan distance mode or reduce the active sequence set.`);
+  }
   const requiredPages = Math.ceil(recalcRequiredBytes / 65536);
   const currentPages = instance.exports.memory.buffer.byteLength / 65536;
   if (requiredPages > currentPages) instance.exports.memory.grow(requiredPages - currentPages);
@@ -3281,7 +3359,7 @@ async function recalculate(message) {
     const orderedTriplet = [analysisRecombinant, analysisMajorParent, analysisMinorParent]
       .sort((left, right) => left - right);
     new Int32Array(memory.buffer, recalcBootscanTripletPtr, 3).set(orderedTriplet);
-    const total = instance.exports.scan_source_bootscan_batch_packed(
+    const total = instance.exports.scan_source_bootscan_batch_mode_packed(
       packedPtr,
       validityPtr,
       workingPacked.wordsPerSequence,
@@ -3293,6 +3371,7 @@ async function recalculate(message) {
       recalcBootscanStep,
       recalcBootscanReplicates,
       Math.round(Math.max(0.5, Math.min(0.999, options.bootscanCutoff ?? 0.7)) * 1000),
+      recalcBootscanRelationshipModeCode,
       (options.randomSeed ?? 0x5a17c0de) >>> 0,
       recalcBootscanPairMapPtr,
       recalcBootscanPairListPtr,
@@ -3303,6 +3382,7 @@ async function recalculate(message) {
       recalcBootscanDifferencePtr,
       recalcBootscanValidPtr,
       recalcBootscanLookupPtr,
+      recalcBootscanTreeWorkPtr,
       recalcBootscanOutPtr,
       recalcBootscanOutCapacity,
     );
@@ -3312,7 +3392,9 @@ async function recalculate(message) {
         recalcBootscanOutPtr + index * SOURCE_BOOTSCAN_ROW_INTS * 4,
         SOURCE_BOOTSCAN_ROW_INTS,
       ));
-      const signal = sourceBootscanSignal(row, rotation, nSites);
+      const signal = sourceBootscanSignal(
+        row, rotation, nSites, recalcBootscanRelationshipMode,
+      );
       if (!isCoLocatedSignal(candidate, signal, nSites)) continue;
       if (!recalculatedBootscanSignal
         || signal.sourceBootscan.rawP < recalculatedBootscanSignal.sourceBootscan.rawP) {

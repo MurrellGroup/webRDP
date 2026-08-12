@@ -26,6 +26,11 @@ Options:
   --max-detection-cycles N       safety cap; default 250
   --chi-signals N                MAXCHI/CHIMAERA peak pairs retained/triplet
   --bootstrap N
+  --bootscan-relationship distance|upgma|neighbor-joining
+  --bootscan-window N            source default 200 alignment positions
+  --bootscan-step N              source default 20 alignment positions
+  --bootscan-cutoff P            topology support proportion; default 0.70
+  --bootscan-signals N           raw topology runs copied from shared batch
   --seed N
   --siscan-outgroup nearest|most-divergent|randomized
   --siscan-outgroup-sequence N   (1-based; selects manual mode)
@@ -66,6 +71,7 @@ const requestedOutgroup = option("--siscan-outgroup");
 const manualOutgroup = Number(option("--siscan-outgroup-sequence"));
 const requestedPositions = option("--siscan-positions");
 const requestedGapMode = option("--siscan-gaps");
+const requestedBootscanRelationship = option("--bootscan-relationship");
 const siskanScanPermutations = Math.max(2, Math.min(1000, Number(option("--siscan-scan-permutations") ?? DEFAULT_OPTIONS.siskanScanPermutations)));
 const options = {
   ...DEFAULT_OPTIONS,
@@ -78,7 +84,15 @@ const options = {
   minMethods: Math.min(methods.length, Math.max(1, Number(option("--min-methods") ?? DEFAULT_OPTIONS.minMethods))),
   candidateParents: Math.max(3, Number(option("--candidate-parents") ?? DEFAULT_OPTIONS.candidateParents)),
   chiSignalsPerTriplet: Math.max(1, Math.min(256, Number(option("--chi-signals") ?? DEFAULT_OPTIONS.chiSignalsPerTriplet))),
-  bootstrapReplicates: Math.max(0, Number(option("--bootstrap") ?? DEFAULT_OPTIONS.bootstrapReplicates)),
+  bootstrapReplicates: Math.max(methods.includes("BootScan") ? 2 : 0, Number(option("--bootstrap") ?? DEFAULT_OPTIONS.bootstrapReplicates)),
+  bootscanRelationshipMode: requestedBootscanRelationship === "upgma"
+    || requestedBootscanRelationship === "neighbor-joining"
+    ? requestedBootscanRelationship
+    : "distance" as const,
+  bootscanWindow: Math.max(5, Math.min(Math.floor(alignment.length / 2), Number(option("--bootscan-window") ?? DEFAULT_OPTIONS.bootscanWindow))),
+  bootscanStep: Math.max(1, Math.min(Math.floor(alignment.length / 4), Number(option("--bootscan-step") ?? DEFAULT_OPTIONS.bootscanStep))),
+  bootscanCutoff: Math.max(0.5, Math.min(0.999, Number(option("--bootscan-cutoff") ?? DEFAULT_OPTIONS.bootscanCutoff))),
+  bootscanSignals: Math.max(128, Math.min(50_000, Number(option("--bootscan-signals") ?? DEFAULT_OPTIONS.bootscanSignals))),
   randomSeed: Number(option("--seed") ?? DEFAULT_OPTIONS.randomSeed) >>> 0,
   siskanOutgroupMode: Number.isFinite(manualOutgroup) && manualOutgroup >= 1
     ? "manual" as const
@@ -136,6 +150,8 @@ const metrics = {
   rdpSignalTruncations: Number(message.rdpSignalTruncations) || undefined,
   geneconvSignalTruncations: Number(message.geneconvSignalTruncations) || undefined,
   chiSignalTruncations: Number(message.chiSignalTruncations) || undefined,
+  bootscanSignalTruncations: Number(message.bootscanSignalTruncations) || undefined,
+  bootscanBatch: message.bootscanBatch as NonNullable<Parameters<typeof serializeProject>[0]["metrics"]>["bootscanBatch"],
   tripletKernelCalls: message.tripletKernelCalls as NonNullable<Parameters<typeof serializeProject>[0]["metrics"]>["tripletKernelCalls"],
   detectionCycle: message.detectionCycle as NonNullable<Parameters<typeof serializeProject>[0]["metrics"]>["detectionCycle"],
 };

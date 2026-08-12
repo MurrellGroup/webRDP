@@ -223,3 +223,41 @@ test("stale and rejected events never alter the component alignment", () => {
   assert.deepEqual(disassembly.appliedEventIds, []);
   assert.deepEqual([...disassembly.encoded], [...encoded]);
 });
+
+test("a missing nested lineage is rejected atomically instead of falling back to a remainder", () => {
+  const length = 16;
+  const sequences = Array.from({ length: 3 }, (_, index) => ({ name: `s${index + 1}`, sequence: "A".repeat(length) }));
+  const encoded = new Uint8Array(sequences.length * length);
+  encoded.fill(1);
+  const predecessor = {
+    id: "predecessor",
+    decision: "accepted",
+    evidenceStale: false,
+    recombinant: 0,
+    start: 2,
+    end: 14,
+    coRecombinantSets: [{ presumedRecombinant: 0, sequenceMembers: [0] }],
+  };
+  const unresolvedNested = {
+    id: "unresolved-nested",
+    decision: "accepted",
+    evidenceStale: false,
+    recombinant: 0,
+    start: 6,
+    end: 10,
+    componentProvenance: { recombinant: { lineage: ["predecessor"] } },
+    coRecombinantSets: [{ presumedRecombinant: 0, sequenceMembers: [0, 1] }],
+  };
+  const disassembly = buildDisassembledAlignment(encoded, sequences, length, [predecessor, unresolvedNested]);
+  assert.deepEqual(disassembly.appliedEventIds, ["predecessor"]);
+  assert.deepEqual(disassembly.unresolvedLineageEventIds, ["unresolved-nested"]);
+  assert.equal(disassembly.componentCount, 1);
+  const predecessorComponent = findComponentIndex(disassembly, {
+    originIndex: 0,
+    kind: "extracted-tract",
+    lineage: ["predecessor"],
+  });
+  assert.ok(predecessorComponent >= 0);
+  assert.ok([...row(disassembly, predecessorComponent, length).slice(6, 10)].every((base) => base === 1));
+  assert.ok([...row(disassembly, 1, length)].every((base) => base === 1));
+});

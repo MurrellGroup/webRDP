@@ -23,12 +23,12 @@ simulation results, workflow parity, and browser-scale performance.
   `CalcKMaxP`/`GCCalcPValP`, overlap deletion, independent discovery and exact
   packed/byte paths are operational. Finish desktop golden fixtures and the
   non-default indel, overlap-count and permutation modes.
-- BOOTSCAN/RECSCAN: the author-source default distance batch is operational and
-  independently discovers events. It shares one `SEQBOOT2` table and every
-  requested pair/window `FastBootDistIP` row across the unordered triplet set,
-  applies `GetPltVal2` topology support and triplet-local
-  `MakeScoresBS`/`ProbCalc` evidence, and supports exact recalculation. Finish
-  optional `BSTypeFlag` UPGMA/NJ relationship modes, desktop warning/tie edges,
+- BOOTSCAN/RECSCAN: all three `BSTypeFlag` relationship batches are operational
+  and independently discover events. Distance mode shares sparse requested
+  pairs; UPGMA/NJ modes build each bootstrap tree from every active-cohort pair
+  before reusing its stored tree positions across the unordered triplet set.
+  `GetPltVal2`, triplet-local `MakeScoresBS`/`ProbCalc`, cyclic rescans and exact
+  recalculation all preserve the mode. Finish desktop warning/tree-tie edges,
   circular boundary goldens and the broad executable corpus.
 - MAXCHI and CHIMAERA: source compressed tracks, window rules, 11-position
   smoothing, basin destruction, GrowMChiWin expansion and multi-peak queues are
@@ -97,7 +97,7 @@ simulation results, workflow parity, and browser-scale performance.
   splitting, and structural breakpoint uncertainty are operational; calibrate
   iteration order and per-method uncertainty windows against authorized RDP5
   outputs and add richer ancestral-event propagation semantics.
-- Dedicated tract/combined-background and optional flank/tract/right-flank NJ comparison, six-tree seeded bootstrap/collapse clustering evidence, nearest-context cohorts,
+- Dedicated tract/combined-background and optional flank/tract/right-flank NJ comparison, six-tree seeded bootstrap/collapse clustering evidence, candidate-complete bounded cohorts,
   role highlighting, linked leaf marking, connected SVG geometry, Newick
   export, circular breakpoint pair matrices and seeded hotspot permutations
   are operational; ML, RF/SH/AU, clade editing and association tests remain.

@@ -9,6 +9,7 @@ export const PRIMARY_METHODS = [
 ] as const;
 
 export type MethodName = (typeof PRIMARY_METHODS)[number];
+export type BootscanRelationshipMode = "distance" | "upgma" | "neighbor-joining";
 // Only these families are allowed in production scans until their complete
 // author-source discovery path has been ported. This prevents a simplified
 // stand-in from silently participating in an analysis labelled RDP parity.
@@ -100,7 +101,7 @@ export interface MethodSignal {
     rawP: number;
     window: number;
     step: number;
-    relationshipMode: "distance";
+    relationshipMode: BootscanRelationshipMode;
   };
   sourceThreeSeq?: {
     target: number;
@@ -238,6 +239,8 @@ export interface CoRecombinantSet {
       included: boolean;
       exactSiteBootstrap: boolean;
       sourceScore: number;
+      cohortCount?: number;
+      candidateComplete?: boolean;
     };
     regionEvidence?: Array<{
       pair: string;
@@ -436,6 +439,7 @@ export interface AnalysisOptions {
   bootscanStep: number;
   bootscanCutoff: number;
   bootscanSignals: number;
+  bootscanRelationshipMode: BootscanRelationshipMode;
   threeSeqExactOperations: number;
   siskanOutgroupMode: "nearest" | "most-divergent" | "randomized" | "manual";
   siskanOutgroupSequence: number | null;
@@ -820,7 +824,7 @@ export function demoEvent(): RdpEvent {
       supported: true,
       statistic: [0.82, 31, 0.97, 42.1, 38.6, 9.8, 13.4][index],
       statisticLabel: ["identity shift", "fragment score", "bootstrap topology support", "boundary χ²", "boundary χ²", "Sister-Scanning category/sum Z", "maximum HGRW descent"][index],
-      calibration: ["binomial", "source finite-G fragment / KA", "seeded p-distance bootstrap + window sign", "χ²", "binary-triplet χ²", "RDP5 vertical permutation Z", "exact HGRW first-passage DP"][index],
+      calibration: ["binomial", "source finite-G fragment / KA", "RDP5 RecScan topology bootstrap", "χ²", "binary-triplet χ²", "RDP5 vertical permutation Z", "exact HGRW first-passage DP"][index],
     })),
     chiSquare: 132.4,
     informativeSites: 284,
@@ -1293,6 +1297,7 @@ export const DEFAULT_OPTIONS: AnalysisOptions = {
   bootscanStep: 20,
   bootscanCutoff: 0.7,
   bootscanSignals: 20_000,
+  bootscanRelationshipMode: "distance",
   // Maximum work for an on-demand Seq3PVals-equivalent calculation. Larger
   // walks follow RDP5 GetTSPVal's SiegmundDiscrete branch.
   threeSeqExactOperations: 1_000_000,
@@ -1359,7 +1364,7 @@ export interface RdpProject {
     parentSamples?: number;
     timing?: { distanceMs: number; scanMs: number; statisticsMs: number; diagnosticsMs?: number; clusteringMs?: number };
     diagnostics?: AlignmentDiagnostics;
-    disassembly?: { appliedEvents: number; components: number; erasedCanonicalBases: number };
+    disassembly?: { appliedEvents: number; components: number; erasedCanonicalBases: number; unresolvedLineageEvents?: number; unresolvedLineageEventIds?: string[] };
     rdpSignalTruncations?: number;
     chiSignalTruncations?: number;
     tripletKernelCalls?: { rdp: number; geneconv: number; sourceChi: number; threeSeq: number; siscan: number };
@@ -1371,7 +1376,7 @@ export interface RdpProject {
       windows: number;
       replicates: number;
       workspaceBytes: number;
-      relationshipMode: "distance";
+      relationshipMode: BootscanRelationshipMode;
     };
     geneconvSignalTruncations?: number;
     detectionCycle?: {
@@ -1469,6 +1474,10 @@ export function parseProject(text: string): RdpProject {
     bootscanStep: Math.max(1, Math.min(Math.max(1, Math.floor(alignment.length / 4)), Math.trunc(finiteNumber(rawOptions.bootscanStep, DEFAULT_OPTIONS.bootscanStep)))),
     bootscanCutoff: Math.max(0.5, Math.min(0.999, finiteNumber(rawOptions.bootscanCutoff, DEFAULT_OPTIONS.bootscanCutoff))),
     bootscanSignals: Math.max(128, Math.min(50_000, Math.trunc(finiteNumber(rawOptions.bootscanSignals, DEFAULT_OPTIONS.bootscanSignals)))),
+    bootscanRelationshipMode: rawOptions.bootscanRelationshipMode === "upgma"
+      || rawOptions.bootscanRelationshipMode === "neighbor-joining"
+      ? rawOptions.bootscanRelationshipMode
+      : "distance",
     threeSeqExactOperations: Math.max(10_000, Math.min(20_000_000, Math.trunc(finiteNumber(rawOptions.threeSeqExactOperations, DEFAULT_OPTIONS.threeSeqExactOperations)))),
     siskanOutgroupMode: rawOptions.siskanOutgroupMode === "most-divergent" || rawOptions.siskanOutgroupMode === "randomized" || rawOptions.siskanOutgroupMode === "manual"
       ? rawOptions.siskanOutgroupMode
@@ -1489,7 +1498,7 @@ export function parseProject(text: string): RdpProject {
       Math.max(2, Math.min(1000, Math.trunc(finiteNumber(rawOptions.siskanScanPermutations, DEFAULT_OPTIONS.siskanScanPermutations)))),
       Math.min(10_000, Math.trunc(finiteNumber(rawOptions.siskanPValuePermutations, DEFAULT_OPTIONS.siskanPValuePermutations))),
     ),
-    bootstrapReplicates: Math.max(0, Math.min(1000, Math.trunc(finiteNumber(rawOptions.bootstrapReplicates, DEFAULT_OPTIONS.bootstrapReplicates)))),
+    bootstrapReplicates: Math.max(methods.includes("BootScan") ? 2 : 0, Math.min(1000, Math.trunc(finiteNumber(rawOptions.bootstrapReplicates, DEFAULT_OPTIONS.bootstrapReplicates)))),
     randomSeed: Math.trunc(finiteNumber(rawOptions.randomSeed, DEFAULT_OPTIONS.randomSeed)) >>> 0,
     burtMode: rawOptions.burtMode === "manual-step-up" ? "manual-step-up" : "rdp5-source",
     burtRandomStarts: Math.max(1, Math.min(64, Math.trunc(finiteNumber(rawOptions.burtRandomStarts, DEFAULT_OPTIONS.burtRandomStarts)))),
@@ -1846,7 +1855,10 @@ export function parseProject(text: string): RdpProject {
             rawP: Math.max(Number.MIN_VALUE, Math.min(1, finiteNumber(signal.sourceBootscan.rawP, 1))),
             window: Math.max(5, Math.trunc(finiteNumber(signal.sourceBootscan.window, DEFAULT_OPTIONS.bootscanWindow))),
             step: Math.max(1, Math.trunc(finiteNumber(signal.sourceBootscan.step, DEFAULT_OPTIONS.bootscanStep))),
-            relationshipMode: "distance" as const,
+            relationshipMode: signal.sourceBootscan.relationshipMode === "upgma"
+              || signal.sourceBootscan.relationshipMode === "neighbor-joining"
+              ? signal.sourceBootscan.relationshipMode
+              : "distance" as const,
           } : undefined,
           sourceThreeSeq: signal.sourceThreeSeq && typeof signal.sourceThreeSeq === "object" ? {
             target: Math.max(0, Math.min(alignment.sequences.length - 1, Math.trunc(finiteNumber(signal.sourceThreeSeq.target, finiteNumber(event.recombinant, 0))))),
@@ -1996,6 +2008,8 @@ export function parseProject(text: string): RdpProject {
                 included: entry.treeBootstrap.included === true,
                 exactSiteBootstrap: entry.treeBootstrap.exactSiteBootstrap === true,
                 sourceScore: finiteNumber(entry.treeBootstrap.sourceScore, 0),
+                cohortCount: Math.max(1, Math.trunc(finiteNumber(entry.treeBootstrap.cohortCount, 1))),
+                candidateComplete: entry.treeBootstrap.candidateComplete !== false,
               }
             : undefined;
           const regionEvidence = Array.isArray(entry.regionEvidence) ? entry.regionEvidence.flatMap((region) => {
@@ -2124,7 +2138,10 @@ export function parseProject(text: string): RdpProject {
               windows: Math.max(0, Math.trunc(finiteNumber(rawMetrics.bootscanBatch.windows, 0))),
               replicates: Math.max(0, Math.trunc(finiteNumber(rawMetrics.bootscanBatch.replicates, 0))),
               workspaceBytes: Math.max(0, Math.trunc(finiteNumber(rawMetrics.bootscanBatch.workspaceBytes, 0))),
-              relationshipMode: "distance" as const,
+              relationshipMode: rawMetrics.bootscanBatch.relationshipMode === "upgma"
+                || rawMetrics.bootscanBatch.relationshipMode === "neighbor-joining"
+                ? rawMetrics.bootscanBatch.relationshipMode
+                : "distance" as const,
             }
           : undefined,
         tripletKernelCalls: rawMetrics.tripletKernelCalls && typeof rawMetrics.tripletKernelCalls === "object"
@@ -2191,6 +2208,10 @@ export function parseProject(text: string): RdpProject {
               appliedEvents: Math.max(0, Math.trunc(finiteNumber(rawMetrics.disassembly.appliedEvents, 0))),
               components: Math.max(0, Math.trunc(finiteNumber(rawMetrics.disassembly.components, 0))),
               erasedCanonicalBases: Math.max(0, Math.trunc(finiteNumber(rawMetrics.disassembly.erasedCanonicalBases, 0))),
+              unresolvedLineageEvents: Math.max(0, Math.trunc(finiteNumber(rawMetrics.disassembly.unresolvedLineageEvents, 0))),
+              unresolvedLineageEventIds: Array.isArray(rawMetrics.disassembly.unresolvedLineageEventIds)
+                ? rawMetrics.disassembly.unresolvedLineageEventIds.filter((value): value is string => typeof value === "string").slice(0, 10_000)
+                : [],
             }
           : undefined,
       }

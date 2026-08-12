@@ -8,6 +8,10 @@
 export {
   scan_source_bootscan_batch,
   scan_source_bootscan_batch_packed,
+  scan_source_bootscan_batch_mode,
+  scan_source_bootscan_batch_mode_packed,
+  source_bootscan_tree_workspace_bytes,
+  source_bootscan_transform_tree_relationships,
 } from "./bootscan";
 
 export {

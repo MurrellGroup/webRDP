@@ -24,13 +24,17 @@ active RDP5 VNP-window detector now retains multiple raw excursions per
 triplet, fixed-three-state BURT fitting/backtrace provides posterior breakpoint
 intervals, and accepted events drive the manual's erase/extract/rescan
 component workflow. Signals crossing deleted tracts are split into continuous
-pieces and gap-adjacent breakpoints are marked uncertain. Weighted
+pieces and gap-adjacent breakpoints are marked uncertain. Recorded nested
+component lineages are applied atomically; a missing predecessor holds the
+event visibly rather than erasing a different intact remainder. Weighted
 ancestral-event merging and the all-sequence/all-three-orientation
 co-recombinant screen are ports from the author-supplied desktop source. Its
 phylogenetic set now uses six seeded JC/NJ bootstrap trees with low-support
-branches collapsed; distance-correlation and detectable-signal sets complete
-the configurable 2-of-3 rule, including descendants without their own raw
-detection. Version 0.9.1 replaces the remaining SiScan confirmation surrogate
+branches collapsed. For large alignments, deterministic bounded cohorts retain
+the detecting triplet in every tree and cover every candidate rather than
+silently sampling candidates away; distance-correlation and detectable-signal
+sets complete the configurable 2-of-3 rule, including descendants without
+their own raw detection. Version 0.9.1 replaces the remaining SiScan confirmation surrogate
 with the supplied RDP5 Sister-Scanning path: source 15-category and sum scores,
 tree/direct/manual fourth-sequence selection, horizontal or vertical
 randomization, topology-run enumeration, region shrinkage, and whole-region Z
@@ -102,8 +106,9 @@ hypotheses, confirms co-located signals, recalculates edited events, and
 persists topology/support/window/probability provenance. Sparse preview/query
 batches compact the requested pair set; complete high-identity windows visit
 bootstrap weights only at mismatches. The optional desktop UPGMA/NJ
-relationship transformations and broad executable golden corpus remain parity
-gates and are disclosed in the interface.
+relationship transformations were still parity gates at that checkpoint; the
+0.10.0 section below records their later activation. The broad executable
+golden corpus remains a release gate.
 
 Version 0.9.6 re-enables 3Seq from the author-supplied implementation. A new
 WebAssembly kernel decodes each unordered concrete triplet once and
@@ -151,10 +156,27 @@ enumeration equivalence tests cover windows, regions, shared caches, Z values
 and probabilities. The 12 × 2.4 kb all-220-triplet benchmark improves from
 113.8 to 272.7 complete triplets/s (2.40×) without changing a source result.
 
+Version 0.10.0 completes the three automatic BootScan/RecScan relationship
+choices described by the RDP manual. Distance mode retains sparse requested-
+pair compaction. UPGMA and neighbor-joining modes calculate every pair in the
+active cohort, construct one full-cohort tree for each window and `SEQBOOT2`
+replicate, convert the tree to relative leaf-path positions, and only then
+interpret every concrete triplet with `GetPltVal2`. The same path is used for
+discovery, cyclic affected-triplet rescans, and edited-event recalculation.
+Projects, CSV, evidence ledgers, and performance provenance retain the selected
+mode. Known four-taxon topology matrices, packed/byte equality, legacy-distance
+ABI equality, full-cohort pair coverage, worker discovery, and project
+round-trip regressions guard the port. Packed complete windows now compare
+sixteen sites per word and touch replicate weights only on mismatch lanes;
+missing sites retain the exact scalar fallback. Desktop tree tie/rounding
+goldens remain. See `BOOTSCAN_TREE_MODES.md` for the batch order, complexity,
+regression boundary, and reproducible mode gate.
+
 Scientific integrity takes precedence over a seven-method checkbox count.
 3Seq's author-source walk, wrap, and deleted-signal split paths and
-BootScan/RecScan's author-source distance mode are active; remaining desktop
-coordinate/table goldens and optional tree relationship modes are disclosed.
+BootScan/RecScan's author-source distance, UPGMA, and neighbor-joining modes are
+active; remaining desktop coordinate/table and tree tie/rounding goldens are
+disclosed.
 SiScan now independently screens the same unordered concrete triplets once and
 derives event roles from its baseline-to-run topology change; it does not wait
 for another detector and its former oriented prelocator remains retired. Direct

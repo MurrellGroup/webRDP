@@ -90,3 +90,38 @@ const componentPatch = componentMessage.patch as { componentProvenance: { recomb
 assert.equal(componentPatch.componentProvenance.recombinant.kind, "extracted-tract");
 assert.deepEqual(componentPatch.componentProvenance.recombinant.lineage, [predecessor.id]);
 assert.match(componentPatch.recalculationNote, /signal-disassembly lineage was rebuilt/);
+
+const treeModeResult = new Promise<Record<string, unknown>>((resolve, reject) => {
+  runtime.postMessage = (payload: unknown) => {
+    const treeMessage = payload as Record<string, unknown>;
+    if (treeMessage.type === "recalculated") resolve(treeMessage);
+    if (treeMessage.type === "error") reject(new Error(String(treeMessage.message)));
+  };
+});
+runtime.self.onmessage({
+  data: {
+    type: "recalculate",
+    jobId: 13,
+    alignment: makeDemoAlignment(),
+    options: {
+      ...DEFAULT_OPTIONS,
+      mode: "query-reference",
+      methods: ["BootScan"],
+      bootscanRelationshipMode: "neighbor-joining",
+      bootstrapReplicates: 50,
+      bootscanWindow: 200,
+      bootscanStep: 20,
+      polishBreakpoints: false,
+    },
+    event: { ...demoEvent(), start: 790, end: 1_530, evidenceStale: true },
+    comparisons: 56,
+  },
+});
+const treeModeMessage = await treeModeResult;
+const treeModePatch = treeModeMessage.patch as {
+  methodSignals: Array<{ sourceBootscan?: { relationshipMode: string } }>;
+};
+assert.ok(
+  treeModePatch.methodSignals.some((signal) => signal.sourceBootscan?.relationshipMode === "neighbor-joining"),
+  "edited-event recalculation must preserve the selected full-cohort tree relationship mode",
+);

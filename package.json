@@ -1,6 +1,6 @@
 {
   "name": "rdp-web",
-  "version": "0.9.9",
+  "version": "0.10.0",
   "private": true,
   "engines": {
     "node": ">=22.13.0"
@@ -12,6 +12,7 @@
     "test:ui": "node --test tests/ui-regression.test.mjs && node --import tsx tests/interaction-models.ts",
     "bench:wasm": "node bench/benchmark.mjs",
     "bench:bootscan": "node bench/bootscan-batch.mjs",
+    "bench:bootscan:gate": "RDP_BOOTSCAN_GATE=1 node bench/bootscan-batch.mjs 24 2000 distance && RDP_BOOTSCAN_GATE=1 node bench/bootscan-batch.mjs 24 2000 upgma && RDP_BOOTSCAN_GATE=1 node bench/bootscan-batch.mjs 24 2000 neighbor-joining",
     "bench:three-seq": "node bench/three-seq.mjs",
     "bench:gate": "RDP_PERFORMANCE_GATE=1 node bench/benchmark.mjs 100 10000",
     "github:build": "bash scripts/build-github-pages.sh",

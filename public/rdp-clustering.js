@@ -6,7 +6,7 @@
 // the §4.1.4 three-set procedure then identifies co-recombinant descendants.
 
 import { studentTTwoSided } from "./rdp-statistics.js";
-import { bootstrapTreeDistance, buildEventBootstrapTrees } from "./rdp-bootstrap-tree.js";
+import { bootstrapTreeDistance, buildEventBootstrapTreeCohorts } from "./rdp-bootstrap-tree.js";
 import { identifyRecombinantRoles } from "./rdp-recombinant-identification.js";
 
 function clamp(value, lower, upper) {
@@ -552,6 +552,8 @@ function evaluateCandidate(events, focal, candidateSequence, regionBundle, treeB
       included: phylogeneticPairs.some((pair) => pair.treeExcluded !== true),
       exactSiteBootstrap: phylogeneticPairs.every((pair) => pair.exactSiteBootstrap !== false),
       sourceScore: Math.max(...phylogeneticPairs.map((pair) => pair.sourceScore ?? 0)),
+      cohortCount: treeBundle.cohortCount ?? 1,
+      candidateComplete: treeBundle.candidateComplete !== false,
     } : undefined,
     signal: detectableSignal,
     regionEvidence: phylogeneticPairs.map((pair, index) => ({
@@ -745,8 +747,8 @@ export function inferAncestralEventClusters(events, encoded, sequenceCount, leng
     regionCache.set(event.id, bundle);
     return bundle;
   });
-  const treeBundles = sequenceCount > 3
-    ? output.map((event, eventIndex) => buildEventBootstrapTrees(
+  const treeCohorts = sequenceCount > 3
+    ? output.map((event, eventIndex) => buildEventBootstrapTreeCohorts(
         encoded,
         length,
         sequenceCount,
@@ -756,6 +758,17 @@ export function inferAncestralEventClusters(events, encoded, sequenceCount, leng
         eventIndex,
       ))
     : output.map(() => null);
+  const treeBundles = treeCohorts.map((cohorts) => cohorts?.primary ?? null);
+  const treeBundleForCandidate = (eventIndex, candidate) => {
+    const cohorts = treeCohorts[eventIndex];
+    if (!cohorts) return null;
+    const bundle = cohorts.byTaxon.get(candidate) ?? cohorts.primary;
+    return {
+      ...bundle,
+      cohortCount: cohorts.cohorts.length,
+      candidateComplete: cohorts.candidateComplete,
+    };
+  };
 
   // RDP5 section 4.1.4 deliberately repeats the co-recombinant search with
   // each member of the detecting triplet treated as the presumed recombinant.
@@ -783,7 +796,7 @@ export function inferAncestralEventClusters(events, encoded, sequenceCount, leng
           focal,
           candidate,
           regionBundles[eventIndex],
-          treeBundles[eventIndex],
+          treeBundleForCandidate(eventIndex, candidate),
           encoded,
           length,
           options,
@@ -868,9 +881,9 @@ export function inferAncestralEventClusters(events, encoded, sequenceCount, leng
       // signal-overlap rule is applied to the shorter tract, not both tracts.
       if (overlap.minimum <= minimumSignalOverlap) continue;
       const leftToRight = orientationEvidence[leftIndex].get(leftEvent.recombinant)?.get(rightEvent.recombinant)
-        ?? evaluateCandidate(output, leftEvent, rightEvent.recombinant, regionBundles[leftIndex], treeBundles[leftIndex], encoded, length, options, distanceCache);
+        ?? evaluateCandidate(output, leftEvent, rightEvent.recombinant, regionBundles[leftIndex], treeBundleForCandidate(leftIndex, rightEvent.recombinant), encoded, length, options, distanceCache);
       const rightToLeft = orientationEvidence[rightIndex].get(rightEvent.recombinant)?.get(leftEvent.recombinant)
-        ?? evaluateCandidate(output, rightEvent, leftEvent.recombinant, regionBundles[rightIndex], treeBundles[rightIndex], encoded, length, options, distanceCache);
+        ?? evaluateCandidate(output, rightEvent, leftEvent.recombinant, regionBundles[rightIndex], treeBundleForCandidate(rightIndex, leftEvent.recombinant), encoded, length, options, distanceCache);
       const threeSetSupported = reciprocal
         ? leftToRight.supported && rightToLeft.supported
         : leftToRight.supported || rightToLeft.supported;

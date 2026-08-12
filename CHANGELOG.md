@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.10.0 — 2026-08-12
+
+- Added the RDP manual's UPGMA and neighbor-joining BootScan/RecScan
+  relationship modes beside the existing distance default. These are
+  full-cohort transforms: every active-sequence pair is calculated, one tree is
+  constructed per window × `SEQBOOT2` replicate, and relative leaf-path
+  positions are stored before any concrete triplet is interpreted.
+- Added deterministic in-WASM weighted UPGMA and classic neighbor-joining tree
+  builders with reusable scratch memory and unweighted topology-path extraction.
+  A single tree matrix is reused serially, while its transformed pair rows are
+  shared across every triplet. Distance mode retains sparse pair compaction and
+  its legacy ABI/output exactly.
+- Reworked the packed complete-window path to validate and compare sixteen
+  alignment columns per word, visiting bootstrap weights only for mismatch
+  lanes. Any missing lane restarts the existing exact fallback. Awkward word,
+  alignment-origin, non-multiple-of-16 and missing-data fixtures remain exactly
+  equal to the byte oracle in all three relationship modes.
+- Applied the selected relationship mode consistently to whole-alignment
+  baselines, independent discovery, cyclic affected-triplet rescans, candidate
+  characterization and edited-event recalculation. Projects, CSV, evidence
+  ledgers and batch provenance retain the mode.
+- Replaced the fixed relationship label with an explicit distance / NJ / UPGMA
+  control and a runtime explanation that tree modes require the entire active
+  cohort even when triplet discovery uses an approximate shortlist. The CLI
+  exposes the same mode/window/step/cutoff/run-cap controls and now retains its
+  BootScan batch/truncation provenance in `.rdpweb` output.
+- Added known four-taxon UPGMA/NJ path matrices, legacy-distance equality,
+  full-cohort pair coverage, byte/packed equality, all-three-mode worker
+  discovery, recalculation and project round-trip regressions. The benchmark
+  now accepts a relationship mode; 24 × 2 kb / 2,024-triplet runs remain below
+  one second for all three modes on the development class.
+- Fixed a large-cohort ancestral-event false negative. The tree taxon cap now
+  partitions every non-triplet sequence into deterministic bounded cohorts,
+  retaining the detecting triplet in every cohort and reusing the same seeded
+  region bootstrap stream. No sequence is silently denied phylogenetic
+  co-recombinant evidence merely because it missed one sampled tree; projects
+  and the inspector record candidate completeness and cohort count.
+- Made nested erase/extract lineage addresses atomic. If any selected
+  co-recombinant's recorded predecessor component cannot be rebuilt, the event
+  is held instead of silently falling back to and erasing an unrelated intact
+  remainder. The run audit, project metrics, and Results provenance expose the
+  number of unresolved lineage holds.
+- Remaining BootScan parity gates are now the desktop executable's exact native
+  tree tie/rounding and warning corpus, rather than missing relationship modes.
+
 ## 0.9.9 — 2026-08-12
 
 - Reworked the independent SiScan permutation hot path without changing its

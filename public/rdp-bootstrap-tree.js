@@ -273,6 +273,76 @@ export function buildEventBootstrapTrees(encoded, length, sequenceCount, triplet
   };
 }
 
+// A fixed cohort cap must never turn into a fixed *candidate* cap.  RDP's
+// co-recombinant screen considers every sequence in the active alignment.  For
+// browser-sized tree work, partition the non-triplet taxa into deterministic
+// cohorts while retaining the detecting triplet in every tree.  Each candidate
+// is therefore present in one complete six-tree bundle, and all cohorts reuse
+// the same region-specific bootstrap stream.  This keeps work approximately
+// linear in the number of cohorts instead of silently dropping taxa outside a
+// single sampled tree.
+export function buildEventBootstrapTreeCohorts(
+  encoded,
+  length,
+  sequenceCount,
+  triplet,
+  regionPairs,
+  options = {},
+  eventIndex = 0,
+) {
+  const limit = Math.max(4, Math.min(300, Math.trunc(options.clusterTreeTaxaLimit ?? 32)));
+  const required = [...new Set(triplet)]
+    .filter((taxon) => Number.isInteger(taxon) && taxon >= 0 && taxon < sequenceCount)
+    .sort((left, right) => left - right);
+  if (sequenceCount <= limit || required.length >= sequenceCount) {
+    const primary = buildEventBootstrapTrees(
+      encoded,
+      length,
+      sequenceCount,
+      required,
+      regionPairs,
+      options,
+      eventIndex,
+    );
+    return {
+      primary,
+      cohorts: [primary],
+      byTaxon: new Map(primary.taxa.map((taxon) => [taxon, primary])),
+      candidateComplete: primary.taxa.length === sequenceCount,
+    };
+  }
+
+  const requiredSet = new Set(required);
+  const candidates = Array.from({ length: sequenceCount }, (_, index) => index)
+    .filter((index) => !requiredSet.has(index));
+  const random = xorshift32(mixSeed(options.randomSeed ?? 0x5a17c0de, eventIndex));
+  for (let index = candidates.length - 1; index > 0; index -= 1) {
+    const swap = random() % (index + 1);
+    [candidates[index], candidates[swap]] = [candidates[swap], candidates[index]];
+  }
+  const cohortCapacity = Math.max(1, limit - required.length);
+  const cohorts = [];
+  const byTaxon = new Map();
+  for (let offset = 0; offset < candidates.length; offset += cohortCapacity) {
+    const taxa = [...required, ...candidates.slice(offset, offset + cohortCapacity)]
+      .sort((left, right) => left - right);
+    const bundle = buildEventBootstrapTrees(
+      encoded,
+      length,
+      sequenceCount,
+      taxa,
+      regionPairs,
+      { ...options, clusterTreeTaxaLimit: taxa.length },
+      eventIndex,
+    );
+    cohorts.push(bundle);
+    for (const taxon of taxa) if (!requiredSet.has(taxon)) byTaxon.set(taxon, bundle);
+  }
+  const primary = cohorts[0];
+  for (const taxon of required) byTaxon.set(taxon, primary);
+  return { primary, cohorts, byTaxon, candidateComplete: byTaxon.size === sequenceCount };
+}
+
 export function bootstrapTreeDistance(tree, first, second, collapsed = true) {
   const left = tree?.index.get(first);
   const right = tree?.index.get(second);

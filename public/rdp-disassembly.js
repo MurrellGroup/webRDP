@@ -35,6 +35,7 @@ export function buildDisassembledAlignment(originalEncoded, sequences, length, a
     mapping: { originIndex, kind: "remainder", lineage: [], erasedEventIds: [] },
   }));
   const appliedEventIds = [];
+  const unresolvedLineageEventIds = [];
   let erasedCanonicalBases = 0;
 
   for (const event of acceptedEvents) {
@@ -45,16 +46,32 @@ export function buildDisassembledAlignment(originalEncoded, sequences, length, a
       ? event.componentProvenance.recombinant.lineage.filter((value) => typeof value === "string")
       : [];
     const members = selectedCoRecombinants(event, originalCount);
-    let applied = false;
+    // A recorded nested lineage is an exact evolutionary address. Falling
+    // back to the intact remainder when that address is absent applies the
+    // event to a different history and contaminates every subsequent redo.
+    // Resolve every co-recombinant member first so a lineage-bearing event is
+    // atomic: either all addressed component rows exist, or none are edited.
+    const targets = [];
+    let unresolvedLineage = false;
     for (const originIndex of members) {
       let target = rows.find((row) => row.mapping.originIndex === originIndex
         && sameLineage(row.mapping.lineage, requestedLineage));
-      if (!target) {
+      if (!target && requestedLineage.length === 0) {
         target = rows.find((row) => row.mapping.originIndex === originIndex
           && row.mapping.kind === "remainder");
       }
-      if (!target) continue;
-
+      if (!target) {
+        unresolvedLineage = true;
+        break;
+      }
+      targets.push({ originIndex, target });
+    }
+    if (unresolvedLineage) {
+      unresolvedLineageEventIds.push(event.id);
+      continue;
+    }
+    let applied = false;
+    for (const { originIndex, target } of targets) {
       const component = new Uint8Array(length);
       component.fill(4);
       const componentStructural = new Uint8Array(length);
@@ -111,6 +128,7 @@ export function buildDisassembledAlignment(originalEncoded, sequences, length, a
     mappings: rows.map((row) => row.mapping),
     structuralMasks,
     appliedEventIds,
+    unresolvedLineageEventIds,
     componentCount: rows.length - originalCount,
     erasedCanonicalBases,
   };

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
+import { buildNeighborJoiningPathMatrix } from "../public/rdp-bootstrap-tree.js";
 
 const ROW_INTS = 16;
 
@@ -27,7 +28,12 @@ function pack(sequences) {
   return { packed, validity, wordsPerSequence };
 }
 
-function scan(instance, sequences, triplets, { packedScan = true, seed = 1511506142 } = {}) {
+function scan(instance, sequences, triplets, {
+  packedScan = true,
+  seed = 1511506142,
+  mode = "distance",
+  legacy = false,
+} = {}) {
   const align = (value, multiple = 16) => Math.ceil(value / multiple) * multiple;
   const nSeq = sequences.length;
   const nSites = sequences[0].length;
@@ -51,7 +57,12 @@ function scan(instance, sequences, triplets, { packedScan = true, seed = 1511506
   const lookupPtr = align(validPtr + replicates * 4, 2);
   const outputCapacity = 128;
   const lookupEntries = (window + 1) * (window + 2) / 2;
-  const outPtr = align(lookupPtr + lookupEntries * 2, 4);
+  const modeCode = mode === "upgma" ? 1 : mode === "neighbor-joining" ? 2 : 0;
+  const treeWorkPtr = align(lookupPtr + lookupEntries * 2, 16);
+  const treeWorkspaceBytes = modeCode === 0
+    ? 0
+    : instance.exports.source_bootscan_tree_workspace_bytes(nSeq);
+  const outPtr = align(treeWorkPtr + treeWorkspaceBytes, 4);
   const required = outPtr + outputCapacity * ROW_INTS * 4;
   const missing = Math.ceil((required - instance.exports.memory.buffer.byteLength) / 65_536);
   if (missing > 0) instance.exports.memory.grow(missing);
@@ -62,20 +73,33 @@ function scan(instance, sequences, triplets, { packedScan = true, seed = 1511506
   new Uint32Array(instance.exports.memory.buffer, packedPtr, packedData.packed.length).set(packedData.packed);
   new Uint32Array(instance.exports.memory.buffer, validityPtr, packedData.validity.length).set(packedData.validity);
   new Int32Array(instance.exports.memory.buffer, tripletPtr, triplets.length * 3).set(triplets.flat());
-  const shared = [
+  const legacyShared = [
     nSeq, nSites, tripletPtr, triplets.length, window, step, replicates, 700,
     seed, pairMapPtr, pairListPtr, weightPtr, pairDistancePtr, globalPairPtr, statePtr,
     differencePtr, validPtr, lookupPtr, outPtr, outputCapacity,
   ];
-  const total = packedScan
-    ? instance.exports.scan_source_bootscan_batch_packed(
-        packedPtr, validityPtr, packedData.wordsPerSequence, ...shared,
-      )
-    : instance.exports.scan_source_bootscan_batch(seqPtr, ...shared);
+  const modeShared = [
+    nSeq, nSites, tripletPtr, triplets.length, window, step, replicates, 700,
+    modeCode, seed, pairMapPtr, pairListPtr, weightPtr, pairDistancePtr, globalPairPtr,
+    statePtr, differencePtr, validPtr, lookupPtr, treeWorkPtr, outPtr, outputCapacity,
+  ];
+  const total = legacy
+    ? packedScan
+      ? instance.exports.scan_source_bootscan_batch_packed(
+          packedPtr, validityPtr, packedData.wordsPerSequence, ...legacyShared,
+        )
+      : instance.exports.scan_source_bootscan_batch(seqPtr, ...legacyShared)
+    : packedScan
+      ? instance.exports.scan_source_bootscan_batch_mode_packed(
+          packedPtr, validityPtr, packedData.wordsPerSequence, ...modeShared,
+        )
+      : instance.exports.scan_source_bootscan_batch_mode(seqPtr, ...modeShared);
   const rows = Array.from({ length: Math.min(total, outputCapacity) }, (_, index) => (
     Array.from(new Int32Array(instance.exports.memory.buffer, outPtr + index * ROW_INTS * 4, ROW_INTS))
   ));
-  return { rows, total };
+  const pairMap = new Int32Array(instance.exports.memory.buffer, pairMapPtr, pairCount);
+  const usedPairs = Math.max(-1, ...pairMap) + 1;
+  return { rows, total, usedPairs };
 }
 
 function mosaic(length = 480, decoyBase = 2) {
@@ -140,6 +164,141 @@ test("packed production RecScan equals the byte oracle, is seeded, and ignores u
   assert.deepEqual(packed, byte);
   assert.deepEqual(changedDecoy, packed, "no rest-of-alignment proxy may enter the concrete triplet");
   assert.deepEqual(repeated, packed, "the RDP seed must reproduce the same bootstrap table");
+});
+
+test("the mode-aware distance ABI is exactly backward compatible", async () => {
+  const instance = await engine();
+  const current = scan(instance, mosaic(), [[0, 1, 2]], { mode: "distance" });
+  const legacy = scan(instance, mosaic(), [[0, 1, 2]], { legacy: true });
+  assert.deepEqual(current, legacy);
+});
+
+test("UPGMA and neighbor-joining transform one full-cohort matrix into tree paths", async () => {
+  const instance = await engine();
+  const align = (value, multiple = 16) => Math.ceil(value / multiple) * multiple;
+  const nSeq = 4;
+  const replicates = 1;
+  const pairCount = 6;
+  const pairMapPtr = 65_536;
+  const pairDistancePtr = align(pairMapPtr + pairCount * 4, 2);
+  const treeWorkPtr = align(pairDistancePtr + pairCount * 2, 16);
+  const required = treeWorkPtr + instance.exports.source_bootscan_tree_workspace_bytes(nSeq);
+  const missing = Math.ceil((required - instance.exports.memory.buffer.byteLength) / 65_536);
+  if (missing > 0) instance.exports.memory.grow(missing);
+  new Int32Array(instance.exports.memory.buffer, pairMapPtr, pairCount).set([0, 1, 2, 3, 4, 5]);
+  const sourceDistances = [1, 10, 10, 10, 10, 2]; // 01 and 23 are the two cherries
+  const transform = (modeCode) => {
+    new Uint16Array(instance.exports.memory.buffer, pairDistancePtr, pairCount).set(sourceDistances);
+    instance.exports.source_bootscan_transform_tree_relationships(
+      modeCode, nSeq, replicates, 0, pairMapPtr, pairDistancePtr, treeWorkPtr,
+    );
+    return [...new Uint16Array(instance.exports.memory.buffer, pairDistancePtr, pairCount)];
+  };
+  assert.deepEqual(transform(1), [2, 4, 4, 4, 4, 2], "UPGMA paths must include the midpoint root");
+  assert.deepEqual(transform(2), [2, 3, 3, 3, 3, 2], "NJ paths must retain the cohort split");
+});
+
+test("the WASM NJ transform matches the independent split-path implementation", async () => {
+  const instance = await engine();
+  const align = (value, multiple = 16) => Math.ceil(value / multiple) * multiple;
+  let randomState = 0x4d595df4;
+  const random = () => {
+    randomState ^= randomState << 13;
+    randomState ^= randomState >>> 17;
+    randomState ^= randomState << 5;
+    return randomState >>> 0;
+  };
+  for (let nSeq = 4; nSeq <= 10; nSeq += 1) {
+    const pairCount = nSeq * (nSeq - 1) / 2;
+    const pairMapPtr = 65_536;
+    const pairDistancePtr = align(pairMapPtr + pairCount * 4, 2);
+    const treeWorkPtr = align(pairDistancePtr + pairCount * 2, 16);
+    const required = treeWorkPtr + instance.exports.source_bootscan_tree_workspace_bytes(nSeq);
+    const missing = Math.ceil((required - instance.exports.memory.buffer.byteLength) / 65_536);
+    if (missing > 0) instance.exports.memory.grow(missing);
+    new Int32Array(instance.exports.memory.buffer, pairMapPtr, pairCount)
+      .set(Array.from({ length: pairCount }, (_, index) => index));
+    const triangular = new Uint16Array(pairCount);
+    const square = new Float64Array(nSeq * nSeq);
+    let pair = 0;
+    for (let left = 0; left < nSeq - 1; left += 1) {
+      for (let right = left + 1; right < nSeq; right += 1) {
+        const distance = 1 + (random() % 30_000);
+        triangular[pair++] = distance;
+        square[left * nSeq + right] = distance;
+        square[right * nSeq + left] = distance;
+      }
+    }
+    new Uint16Array(instance.exports.memory.buffer, pairDistancePtr, pairCount).set(triangular);
+    instance.exports.source_bootscan_transform_tree_relationships(
+      2, nSeq, 1, 0, pairMapPtr, pairDistancePtr, treeWorkPtr,
+    );
+    const actual = [...new Uint16Array(instance.exports.memory.buffer, pairDistancePtr, pairCount)];
+    const expectedSquare = buildNeighborJoiningPathMatrix(square, nSeq);
+    const expected = [];
+    for (let left = 0; left < nSeq - 1; left += 1) {
+      for (let right = left + 1; right < nSeq; right += 1) {
+        expected.push(expectedSquare[left * nSeq + right]);
+      }
+    }
+    assert.deepEqual(actual, expected, `NJ split paths must agree for ${nSeq} taxa`);
+  }
+});
+
+test("NJ relationships are inferred in full-cohort context, not from three isolated pairs", async () => {
+  const instance = await engine();
+  const align = (value, multiple = 16) => Math.ceil(value / multiple) * multiple;
+  const nSeq = 4;
+  const pairCount = 6;
+  const pairMapPtr = 65_536;
+  const pairDistancePtr = align(pairMapPtr + pairCount * 4, 2);
+  const treeWorkPtr = align(pairDistancePtr + pairCount * 2, 16);
+  const required = treeWorkPtr + instance.exports.source_bootscan_tree_workspace_bytes(nSeq);
+  const missing = Math.ceil((required - instance.exports.memory.buffer.byteLength) / 65_536);
+  if (missing > 0) instance.exports.memory.grow(missing);
+  new Int32Array(instance.exports.memory.buffer, pairMapPtr, pairCount).set([0, 1, 2, 3, 4, 5]);
+  // Within triplet 0/1/2 the raw distances prefer 0/1 (2,4,4). Taxon 3's
+  // distances alter the four-taxon NJ split, making 0/2 the closest stored
+  // tree relationship. A per-triplet tree or three independent pair screens
+  // cannot produce this result.
+  new Uint16Array(instance.exports.memory.buffer, pairDistancePtr, pairCount)
+    .set([2, 4, 1, 4, 1, 4]);
+  instance.exports.source_bootscan_transform_tree_relationships(
+    2, nSeq, 1, 0, pairMapPtr, pairDistancePtr, treeWorkPtr,
+  );
+  const paths = [...new Uint16Array(instance.exports.memory.buffer, pairDistancePtr, pairCount)];
+  assert.deepEqual(paths, [3, 2, 3, 3, 2, 3]);
+  assert.ok(paths[1] < paths[0] && paths[1] < paths[3]);
+});
+
+test("tree-mode RecScan calculates every cohort pair even for one shortlisted triplet", async () => {
+  const instance = await engine();
+  for (const mode of ["upgma", "neighbor-joining"]) {
+    const packed = scan(instance, mosaic(), [[0, 1, 2]], { mode });
+    const byte = scan(instance, mosaic(), [[0, 1, 2]], { mode, packedScan: false });
+    assert.equal(packed.usedPairs, 6, `${mode} must include all pairs of the four-sequence cohort`);
+    assert.deepEqual(packed, byte, `${mode} packed and byte paths must agree`);
+    assert.ok(packed.rows.some((row) => row[3] === 1), `${mode} must recover the implanted topology`);
+  }
+});
+
+test("16-site packed blocks retain byte-exact missing and circular-boundary behavior", async () => {
+  const instance = await engine();
+  const sequences = mosaic(487).map((sequence) => sequence.slice());
+  const missingSites = [0, 7, 15, 16, 79, 80, 159, 320, 479, 486];
+  for (let sequence = 0; sequence < sequences.length; sequence += 1) {
+    for (let index = sequence; index < missingSites.length; index += 3) {
+      sequences[sequence][missingSites[index]] = 4;
+    }
+  }
+  const triplets = [[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]];
+  for (const mode of ["distance", "upgma", "neighbor-joining"]) {
+    assert.deepEqual(
+      scan(instance, sequences, triplets, { mode }),
+      scan(instance, sequences, triplets, { mode, packedScan: false }),
+      `${mode} packed blocks must match scalar extraction across word/origin boundaries`,
+    );
+  }
 });
 
 test("the batch accepts several triplets while sharing one pair-distance pass", async () => {

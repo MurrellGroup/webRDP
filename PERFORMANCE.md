@@ -54,6 +54,21 @@ This measures WebAssembly kernels in Node, not an RDP5-equivalent seven-program
 analysis. It now includes the production VisRD/dMax path used by source-parity
 recombinant-role consensus, but must not be compared directly with RDP4/RDP5
 wall-clock figures.
+
+BootScan has its own shared-pair/tree benchmark:
+
+```sh
+node bench/bootscan-batch.mjs 24 2000 distance
+node bench/bootscan-batch.mjs 24 2000 upgma
+node bench/bootscan-batch.mjs 24 2000 neighbor-joining
+```
+
+On the same development class, the 2,024-triplet, 102-window, 100-replicate
+workload completed in 712 ms (distance), 733 ms (UPGMA), and 781 ms (NJ).
+Distance mode compacts requested pairs in shortlisted scans. Tree modes require
+all active-cohort pairs but build each tree once per window/replicate and reuse
+its leaf-path matrix across all 2,024 triplets; they never construct a separate
+three-taxon tree for each triplet.
 Browser, device, rendering, and file-parsing costs are not included. The
 synthetic 12 × 2,400 end-to-end module-worker fixture remains an automated
 source-SiScan, bootstrap, challenge-diagnostic and exact-probability workload,
@@ -161,7 +176,7 @@ packed export remains exact regression coverage and a future SIMD target.
   retained and total informative-site counts and never label a bounded result
   as an all-site PHI test.
 - Production discovery currently enables direct-source RDP, six-track
-  GENECONV, distance-mode BootScan/RecScan, MAXCHI/CHIMAERA, SiScan and fused 3Seq
+  GENECONV, distance/UPGMA/NJ BootScan/RecScan, MAXCHI/CHIMAERA, SiScan and fused 3Seq
   paths. Small 3Seq walks use cached exact first-passage results; a cheap
   `SiegmundDiscrete` plausibility screen keeps exact DP work off clearly null
   triplets, and large walks use the same source approximation branch. Source

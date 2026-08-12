@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { inferAncestralEventClusters, sourceCalCr, sourceWeightedEventClusters } from "../public/rdp-clustering.js";
-import { bootstrapTreeDistance, buildBootstrapRegionTree } from "../public/rdp-bootstrap-tree.js";
+import {
+  bootstrapTreeDistance,
+  buildBootstrapRegionTree,
+  buildEventBootstrapTreeCohorts,
+} from "../public/rdp-bootstrap-tree.js";
 
 test("seeded JC/NJ bootstrap retains a strongly supported sister split", () => {
   const length = 200;
@@ -39,6 +43,32 @@ test("GetSupers-compatible weighted merging does not single-link a weak chain", 
     [0.30, 0.05, 0],
   ];
   assert.deepEqual(sourceWeightedEventClusters(distances, 0.1), [[0, 1], [2]]);
+});
+
+test("bounded bootstrap cohorts retain the detecting triplet while covering every candidate", () => {
+  const length = 16;
+  const sequenceCount = 11;
+  const encoded = new Uint8Array(sequenceCount * length);
+  const left = { id: "left", kind: "segments", segments: [[0, 8]] };
+  const right = { id: "right", kind: "segments", segments: [[8, 16]] };
+  const result = buildEventBootstrapTreeCohorts(
+    encoded,
+    length,
+    sequenceCount,
+    [0, 1, 2],
+    [[left, right]],
+    { clusterTreeTaxaLimit: 6, clusterBootstrapReplicates: 0, clusterBootstrapBlocks: 16 },
+    7,
+  );
+  assert.equal(result.candidateComplete, true);
+  assert.equal(result.cohorts.length, 3);
+  assert.equal(result.byTaxon.size, sequenceCount);
+  for (let candidate = 3; candidate < sequenceCount; candidate += 1) {
+    const bundle = result.byTaxon.get(candidate);
+    assert.ok(bundle.taxa.includes(candidate));
+    assert.ok([0, 1, 2].every((member) => bundle.taxa.includes(member)));
+    assert.ok(bundle.taxa.length <= 6);
+  }
 });
 
 function event(id, recombinant, start, end) {
@@ -90,7 +120,11 @@ test("signals in distinct descendant sequences cluster as one ancestral recombin
   assert.equal(result.events[0].coRecombinantSets.length, 3);
   const actualOrientation = result.events[0].coRecombinantSets.find((set) => set.presumedRecombinant === 0);
   assert.deepEqual(actualOrientation.sequenceMembers, [0, 1, 5]);
-  assert.ok(actualOrientation.evidence.some((entry) => entry.sequence === 5 && entry.sets >= 2));
+  const unsignalledDescendant = actualOrientation.evidence.find((entry) => entry.sequence === 5);
+  assert.ok(unsignalledDescendant && unsignalledDescendant.sets >= 2);
+  assert.equal(unsignalledDescendant.treeBootstrap.included, true);
+  assert.equal(unsignalledDescendant.treeBootstrap.candidateComplete, true);
+  assert.equal(unsignalledDescendant.treeBootstrap.cohortCount, 1);
   assert.ok(result.events[0].ancestralCluster.sourceMerge.pairDistances.some((pair) => pair.belowThreshold));
 });
 

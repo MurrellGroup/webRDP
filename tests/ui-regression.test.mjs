@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-const [page, styles, worker, recombinantIdentification, sisterScan, phi, burt] = await Promise.all([
+const [page, styles, worker, recombinantIdentification, sisterScan, phi, burt, cli] = await Promise.all([
   readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
   readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
   readFile(new URL("../public/rdp-worker.js", import.meta.url), "utf8"),
@@ -10,6 +10,7 @@ const [page, styles, worker, recombinantIdentification, sisterScan, phi, burt] =
   readFile(new URL("../public/rdp-siscan.js", import.meta.url), "utf8"),
   readFile(new URL("../public/rdp-phi.js", import.meta.url), "utf8"),
   readFile(new URL("../public/rdp-burt.js", import.meta.url), "utf8"),
+  readFile(new URL("../cli/rdp-web.ts", import.meta.url), "utf8"),
 ]);
 
 test("the false-positive studio uses the source PHI statistic rather than a PHI-labelled surrogate", () => {
@@ -63,6 +64,20 @@ test("source GENECONV owns discovery, controls, and fragment provenance", () => 
   assert.match(worker, /scan_source_geneconv_all_packed/);
   assert.match(worker, /sourceGeneconvTripletKernelCalls/);
   assert.match(worker, /FindSubSeqGCAP6\/7 → GetFragsP → GetMaxFragScoreP/);
+});
+
+test("BootScan exposes full-cohort distance, UPGMA, and neighbor-joining source modes", () => {
+  assert.match(page, /Pairwise distances · fastest/);
+  assert.match(page, /Neighbor-joining trees · recommended tree mode/);
+  assert.match(page, /UPGMA trees/);
+  assert.match(page, /A full active-cohort tree is built once per window × bootstrap replicate/);
+  assert.match(page, /Projected shared-tree workload/);
+  assert.match(worker, /sourceBootscanRelationshipModeCode/);
+  assert.match(worker, /scan_source_bootscan_batch_mode_packed/);
+  assert.match(worker, /source_bootscan_tree_workspace_bytes/);
+  assert.match(worker, /NEIGHBOR\/NJ tree-position transform/);
+  assert.match(cli, /--bootscan-relationship distance\|upgma\|neighbor-joining/);
+  assert.match(cli, /bootscanBatch: message\.bootscanBatch/);
 });
 
 test("source 3Seq owns fused triplet discovery and walk provenance", () => {
@@ -148,7 +163,9 @@ test("source-guided review studio exposes the ordered RDP5 refinement workflow",
   assert.match(page, /Collapse branches below/);
   assert.match(page, /Bootstrap site blocks/);
   assert.match(page, /Tree cohort cap/);
+  assert.match(page, /Every candidate is assigned to a bounded cohort with the detecting triplet/);
   assert.match(page, /Signal-disassembly lineage/);
+  assert.match(page, /lineage hold/);
   assert.match(styles, /\.review-queue-list\s*\{[^}]*overflow:\s*auto/s);
   assert.match(styles, /\.review-workspace\s*\{[^}]*display:\s*grid/s);
   assert.match(styles, /\.role-source-tests\s*\{[^}]*display:\s*grid/s);
